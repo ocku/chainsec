@@ -1,0 +1,3 @@
+[project]
+name = "broken-fixture"
+dependencies = ["requests>=2", "httpx>=0.27"

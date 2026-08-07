@@ -1,0 +1,13 @@
+{
+  // Both URLs contain // as data, not comment delimiters.
+  "imports": {
+    "std/path": "https://deno.land/std@0.224.0/path/mod.ts",
+    "chalk": "npm:chalk@5.3.0",
+    "literal": "value//with-slashes"
+  },
+  "scopes": {
+    "https://example.test/private/": {
+      "client": "https://cdn.example.test/client@1.2.0/mod.ts"
+    }
+  }
+}

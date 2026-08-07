@@ -1,0 +1,10 @@
+target
+.chainsec-cache
+.git
+.github
+Dockerfile*
+README.md
+CHANGELOG.md
+SECURITY.md
+docs
+tests

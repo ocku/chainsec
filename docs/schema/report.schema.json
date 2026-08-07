@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://chainsec.dev/schema/report-1.0.0.json",
+  "title": "chainsec report",
+  "type": "object",
+  "required": ["schema_version", "tool_version", "root", "policy", "packages", "findings", "issues", "statistics"],
+  "properties": {
+    "schema_version": { "const": "1.0.0" },
+    "tool_version": { "type": "string" },
+    "root": { "type": "string" },
+    "policy": { "$ref": "#/$defs/policy" },
+    "packages": { "type": "array", "items": { "$ref": "#/$defs/package" } },
+    "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+    "issues": { "type": "array", "items": { "$ref": "#/$defs/issue" } },
+    "statistics": { "$ref": "#/$defs/statistics" }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "policy": {
+      "type": "object",
+      "required": ["require_lockfile", "offline", "trust_local_input", "allowed_hosts", "limits"],
+      "properties": {
+        "require_lockfile": { "type": "boolean" },
+        "offline": { "type": "boolean" },
+        "trust_local_input": { "type": "boolean" },
+        "allowed_hosts": { "type": "array", "items": { "type": "string" } },
+        "limits": { "$ref": "#/$defs/limits" }
+      },
+      "additionalProperties": false
+    },
+    "limits": {
+      "type": "object",
+      "required": ["max_depth", "max_packages", "max_archive_bytes", "max_extracted_bytes", "max_extracted_files", "max_source_file_bytes", "max_source_files", "max_scan_seconds"],
+      "properties": {
+        "max_depth": { "type": "integer", "minimum": 0 },
+        "max_packages": { "type": "integer", "minimum": 0 },
+        "max_archive_bytes": { "type": "integer", "minimum": 0 },
+        "max_extracted_bytes": { "type": "integer", "minimum": 0 },
+        "max_extracted_files": { "type": "integer", "minimum": 0 },
+        "max_source_file_bytes": { "type": "integer", "minimum": 0 },
+        "max_source_files": { "type": "integer", "minimum": 0 },
+        "max_scan_seconds": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "package": {
+      "type": "object",
+      "required": ["package_id", "source", "source_url", "resolved_version", "digest", "depth", "dependencies", "scanned_files", "scanned_bytes"],
+      "properties": {
+        "package_id": { "type": "string" },
+        "source": { "type": "string" },
+        "source_url": { "type": ["string", "null"] },
+        "resolved_version": { "type": ["string", "null"] },
+        "digest": { "type": ["string", "null"] },
+        "depth": { "type": "integer", "minimum": 0 },
+        "dependencies": { "type": "array", "items": { "type": "string" } },
+        "scanned_files": { "type": "integer", "minimum": 0 },
+        "scanned_bytes": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "finding": {
+      "type": "object",
+      "required": ["id", "rule_id", "rule_version", "finding_type", "risk", "confidence", "rationale", "remediation", "package", "file", "location", "matched_code", "suppressed"],
+      "properties": {
+        "id": { "type": "string" },
+        "rule_id": { "type": "string" },
+        "rule_version": { "type": "integer", "minimum": 0 },
+        "finding_type": { "enum": ["arbitrary_code_execution", "code_obfuscation", "process_execution", "network_access", "filesystem_access", "secret_access", "dynamic_loading", "deserialization", "install_script", "file_analysis"] },
+        "risk": { "enum": ["low", "medium", "high", "critical"] },
+        "confidence": { "enum": ["low", "medium", "high"] },
+        "rationale": { "type": "string" },
+        "remediation": { "type": "string" },
+        "package": { "type": "string" },
+        "file": { "type": "string" },
+        "location": { "$ref": "#/$defs/location" },
+        "matched_code": { "type": "string" },
+        "suppressed": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "location": {
+      "type": "object",
+      "required": ["start_line", "start_column", "end_line", "end_column"],
+      "properties": {
+        "start_line": { "type": "integer", "minimum": 1 },
+        "start_column": { "type": "integer", "minimum": 1 },
+        "end_line": { "type": "integer", "minimum": 1 },
+        "end_column": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "issue": {
+      "type": "object",
+      "required": ["code", "message", "package", "operation", "fatal"],
+      "properties": {
+        "code": { "type": "string" },
+        "message": { "type": "string" },
+        "package": { "type": ["string", "null"] },
+        "operation": { "type": "string" },
+        "fatal": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "statistics": {
+      "type": "object",
+      "required": ["packages", "source_files", "source_bytes", "findings", "cache_hits"],
+      "properties": {
+        "packages": { "type": "integer", "minimum": 0 },
+        "source_files": { "type": "integer", "minimum": 0 },
+        "source_bytes": { "type": "integer", "minimum": 0 },
+        "findings": { "type": "integer", "minimum": 0 },
+        "cache_hits": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    }
+  }
+}

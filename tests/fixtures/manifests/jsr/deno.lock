@@ -1,0 +1,9 @@
+{
+  "version": "4",
+  "specifiers": {"jsr:@std/assert@^1.0.0": "1.0.13"},
+  "jsr": {
+    "@std/assert@1.0.13": {
+      "integrity": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    }
+  }
+}

@@ -1,0 +1,39 @@
+[package]
+name = "chainsec"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+async-trait = "0.1.89"
+base64 = "0.22.1"
+bzip2 = "0.5.2"
+clap = { version = "4.5.47", features = ["derive"] }
+flate2 = "1.1.2"
+globset = "0.4.16"
+futures = "0.3.31"
+hex = "0.4.3"
+node-semver = "2.2.0"
+pep440_rs = "0.7.3"
+regex = "1.11.2"
+reqwest = { version = "0.12.23", default-features = false, features = ["blocking", "rustls-tls"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.143"
+serde_yaml = "0.9.34"
+sha2 = "0.10.9"
+snafu = "0.8.9"
+tar = "0.4.44"
+tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread"] }
+toml = "0.9.5"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+tree-sitter = "0.25.9"
+tree-sitter-javascript = "0.25.0"
+tree-sitter-python = "0.25.0"
+tree-sitter-typescript = "0.23.2"
+url = "2.5.7"
+walkdir = "2.5.0"
+xz2 = "0.1.7"
+zip = { version = "4.6.0", default-features = false, features = ["deflate", "bzip2"] }
+
+[dev-dependencies]
+tempfile = "3.21.0"

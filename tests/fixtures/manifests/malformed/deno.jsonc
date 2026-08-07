@@ -1,0 +1,7 @@
+{
+  // The comment is valid JSONC; the missing comma is not.
+  "imports": {
+    "std/path": "https://deno.land/std/path/mod.ts"
+    "chalk": "npm:chalk@5"
+  }
+}
