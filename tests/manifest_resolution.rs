@@ -31,7 +31,7 @@ fn npm_lockfile_enriches_resolved_artifacts() {
 }
 
 #[test]
-fn poetry_and_deno_locks_are_detected() {
+fn poetry_and_deno_v5_locks_are_detected() {
     let python = manifests::discover(Path::new("tests/fixtures/manifests/python")).unwrap();
     let httpx = python
         .dependencies
@@ -57,6 +57,16 @@ fn poetry_and_deno_locks_are_detected() {
         .find(|dependency| dependency.requirement.starts_with("npm:"))
         .unwrap();
     assert_eq!(chalk.resolved_version.as_deref(), Some("5.3.0"));
+    let path = deno
+        .dependencies
+        .iter()
+        .find(|dependency| dependency.requirement.starts_with("jsr:"))
+        .unwrap();
+    assert_eq!(path.resolved_version.as_deref(), Some("1.0.8"));
+    assert_eq!(
+        path.integrity.as_deref(),
+        Some("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+    );
 }
 
 #[test]

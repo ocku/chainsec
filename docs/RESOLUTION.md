@@ -6,7 +6,7 @@
 | --- | --- | --- | --- |
 | Python | PEP 621 and Poetry dependencies | `poetry.lock`, `Pipfile.lock`, `uv.lock`, `pdm.lock` | wheels, ZIP, `.tar`, `.tar.gz`, `.tar.bz2`, `.tar.xz` |
 | npm | dependencies, optional dependencies, peer dependencies | npm lock/shrinkwrap 1–3, Yarn Classic, Yarn Berry 4–8, pnpm 5.3/5.4/6/9 | integrity-checked npm tarballs |
-| Deno | JSON/JSONC imports and scoped imports | `deno.lock` versions 1–4 | bounded HTTP(S) graphs, locked npm tarballs, and manifest-verified JSR packages |
+| Deno | JSON/JSONC imports and scoped imports | `deno.lock` versions 1–5 | bounded HTTP(S) graphs, locked npm tarballs, and manifest-verified JSR packages |
 | GitHub | npm and Python Git declarations pinned to a full commit | declaration or supported package lock | bounded `codeload.github.com` source archives |
 
 Deno URL graphs are syntax-aware rather than full Deno runtime resolution: static HTTP(S) and URL-relative literals in imports, exports, and dynamic `import()` calls are followed. Bare specifiers, `npm:`, `jsr:`, non-HTTP schemes, computed/template expressions, escaped literals, and custom-loader resolution are not expanded by the URL graph fetcher; `npm:` and `jsr:` dependencies are handled only when represented as supported manifest or lockfile entries.

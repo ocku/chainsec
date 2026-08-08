@@ -3,6 +3,12 @@
 All notable changes are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Before `1.0.0`, minor releases may contain breaking API changes; report schema changes are explicitly versioned.
 
 
+## [0.2.1]
+
+### Fixed
+
+- Accept Deno lockfile version 5 for locked dependency resolution.
+
 ## [0.2.0]
 
 ### Breaking changes

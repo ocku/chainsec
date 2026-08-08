@@ -81,7 +81,7 @@ fn validate_lockfile_version(path: &Path, lockfile: &JsonValue) -> Result<()> {
         .get("version")
         .and_then(JsonValue::as_str)
         .unwrap_or("1");
-    if matches!(version, "1" | "2" | "3" | "4") {
+    if matches!(version, "1" | "2" | "3" | "4" | "5") {
         return Ok(());
     }
     Err(manifest_error(
