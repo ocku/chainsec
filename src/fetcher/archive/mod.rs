@@ -89,9 +89,41 @@ pub(super) fn extract(
     }
 }
 
-fn reject_symlink_components(path: &Path, archive: &Path, context: &str) -> Result<()> {
-    let mut current = PathBuf::new();
-    for component in path.components() {
+fn reject_symlink_components(
+    destination: &Path,
+    output: &Path,
+    archive: &Path,
+    context: &str,
+) -> Result<()> {
+    let relative = output
+        .strip_prefix(destination)
+        .map_err(|_| Error::Extraction {
+            archive: archive.to_owned(),
+            message: format!(
+                "extracted path {} is outside destination {}",
+                output.display(),
+                destination.display()
+            ),
+        })?;
+    let mut current = destination.to_owned();
+    match fs::symlink_metadata(&current) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(Error::Extraction {
+                archive: archive.to_owned(),
+                message: format!("symlinked extraction root {}", current.display()),
+            });
+        }
+        Ok(_) => {}
+        Err(source) => {
+            return Err(Error::Io {
+                operation: context.to_owned(),
+                path: current,
+                source,
+            });
+        }
+    }
+
+    for component in relative.components() {
         current.push(component.as_os_str());
         match fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -129,20 +161,20 @@ fn reject_duplicate_path(seen: &mut HashSet<PathBuf>, path: &Path, archive: &Pat
     })
 }
 
-fn create_extracted_directory(output: &Path, archive: &Path) -> Result<()> {
-    reject_symlink_components(output, archive, "inspect extracted directory")?;
+fn create_extracted_directory(destination: &Path, output: &Path, archive: &Path) -> Result<()> {
+    reject_symlink_components(destination, output, archive, "inspect extracted directory")?;
     fs::create_dir_all(output).map_err(|source| Error::Io {
         operation: "create extracted directory".to_owned(),
         path: output.to_owned(),
         source,
     })?;
-    reject_symlink_components(output, archive, "inspect extracted directory")
+    reject_symlink_components(destination, output, archive, "inspect extracted directory")
 }
 
 fn write_extracted_file<R: Read>(
     reader: &mut R,
     declared_size: u64,
-    path: &Path,
+    destination: &Path,
     output: &Path,
     archive: &Path,
     stats: &mut ExtractionStats,
@@ -159,7 +191,7 @@ fn write_extracted_file<R: Read>(
             source,
         })?;
     }
-    reject_symlink_components(output, archive, "inspect extracted path")?;
+    reject_symlink_components(destination, output, archive, "inspect extracted path")?;
 
     let mut file = create_extracted_file(output).map_err(|source| Error::Io {
         operation: "create extracted file".to_owned(),
@@ -177,7 +209,7 @@ fn write_extracted_file<R: Read>(
             archive: archive.to_owned(),
             message: format!(
                 "extracted file {} has {} bytes, expected {}",
-                path.display(),
+                output.strip_prefix(destination).unwrap_or(output).display(),
                 copied,
                 declared_size
             ),
@@ -236,14 +268,14 @@ fn extract_tar<R: Read>(
         }
         let output = destination.join(&path);
         if kind.is_dir() {
-            create_extracted_directory(&output, Path::new(name))?;
+            create_extracted_directory(destination, &output, Path::new(name))?;
             continue;
         }
         let entry_size = entry.size();
         write_extracted_file(
             &mut entry,
             entry_size,
-            &path,
+            destination,
             &output,
             Path::new(name),
             &mut stats,
@@ -293,14 +325,14 @@ fn extract_zip(bytes: &[u8], destination: &Path, limits: &EngineLimits) -> Resul
         }
         let output = destination.join(&path);
         if entry.is_dir() {
-            create_extracted_directory(&output, Path::new("zip"))?;
+            create_extracted_directory(destination, &output, Path::new("zip"))?;
             continue;
         }
         let entry_size = entry.size();
         write_extracted_file(
             &mut entry,
             entry_size,
-            &path,
+            destination,
             &output,
             Path::new("zip"),
             &mut stats,

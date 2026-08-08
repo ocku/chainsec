@@ -136,6 +136,7 @@ fn global_config_is_complementary_and_repository_config_takes_precedence() {
         .arg(project.path())
         .args(["--cache", cache.path().to_str().unwrap()])
         .env("HOME", home.path())
+        .env_remove("XDG_CONFIG_HOME")
         .output()
         .unwrap();
 
@@ -215,6 +216,7 @@ fn allowed_hosts_extend_across_global_project_and_cli_configuration() {
             "shared.example",
         ])
         .env("HOME", home.path())
+        .env_remove("XDG_CONFIG_HOME")
         .output()
         .unwrap();
 
