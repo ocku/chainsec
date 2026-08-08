@@ -3,7 +3,6 @@ name: CI
 on:
   push:
   pull_request:
-    types: [opened, synchronize, reopened, closed]
 
 permissions:
   contents: read
@@ -40,7 +39,6 @@ jobs:
 
       - name: Build release binary
         run: cargo build --release --locked
-
 
   audit:
     name: Dependency audit
