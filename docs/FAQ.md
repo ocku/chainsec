@@ -64,4 +64,4 @@ No. Static analysis reduces risk but is not a malware-containment boundary and d
 
 ## Which ecosystems and lockfiles are supported?
 
-Python (PEP 621 and Poetry declarations; `poetry.lock`, `Pipfile.lock`, `uv.lock`, `pdm.lock`), npm (lock/shrinkwrap 1–3, Yarn Classic, Yarn Berry 4–8, pnpm 5.3/5.4/6/9), Deno (`deno.lock` versions 1–4), and public GitHub full-commit references. See [Dependency resolution and acquisition](RESOLUTION.md) for details and limitations.
+Python (PEP 621 and Poetry declarations; `poetry.lock`, `Pipfile.lock`, `uv.lock`, `pdm.lock`), npm (lock/shrinkwrap 1–3, Yarn Classic, Yarn Berry 4–8, pnpm 5.3/5.4/6/9), Deno (`deno.lock` versions 1–5), and public GitHub full-commit references. See [Dependency resolution and acquisition](RESOLUTION.md) for details and limitations.
