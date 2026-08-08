@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::LazyLock};
+use std::{collections::HashMap, hash::Hash, sync::LazyLock};
 
 use regex::Regex;
 use url::Url;
@@ -41,16 +41,34 @@ pub(super) fn has_high_entropy(literal: &[u8], matcher: &EntropyMatcher) -> bool
         return false;
     }
 
+    shannon_entropy(value.chars()) >= matcher.minimum_entropy
+}
+
+/// Calculates Shannon entropy in bits per observed symbol.
+///
+/// Callers choose the symbol type: string literals use Unicode scalar values,
+/// while file analysis uses raw bytes.
+pub(super) fn shannon_entropy<T>(symbols: impl IntoIterator<Item = T>) -> f64
+where
+    T: Eq + Hash,
+{
     let mut frequencies = HashMap::new();
-    for character in value.chars() {
-        *frequencies.entry(character).or_insert(0usize) += 1;
+    let mut length = 0usize;
+
+    for symbol in symbols {
+        *frequencies.entry(symbol).or_insert(0usize) += 1;
+        length += 1;
     }
+
+    if length == 0 {
+        return 0.0;
+    }
+
     let length = length as f64;
-    let entropy = frequencies.values().fold(0.0, |entropy, count| {
+    frequencies.values().fold(0.0, |entropy, count| {
         let probability = *count as f64 / length;
         entropy - probability * probability.log2()
-    });
-    entropy >= matcher.minimum_entropy
+    })
 }
 
 fn is_character_sequence(value: &str) -> bool {
@@ -130,4 +148,21 @@ fn looks_like_format_string(value: &str) -> bool {
 
 fn looks_like_sentence(value: &str) -> bool {
     value.chars().any(char::is_whitespace) && matches!(value.chars().last(), Some('.' | '!' | '?'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shannon_entropy;
+
+    #[test]
+    fn calculates_shannon_entropy_for_arbitrary_symbols() {
+        assert_eq!(shannon_entropy("aaaa".chars()), 0.0);
+        assert!((shannon_entropy("aabb".chars()) - 1.0).abs() < f64::EPSILON);
+        assert!((shannon_entropy(0_u8..=255) - 8.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn empty_input_has_zero_entropy() {
+        assert_eq!(shannon_entropy(std::iter::empty::<u8>()), 0.0);
+    }
 }

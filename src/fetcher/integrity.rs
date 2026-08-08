@@ -1,4 +1,9 @@
-use std::{fs::File, io::Read, path::Path};
+use std::{
+    fmt::Display,
+    fs::File,
+    io::{self, Read},
+    path::Path,
+};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use sha2::{Digest, Sha256, Sha512};
@@ -8,25 +13,58 @@ use crate::{
     model::EngineLimits,
 };
 
+const CACHE_VALIDATION: &str = "cache validation";
+const ARTIFACT_VERIFICATION: &str = "artifact verification";
+
+fn cache_validation_error(message: impl Display) -> Error {
+    Error::Policy {
+        operation: CACHE_VALIDATION.to_owned(),
+        message: message.to_string(),
+    }
+}
+
+fn cached_file_error(path: &Path, source: io::Error) -> Error {
+    Error::Io {
+        operation: "validate cached file".to_owned(),
+        path: path.to_owned(),
+        source,
+    }
+}
+
+fn matches_sha256_hex(bytes: &[u8], expected: &str) -> bool {
+    expected.len() == 64
+        && expected.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && hex::encode(Sha256::digest(bytes)).eq_ignore_ascii_case(expected)
+}
+
+fn matches_integrity(bytes: &[u8], expected: &str) -> bool {
+    if let Some(value) = expected.strip_prefix("sha256:") {
+        matches_sha256_hex(bytes, value)
+    } else if let Some(value) = expected.strip_prefix("sha256-") {
+        STANDARD.encode(Sha256::digest(bytes)) == value
+    } else if let Some(value) = expected.strip_prefix("sha512-") {
+        STANDARD.encode(Sha512::digest(bytes)) == value
+    } else {
+        matches_sha256_hex(bytes, expected)
+    }
+}
+
 pub(super) fn hash_tree(root: &Path, limits: &EngineLimits) -> Result<String> {
     let mut files = walkdir::WalkDir::new(root)
         .follow_links(false)
         .into_iter()
         .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|error| Error::Policy {
-            operation: "cache validation".to_owned(),
-            message: error.to_string(),
-        })?;
+        .map_err(cache_validation_error)?;
     files.sort_by(|left, right| left.path().cmp(right.path()));
     let mut digest = Sha256::new();
     let mut file_count = 0u64;
     let mut total = 0u64;
     for entry in files {
         if entry.file_type().is_symlink() {
-            return Err(Error::Policy {
-                operation: "cache validation".to_owned(),
-                message: format!("symlink rejected: {}", entry.path().display()),
-            });
+            return Err(cache_validation_error(format!(
+                "symlink rejected: {}",
+                entry.path().display()
+            )));
         }
         if !entry.file_type().is_file() {
             continue;
@@ -41,24 +79,16 @@ pub(super) fn hash_tree(root: &Path, limits: &EngineLimits) -> Result<String> {
         let relative = entry
             .path()
             .strip_prefix(root)
-            .map_err(|error| Error::Policy {
-                operation: "cache validation".to_owned(),
-                message: error.to_string(),
-            })?;
+            .map_err(cache_validation_error)?;
         digest.update(relative.to_string_lossy().as_bytes());
         digest.update([0]);
-        let mut file = File::open(entry.path()).map_err(|source| Error::Io {
-            operation: "validate cached file".to_owned(),
-            path: entry.path().to_owned(),
-            source,
-        })?;
+        let mut file =
+            File::open(entry.path()).map_err(|source| cached_file_error(entry.path(), source))?;
         let mut buffer = [0u8; 16 * 1024];
         loop {
-            let count = file.read(&mut buffer).map_err(|source| Error::Io {
-                operation: "validate cached file".to_owned(),
-                path: entry.path().to_owned(),
-                source,
-            })?;
+            let count = file
+                .read(&mut buffer)
+                .map_err(|source| cached_file_error(entry.path(), source))?;
             if count == 0 {
                 break;
             }
@@ -79,22 +109,11 @@ pub(super) fn hash_tree(root: &Path, limits: &EngineLimits) -> Result<String> {
 pub(super) fn verify_integrity(bytes: &[u8], expected: Option<&str>, source: &str) -> Result<()> {
     let Some(expected) = expected else {
         return Err(Error::Policy {
-            operation: "artifact verification".to_owned(),
+            operation: ARTIFACT_VERIFICATION.to_owned(),
             message: format!("{source} has no expected integrity"),
         });
     };
-    let valid = if let Some(value) = expected.strip_prefix("sha256:") {
-        hex::encode(Sha256::digest(bytes)).eq_ignore_ascii_case(value)
-    } else if let Some(value) = expected.strip_prefix("sha256-") {
-        STANDARD.encode(Sha256::digest(bytes)) == value
-    } else if let Some(value) = expected.strip_prefix("sha512-") {
-        STANDARD.encode(Sha512::digest(bytes)) == value
-    } else if expected.len() == 64 && expected.chars().all(|c| c.is_ascii_hexdigit()) {
-        hex::encode(Sha256::digest(bytes)).eq_ignore_ascii_case(expected)
-    } else {
-        false
-    };
-    if valid {
+    if matches_integrity(bytes, expected) {
         Ok(())
     } else {
         Err(Error::Fetch {
@@ -106,12 +125,10 @@ pub(super) fn verify_integrity(bytes: &[u8], expected: Option<&str>, source: &st
 }
 
 pub(super) fn verify_jsr_checksum(bytes: &[u8], expected: &str, source: &str) -> Result<()> {
-    let valid = expected
+    if expected
         .strip_prefix("sha256-")
-        .filter(|value| value.len() == 64)
-        .filter(|value| value.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .is_some_and(|value| hex::encode(Sha256::digest(bytes)).eq_ignore_ascii_case(value));
-    if valid {
+        .is_some_and(|value| matches_sha256_hex(bytes, value))
+    {
         Ok(())
     } else {
         Err(Error::Fetch {

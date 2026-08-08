@@ -1,0 +1,4 @@
+[project]
+name = "uv-fixture"
+version = "0.1.0"
+dependencies = ["httpx>=0.27"]

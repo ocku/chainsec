@@ -1,8 +1,10 @@
 mod archive;
 mod cache;
-mod deno;
+mod credentials;
 mod integrity;
 mod network;
+mod repository;
+mod sources;
 
 use std::{
     fs,
@@ -11,19 +13,14 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use async_trait::async_trait;
-use reqwest::{blocking::Client, redirect::Policy};
-use sha2::{Digest, Sha256};
-
 use crate::{
     error::{Error, Result},
     model::{Dependency, Ecosystem, EngineLimits, FetchMetadata},
 };
+use async_trait::async_trait;
+use reqwest::{Client, redirect::Policy};
 
-use self::{
-    archive::{extract, single_root_or_self},
-    integrity::verify_integrity,
-};
+pub use repository::ArtifactRepositories;
 
 static TEMPORARY_DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -32,6 +29,7 @@ pub struct FetchPolicy {
     pub offline: bool,
     pub allow_unlocked: bool,
     pub allowed_hosts: Vec<String>,
+    pub repositories: ArtifactRepositories,
     pub request_timeout: Duration,
     pub max_redirects: usize,
     pub max_deno_modules: usize,
@@ -44,6 +42,7 @@ impl Default for FetchPolicy {
             offline: true,
             allow_unlocked: false,
             allowed_hosts: Vec::new(),
+            repositories: ArtifactRepositories::default(),
             request_timeout: Duration::from_secs(30),
             max_redirects: 5,
             max_deno_modules: 1_000,
@@ -64,18 +63,41 @@ fn host_is_allowed(host: &str, allowed_hosts: &[String]) -> bool {
 }
 
 #[async_trait]
-pub trait SourceFetcher: Sync {
+pub trait Fetcher: Sync {
     async fn fetch(&self, dependency: Dependency, declared_from: PathBuf) -> Result<FetchMetadata>;
 }
 
-pub struct SafeSourceFetcher {
+pub struct SourceFetcher {
     cache: PathBuf,
     policy: FetchPolicy,
     limits: EngineLimits,
     client: Option<Client>,
 }
 
-impl SafeSourceFetcher {
+impl SourceFetcher {
+    /// Builds the async HTTP client, or returns `None` in offline mode.
+    fn build_client(policy: &FetchPolicy) -> Option<Result<Client>> {
+        if policy.offline {
+            return None;
+        }
+        let request_timeout = policy.request_timeout;
+        Some(
+            Client::builder()
+                .timeout(request_timeout)
+                .no_proxy()
+                // Redirects are handled by `network::download` so credentials are
+                // re-evaluated for every destination instead of forwarded by the client.
+                .redirect(Policy::none())
+                .user_agent(concat!("chainsec/", env!("CARGO_PKG_VERSION")))
+                .build()
+                .map_err(|error| Error::InvalidConfiguration {
+                    message: error.to_string(),
+                }),
+        )
+    }
+}
+
+impl SourceFetcher {
     pub fn new(cache: PathBuf, policy: FetchPolicy, limits: EngineLimits) -> Result<Self> {
         fs::create_dir_all(&cache).map_err(|source| Error::Io {
             operation: "create cache directory".to_owned(),
@@ -87,44 +109,7 @@ impl SafeSourceFetcher {
             path: cache,
             source,
         })?;
-        let client = if policy.offline {
-            None
-        } else {
-            let redirects = policy.max_redirects;
-            let redirect_hosts = policy.allowed_hosts.clone();
-            let request_timeout = policy.request_timeout;
-            // reqwest's blocking client creates a private Tokio runtime. Construct it
-            // outside the caller's runtime so its setup never blocks an async worker.
-            let client = std::thread::spawn(move || {
-                Client::builder()
-                    .timeout(request_timeout)
-                    .no_proxy()
-                    .redirect(Policy::custom(move |attempt| {
-                        let url = attempt.url();
-                        let allowed = matches!(url.scheme(), "http" | "https")
-                            && url
-                                .host_str()
-                                .is_some_and(|host| host_is_allowed(host, &redirect_hosts));
-                        if !allowed {
-                            attempt.error("redirect target is not allowed by network policy")
-                        } else if attempt.previous().len() >= redirects {
-                            attempt.error("redirect limit exceeded")
-                        } else {
-                            attempt.follow()
-                        }
-                    }))
-                    .user_agent(concat!("chainsec/", env!("CARGO_PKG_VERSION")))
-                    .build()
-            })
-            .join()
-            .map_err(|_| Error::InvalidConfiguration {
-                message: "HTTP client builder thread panicked".to_owned(),
-            })?
-            .map_err(|error| Error::InvalidConfiguration {
-                message: error.to_string(),
-            })?;
-            Some(client)
-        };
+        let client = Self::build_client(&policy).transpose()?;
         Ok(Self {
             cache,
             policy,
@@ -132,57 +117,38 @@ impl SafeSourceFetcher {
             client,
         })
     }
-}
 
-impl Drop for SafeSourceFetcher {
-    fn drop(&mut self) {
-        if let Some(client) = self.client.take() {
-            // reqwest's blocking client owns an internal runtime, which must not
-            // be dropped from a Tokio worker thread.
-            let _ = std::thread::spawn(move || drop(client)).join();
+    /// Fetches an explicitly requested remote package root.
+    ///
+    /// Unlike discovered dependencies, a remote root is intentionally allowed to
+    /// resolve through its registry without a lockfile. Its discovered dependencies
+    /// still use the normal fetch policy.
+    pub async fn fetch_remote_root(&self, dependency: Dependency) -> Result<FetchMetadata> {
+        let mut dependency = dependency;
+        self.resolve_remote_root(&mut dependency).await?;
+
+        if !dependency.is_resolved() {
+            return Err(Error::Resolution {
+                package: dependency.id(),
+                message: "remote root has no resolved version and integrity".to_owned(),
+            });
         }
+        if let Some(cached) = self.cached(&dependency) {
+            return Ok(cached);
+        }
+
+        self.fetch_remote_dependency(&dependency).await
     }
 }
 
 #[async_trait]
-impl SourceFetcher for SafeSourceFetcher {
+impl Fetcher for SourceFetcher {
     async fn fetch(&self, dependency: Dependency, declared_from: PathBuf) -> Result<FetchMetadata> {
-        let package = dependency.id();
-        let source_url = dependency
-            .source_url
-            .clone()
-            .unwrap_or_else(|| dependency.requirement.clone());
-        let worker = self.clone_for_worker();
-        tokio::task::spawn_blocking(move || worker.fetch_blocking(&dependency, &declared_from))
-            .await
-            .map_err(|error| Error::Fetch {
-                package,
-                source_url,
-                message: format!("fetch worker failed: {error}"),
-            })?
-    }
-}
-
-impl SafeSourceFetcher {
-    fn clone_for_worker(&self) -> Self {
-        Self {
-            cache: self.cache.clone(),
-            policy: self.policy.clone(),
-            limits: self.limits.clone(),
-            client: self.client.clone(),
-        }
-    }
-
-    fn fetch_blocking(
-        &self,
-        dependency: &Dependency,
-        declared_from: &Path,
-    ) -> Result<FetchMetadata> {
-        let mut dependency = dependency.clone();
-        self.resolve_unlocked_dependency(&mut dependency)?;
+        let mut dependency = dependency;
+        self.resolve_unlocked_dependency(&mut dependency).await?;
 
         if dependency.is_local() {
-            return self.fetch_local_dependency(&dependency, declared_from);
+            return self.fetch_local_dependency(&dependency, &declared_from);
         }
         if !dependency.is_resolved() {
             return Err(Error::Resolution {
@@ -194,10 +160,30 @@ impl SafeSourceFetcher {
             return Ok(cached);
         }
 
-        self.fetch_remote_dependency(&dependency)
+        self.fetch_remote_dependency(&dependency).await
+    }
+}
+
+impl SourceFetcher {
+    async fn resolve_remote_root(&self, dependency: &mut Dependency) -> Result<()> {
+        if dependency.is_resolved() {
+            return Ok(());
+        }
+
+        match dependency.ecosystem {
+            Ecosystem::Python => self.resolve_unlocked_python(dependency).await,
+            Ecosystem::Npm => self.resolve_unlocked_npm(dependency).await,
+            Ecosystem::Deno if dependency.requirement.starts_with("jsr:") => {
+                self.resolve_unlocked_jsr(dependency).await
+            }
+            Ecosystem::Deno => Err(Error::Resolution {
+                package: dependency.id(),
+                message: "unsupported remote root source".to_owned(),
+            }),
+        }
     }
 
-    fn resolve_unlocked_dependency(&self, dependency: &mut Dependency) -> Result<()> {
+    async fn resolve_unlocked_dependency(&self, dependency: &mut Dependency) -> Result<()> {
         if dependency.is_local()
             || dependency.is_resolved()
             || !self.policy.allow_unlocked
@@ -207,64 +193,24 @@ impl SafeSourceFetcher {
         }
 
         match dependency.ecosystem {
-            Ecosystem::Python => self.resolve_unlocked_python(dependency),
-            Ecosystem::Npm => self.resolve_unlocked_npm(dependency),
+            Ecosystem::Python => self.resolve_unlocked_python(dependency).await,
+            Ecosystem::Npm => self.resolve_unlocked_npm(dependency).await,
             Ecosystem::Deno if dependency.requirement.starts_with("npm:") => {
-                self.resolve_unlocked_npm(dependency)
+                self.resolve_unlocked_npm(dependency).await
+            }
+            Ecosystem::Deno if dependency.requirement.starts_with("jsr:") => {
+                self.resolve_unlocked_jsr(dependency).await
             }
             Ecosystem::Deno => Ok(()),
         }
     }
 
-    fn fetch_local_dependency(
-        &self,
-        dependency: &Dependency,
-        declared_from: &Path,
-    ) -> Result<FetchMetadata> {
-        let raw_path = local_dependency_path(dependency)?;
-        let candidate = if raw_path.is_absolute() {
-            raw_path.clone()
-        } else {
-            declared_from.join(&raw_path)
-        };
-        let source = fs::canonicalize(&candidate).map_err(|source| Error::Io {
-            operation: "canonicalize local dependency".to_owned(),
-            path: candidate,
-            source,
-        })?;
-        let declaring_root = fs::canonicalize(declared_from).map_err(|source| Error::Io {
-            operation: "canonicalize declaring package".to_owned(),
-            path: declared_from.to_owned(),
-            source,
-        })?;
-        if !self.policy.trust_local_input && !source.starts_with(&declaring_root) {
-            return Err(Error::Policy {
-                operation: "local dependency".to_owned(),
-                message: format!(
-                    "{} escapes {}; use --trust-local-input to allow it",
-                    source.display(),
-                    declaring_root.display()
-                ),
-            });
-        }
-
-        Ok(FetchMetadata {
-            source,
-            package_id: dependency.id(),
-            resolved_version: dependency
-                .resolved_version
-                .clone()
-                .unwrap_or_else(|| "local".to_owned()),
-            digest: "local-unverified".to_owned(),
-            source_url: format!("file:{}", raw_path.display()),
-            cache_hit: false,
-        })
-    }
-
-    fn fetch_remote_dependency(&self, dependency: &Dependency) -> Result<FetchMetadata> {
-        let url = self.artifact_url(dependency)?;
+    async fn fetch_remote_dependency(&self, dependency: &Dependency) -> Result<FetchMetadata> {
+        let url = self.artifact_url(dependency).await?;
         let temporary = self.create_temporary_directory()?;
-        let result = self.fetch_into_temporary(dependency, &url, &temporary);
+        let result = self
+            .fetch_into_temporary(dependency, &url, &temporary)
+            .await;
         if result.is_err() && temporary.exists() {
             let _ = fs::remove_dir_all(&temporary);
         }
@@ -289,74 +235,22 @@ impl SafeSourceFetcher {
         Ok(temporary)
     }
 
-    fn fetch_into_temporary(
+    async fn fetch_into_temporary(
         &self,
         dependency: &Dependency,
         url: &url::Url,
         temporary: &Path,
     ) -> Result<FetchMetadata> {
-        if dependency.ecosystem == Ecosystem::Deno && dependency.requirement.starts_with("jsr:") {
-            let (source, digest, stats) =
-                self.fetch_jsr_package(url, temporary, dependency.integrity.as_deref())?;
-            return self.publish(dependency, url, digest, temporary, &source, stats);
-        }
-        if dependency.ecosystem == Ecosystem::Deno
-            && matches!(url.scheme(), "http" | "https")
-            && !url.path().ends_with(".tgz")
-        {
-            let (source, digest, stats) = self.fetch_deno_graph(
-                url,
-                temporary,
-                dependency.integrity.as_deref(),
-                dependency.lockfile.as_deref(),
-            )?;
-            return self.publish(dependency, url, digest, temporary, &source, stats);
+        if dependency.is_pinned_github() {
+            return self.fetch_github_archive(dependency, url, temporary).await;
         }
 
-        let bytes = self.download(url)?;
-        if !dependency.is_pinned_github() {
-            verify_integrity(&bytes, dependency.integrity.as_deref(), url.as_str())?;
+        match dependency.ecosystem {
+            Ecosystem::Npm => self.fetch_npm_package(dependency, url, temporary).await,
+            Ecosystem::Python => self.fetch_python_package(dependency, url, temporary).await,
+            Ecosystem::Deno => self.fetch_deno_package(dependency, url, temporary).await,
         }
-        let digest = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));
-        let source = temporary.join("source");
-        fs::create_dir(&source).map_err(|source_error| Error::Io {
-            operation: "create extraction directory".to_owned(),
-            path: source.clone(),
-            source: source_error,
-        })?;
-        let archive_name = if dependency.is_pinned_github() {
-            "git.tar.gz"
-        } else {
-            url.path()
-        };
-        let stats = extract(&bytes, archive_name, &source, &self.limits)?;
-        let package_root = single_root_or_self(&source)?;
-        self.publish(dependency, url, digest, temporary, &package_root, stats)
     }
-}
-
-fn local_dependency_path(dependency: &Dependency) -> Result<PathBuf> {
-    if let Some(source_url) = dependency
-        .source_url
-        .as_deref()
-        .filter(|url| url.starts_with("file:"))
-    {
-        let url = url::Url::parse(source_url).map_err(|error| Error::Resolution {
-            package: dependency.id(),
-            message: format!("invalid local dependency URL: {error}"),
-        })?;
-        return url.to_file_path().map_err(|()| Error::Resolution {
-            package: dependency.id(),
-            message: "local dependency URL is not a valid filesystem path".to_owned(),
-        });
-    }
-
-    Ok(PathBuf::from(
-        dependency
-            .requirement
-            .strip_prefix("file:")
-            .unwrap_or(&dependency.requirement),
-    ))
 }
 
 #[cfg(test)]

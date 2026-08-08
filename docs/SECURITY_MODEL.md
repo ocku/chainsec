@@ -18,9 +18,9 @@ Git acquisition never invokes Git or another subprocess. It is limited to public
 
 ### Network is explicit and narrow
 
-Network access defaults off. `--online` requires an explicit host allowlist. HTTP and HTTPS are accepted; no other schemes are permitted. Every initial URL, Deno graph URL, and redirect target is checked against the allowlist; redirect count, request duration, declared and observed response size, and Deno graph size are bounded. Ambient HTTP proxy settings are disabled so proxy credentials and routing are not inherited. HTTP transfers are plaintext and provide no transport confidentiality or server authentication; use HTTPS unless an explicitly allowed HTTP source is trusted through another channel (for example, a verified lockfile integrity digest).
+Network access defaults off for local scans; `--remote` automatically enables it. `--online` requires an explicit host allowlist, except that `--remote` selectors automatically allow their configured metadata host (or GitHub's archive host), and configured Artifactory metadata endpoints automatically allow their own hosts. HTTP and HTTPS are accepted; no other schemes are permitted. Every initial URL, Deno graph URL, and redirect target is checked against the allowlist; redirect count, request duration, declared and observed response size, and Deno graph size are bounded. Ambient HTTP proxy settings are disabled so proxy credentials and routing are not inherited. HTTP transfers are plaintext and provide no transport confidentiality or server authentication; use HTTPS unless an explicitly allowed HTTP source is trusted through another channel (for example, a verified lockfile integrity digest).
 
-Host allowlisting does not defend against compromise of an allowed registry, DNS, certificate authorities, or the TLS implementation. Use narrow exact hosts instead of wildcards.
+Host allowlisting does not defend against compromise of an allowed registry, DNS, certificate authorities, or the TLS implementation. Use narrow exact hosts instead of wildcards. Configured bearer credentials are read only from named environment variables, scoped to their configured URL prefix, and re-evaluated on redirects; they are never sent to GitHub's archive host.
 
 ### Resolution and integrity fail closed
 

@@ -10,6 +10,63 @@ A report may be partial. Manifest, resolution, fetch, extraction, and scan failu
 
 When `--output` is supplied, `chainsec` writes the analysis directly to the specified path instead of stdout; parent directories must already exist, and report publication is not atomic. A report-write failure is reported on stderr and exits with code `3`.
 
+## Example report
+
+Human output is the default report format. It is a compact summary followed by one line per finding and issue:
+
+```text
+chainsec 0.2.0 — 3 package(s), 2 finding(s), 0 issue(s)
+High execution:PY001 [root] src/main.py:12:5 — eval(user_input)
+Medium network:PY004 [root] src/client.py:34:9 — requests.get(url)
+```
+
+Each finding line shows the risk, rule as `group:rule_id`, package identifier, file and `line:column`, and matched code. Use `--format json` or `--format sarif` for machine-readable output. Human reports are colorized only when written directly to a terminal.
+
+A JSON report is a single object with `schema_version`, `tool_version`, `root`, `policy`, `packages`, `findings`, `issues`, and `statistics`:
+
+```json
+{
+  "schema_version": "1.0.0",
+  "tool_version": "0.2.0",
+  "root": "/path/to/project",
+  "policy": { "require_lockfile": true, "offline": true, "trust_local_input": false, "allowed_hosts": [], "limits": { } },
+  "packages": [
+    {
+      "package_id": "python:requests@2.32.3",
+      "source": "/path/to/cache/...",
+      "source_url": "https://files.pythonhosted.org/...",
+      "resolved_version": "2.32.3",
+      "digest": "sha256:...",
+      "depth": 1,
+      "dependencies": [],
+      "scanned_files": 12,
+      "scanned_bytes": 20480
+    }
+  ],
+  "findings": [
+    {
+      "id": "sha256:...",
+      "rule_id": "PY001",
+      "rule_version": 1,
+      "finding_type": "arbitrary_code_execution",
+      "risk": "high",
+      "confidence": "high",
+      "rationale": "Runtime code or process execution can execute attacker-controlled payloads during package use.",
+      "remediation": "Remove dynamic execution or constrain input to a fixed, validated allowlist.",
+      "package": "root",
+      "file": "src/main.py",
+      "location": { "start_line": 12, "start_column": 5, "end_line": 12, "end_column": 18 },
+      "matched_code": "eval(user_input)",
+      "suppressed": false
+    }
+  ],
+  "issues": [],
+  "statistics": { "packages": 3, "source_files": 42, "source_bytes": 81920, "findings": 2, "cache_hits": 1 }
+}
+```
+
+SARIF output follows SARIF 2.1.0 with one rule per configured rule and one result per finding; paths are relative to each scanned package and `matched_code` snippets are omitted.
+
 ## Built-in rules
 
 The built-in catalog covers dynamic execution, process execution, decoded payloads, network access, filesystem access, environment/secret access, unsafe deserialization, dynamic loading, package installation hooks, and syntax-aware equivalents of GuardDog source-code analyzers. Manifest checks report `PY_INSTALL_SCRIPT` for `setup.py` and `NPM_INSTALL_SCRIPT` for npm `preinstall`, `install`, or `postinstall` entries; these hooks are identified but never executed.
@@ -25,6 +82,8 @@ Custom rule packs are JSON or YAML objects with a non-empty `rules` array. Each 
 `--ignore-rule` selectors use `group:rule-id-glob`, such as `filesystem:*`; groups are derived from each rule's `finding_type`, and `*` and `?` match the rule ID. An optional `entropy` object further restricts a string-literal match with `minimum_length`, `minimum_entropy` (0–8), and `maximum_whitespace_ratio` (0–1; default `0.05`). Malformed packs, unknown fields, duplicate IDs, invalid entropy limits, invalid selectors, and invalid queries fail before analysis.
 
 ## Exit codes
+
+`chainsec` is intended to be driven from CI. The exit code reflects whether findings met the `--fail-on` threshold and whether any operational or policy issues occurred.
 
 | Code | Meaning |
 | --- | --- |

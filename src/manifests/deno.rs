@@ -64,76 +64,111 @@ pub(super) fn enrich(
     if !path.is_file() {
         return Ok(());
     }
-    let value: JsonValue =
+    let lockfile: JsonValue =
         serde_json::from_str(&read(&path)?).map_err(|error| manifest_error(&path, error))?;
-    let version = value
-        .get("version")
-        .and_then(JsonValue::as_str)
-        .unwrap_or("1");
-    if !matches!(version, "1" | "2" | "3" | "4") {
-        return Err(manifest_error(
-            &path,
-            format!("unsupported deno lockfile version {version}"),
-        ));
-    }
+    validate_lockfile_version(&path, &lockfile)?;
+
     for dependency in dependencies {
-        let requirement = dependency.requirement.as_str();
-        let integrity = if requirement.starts_with("http") {
-            value
-                .get("remote")
-                .and_then(|v| v.get(requirement))
-                .and_then(JsonValue::as_str)
-        } else if let Some(spec) = requirement.strip_prefix("npm:") {
-            let resolved = value
-                .get("specifiers")
-                .and_then(|v| v.get(requirement))
-                .and_then(JsonValue::as_str)
-                .unwrap_or_else(|| spec.rsplit_once('@').map_or(spec, |(_, version)| version));
-            dependency.resolved_version = Some(resolved.to_owned());
-            let name = spec.rsplit_once('@').map_or(spec, |(name, _)| name);
-            value
-                .get("npm")
-                .and_then(|v| v.get(format!("{name}@{resolved}")))
-                .and_then(|v| v.get("integrity"))
-                .and_then(JsonValue::as_str)
-        } else if requirement.starts_with("jsr:") {
-            let resolved = value
-                .get("specifiers")
-                .and_then(|v| v.get(requirement))
-                .and_then(JsonValue::as_str);
-            if let Some(resolved) = resolved {
-                dependency.resolved_version = Some(resolved.to_owned());
-                if let Some(package) = jsr_package_name(requirement) {
-                    let package_key = format!("{package}@{resolved}");
-                    let locked_integrity = value
-                        .get("jsr")
-                        .and_then(|v| v.get(&package_key))
-                        .and_then(|v| v.get("integrity"))
-                        .and_then(JsonValue::as_str)
-                        .filter(|value| {
-                            value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-                        });
-                    if let Some(locked_integrity) = locked_integrity {
-                        dependency.integrity = Some(format!("sha256:{locked_integrity}"));
-                        dependency.source_url =
-                            Some(format!("https://jsr.io/{package}/{resolved}_meta.json"));
-                    }
-                }
-            }
-            None
-        } else {
-            None
-        };
-        if let Some(integrity) = integrity {
-            dependency.integrity = Some(integrity.to_owned());
-        }
-        if dependency.resolved_version.is_none() && requirement.starts_with("http") {
-            dependency.resolved_version = Some(requirement.to_owned());
-        }
+        enrich_dependency(&lockfile, dependency);
         dependency.lockfile = Some(path.clone());
     }
     lockfiles.push(path);
     Ok(())
+}
+
+fn validate_lockfile_version(path: &Path, lockfile: &JsonValue) -> Result<()> {
+    let version = lockfile
+        .get("version")
+        .and_then(JsonValue::as_str)
+        .unwrap_or("1");
+    if matches!(version, "1" | "2" | "3" | "4") {
+        return Ok(());
+    }
+    Err(manifest_error(
+        path,
+        format!("unsupported deno lockfile version {version}"),
+    ))
+}
+
+fn enrich_dependency(lockfile: &JsonValue, dependency: &mut Dependency) {
+    if dependency.requirement.starts_with("http") {
+        enrich_remote(lockfile, dependency);
+    } else if dependency.requirement.starts_with("npm:") {
+        enrich_npm(lockfile, dependency);
+    } else if dependency.requirement.starts_with("jsr:") {
+        enrich_jsr(lockfile, dependency);
+    }
+}
+
+fn enrich_remote(lockfile: &JsonValue, dependency: &mut Dependency) {
+    dependency.integrity = lockfile
+        .get("remote")
+        .and_then(|remote| remote.get(&dependency.requirement))
+        .and_then(JsonValue::as_str)
+        .map(str::to_owned);
+    dependency
+        .resolved_version
+        .get_or_insert_with(|| dependency.requirement.clone());
+}
+
+fn enrich_npm(lockfile: &JsonValue, dependency: &mut Dependency) {
+    let specifier = dependency
+        .requirement
+        .strip_prefix("npm:")
+        .expect("npm dependencies must have an npm: prefix")
+        .to_owned();
+    let resolved = lockfile
+        .get("specifiers")
+        .and_then(|specifiers| specifiers.get(&dependency.requirement))
+        .and_then(JsonValue::as_str)
+        .unwrap_or_else(|| {
+            specifier
+                .rsplit_once('@')
+                .map_or(&specifier, |(_, version)| version)
+        });
+    dependency.resolved_version = Some(resolved.to_owned());
+
+    let name = specifier
+        .rsplit_once('@')
+        .map_or(specifier.as_str(), |(name, _)| name);
+    dependency.integrity = lockfile
+        .get("npm")
+        .and_then(|packages| packages.get(format!("{name}@{resolved}")))
+        .and_then(|package| package.get("integrity"))
+        .and_then(JsonValue::as_str)
+        .map(str::to_owned);
+}
+
+fn enrich_jsr(lockfile: &JsonValue, dependency: &mut Dependency) {
+    let Some(resolved) = lockfile
+        .get("specifiers")
+        .and_then(|specifiers| specifiers.get(&dependency.requirement))
+        .and_then(JsonValue::as_str)
+    else {
+        return;
+    };
+    dependency.resolved_version = Some(resolved.to_owned());
+
+    let Some(package) = jsr_package_name(&dependency.requirement) else {
+        return;
+    };
+    let package_key = format!("{package}@{resolved}");
+    let integrity = lockfile
+        .get("jsr")
+        .and_then(|packages| packages.get(&package_key))
+        .and_then(|package| package.get("integrity"))
+        .and_then(JsonValue::as_str)
+        .filter(|integrity| is_sha256_digest(integrity));
+    let Some(integrity) = integrity else {
+        return;
+    };
+
+    dependency.integrity = Some(format!("sha256:{integrity}"));
+    dependency.source_url = Some(format!("https://jsr.io/{package}/{resolved}_meta.json"));
+}
+
+fn is_sha256_digest(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn jsr_package_name(requirement: &str) -> Option<&str> {

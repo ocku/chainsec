@@ -8,3 +8,14 @@ CHANGELOG.md
 SECURITY.md
 docs
 tests
+
+# Keep the production image context small, while allowing Dockerfile.test to
+# verify the repository's documented workflows and fixtures.
+!Dockerfile.test
+!README.md
+!SECURITY.md
+!CHANGELOG.md
+!docs/
+!docs/**
+!tests/
+!tests/**

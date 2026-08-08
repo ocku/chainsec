@@ -10,7 +10,7 @@ const MAX_CONCURRENT_FETCHES: usize = 16;
 
 use crate::{
     error::{Error, Result},
-    fetcher::SourceFetcher,
+    fetcher::Fetcher,
     manifests,
     model::{
         AnalysisPoint, Confidence, EngineLimits, FetchMetadata, FindingType, Language, Location,
@@ -30,12 +30,12 @@ struct PendingPackage {
 }
 
 impl PendingPackage {
-    fn root(source: PathBuf) -> Self {
+    fn root(source: PathBuf, fetched: Option<FetchMetadata>) -> Self {
         Self {
             package_id: "root".to_owned(),
             source,
             depth: 0,
-            fetched: None,
+            fetched,
             npm_context: None,
             python_context: None,
         }
@@ -44,7 +44,7 @@ impl PendingPackage {
 
 pub struct Engine<'a> {
     rules: &'a [Rule],
-    fetcher: &'a dyn SourceFetcher,
+    fetcher: &'a dyn Fetcher,
     limits: EngineLimits,
     require_lockfile: bool,
     policy: PolicySummary,
@@ -56,7 +56,7 @@ pub struct Engine<'a> {
 impl<'a> Engine<'a> {
     pub fn new(
         rules: &'a [Rule],
-        fetcher: &'a dyn SourceFetcher,
+        fetcher: &'a dyn Fetcher,
         limits: EngineLimits,
         require_lockfile: bool,
         offline: bool,
@@ -105,9 +105,23 @@ impl<'a> Engine<'a> {
     }
 
     pub async fn analyze(&self, root: &Path) -> Result<Report> {
+        self.analyze_with_root(root, None).await
+    }
+
+    /// Analyzes an explicitly fetched package as the traversal root.
+    pub async fn analyze_fetched_root(&self, fetched: FetchMetadata) -> Result<Report> {
+        let source = fetched.source.clone();
+        self.analyze_with_root(&source, Some(fetched)).await
+    }
+
+    async fn analyze_with_root(
+        &self,
+        root: &Path,
+        fetched: Option<FetchMetadata>,
+    ) -> Result<Report> {
         let root = canonicalize_root(root)?;
         let mut report = Report::new(root.clone(), self.policy.clone());
-        let mut queue = VecDeque::from([PendingPackage::root(root)]);
+        let mut queue = VecDeque::from([PendingPackage::root(root, fetched)]);
         let mut visited = HashSet::new();
 
         while let Some(pending) = queue.pop_front() {

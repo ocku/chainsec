@@ -1,6 +1,6 @@
 use std::{
     fs,
-    path::{Component, Path},
+    path::{Component, Path, PathBuf},
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -13,7 +13,7 @@ use crate::{
     model::{Dependency, Ecosystem, FetchMetadata},
 };
 
-use super::{SafeSourceFetcher, archive::ExtractionStats, integrity::hash_tree};
+use super::{SourceFetcher, archive::ExtractionStats, integrity::hash_tree};
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -28,6 +28,112 @@ struct CacheMetadata {
     extracted_bytes: u64,
     content_digest: String,
     fetcher_version: String,
+}
+
+impl CacheMetadata {
+    fn matches_dependency(&self, fetcher: &SourceFetcher, dependency: &Dependency) -> bool {
+        self.matches_identity(dependency)
+            && self.matches_source(dependency)
+            && self.matches_integrity(dependency)
+            && self.matches_extraction_limits(fetcher, dependency)
+    }
+
+    fn matches_identity(&self, dependency: &Dependency) -> bool {
+        let expected_version = dependency
+            .resolved_version
+            .as_deref()
+            .unwrap_or(&dependency.requirement);
+
+        self.package_id == dependency.id()
+            && self.resolved_version == expected_version
+            && self.integrity.as_deref() == dependency.integrity.as_deref()
+            && self.fetcher_version == env!("CARGO_PKG_VERSION")
+    }
+
+    fn matches_source(&self, dependency: &Dependency) -> bool {
+        valid_source_url(&self.source_url)
+            && dependency
+                .source_url
+                .as_deref()
+                .is_none_or(|source_url| source_url == self.source_url)
+    }
+
+    fn matches_integrity(&self, dependency: &Dependency) -> bool {
+        !self.digest.is_empty()
+            && integrity_matches_digest(dependency.integrity.as_deref(), &self.digest)
+            && !self.content_digest.is_empty()
+    }
+
+    fn matches_extraction_limits(&self, fetcher: &SourceFetcher, dependency: &Dependency) -> bool {
+        self.extracted_files <= fetcher.limits.max_extracted_files
+            && self.extracted_bytes <= fetcher.limits.max_extracted_bytes
+            && (dependency.ecosystem != Ecosystem::Deno
+                || dependency.requirement.starts_with("jsr:")
+                || self.extracted_files <= fetcher.policy.max_deno_modules as u64)
+    }
+
+    fn source_path(&self, destination: &Path) -> Option<PathBuf> {
+        let source_directory = Path::new(&self.source_directory);
+        if source_directory.is_absolute()
+            || source_directory
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return None;
+        }
+
+        let source = destination.join(source_directory);
+        if is_symlink(destination)? || is_symlink(&source)? {
+            return None;
+        }
+
+        let destination = fs::canonicalize(destination).ok()?;
+        let source = fs::canonicalize(source).ok()?;
+        (source.starts_with(&destination) && source.is_dir()).then_some(source)
+    }
+
+    fn new(
+        dependency: &Dependency,
+        source_url: &Url,
+        digest: String,
+        source_directory: &Path,
+        stats: ExtractionStats,
+        content_digest: String,
+    ) -> Self {
+        Self {
+            package_id: dependency.id(),
+            resolved_version: dependency
+                .resolved_version
+                .clone()
+                .unwrap_or_else(|| dependency.requirement.clone()),
+            integrity: dependency.integrity.clone(),
+            digest,
+            source_url: source_url.to_string(),
+            source_directory: source_directory.to_string_lossy().into_owned(),
+            extracted_files: stats.files,
+            extracted_bytes: stats.bytes,
+            content_digest,
+            fetcher_version: env!("CARGO_PKG_VERSION").to_owned(),
+        }
+    }
+
+    fn into_fetch_metadata(self, source: PathBuf, cache_hit: bool) -> FetchMetadata {
+        FetchMetadata {
+            source,
+            package_id: self.package_id,
+            resolved_version: self.resolved_version,
+            digest: self.digest,
+            source_url: self.source_url,
+            cache_hit,
+        }
+    }
+}
+
+fn valid_source_url(source_url: &str) -> bool {
+    !source_url.is_empty()
+        && Url::parse(source_url)
+            .ok()
+            .is_some_and(|url| matches!(url.scheme(), "http" | "https"))
 }
 
 fn integrity_matches_digest(integrity: Option<&str>, digest: &str) -> bool {
@@ -51,7 +157,82 @@ fn integrity_matches_digest(integrity: Option<&str>, digest: &str) -> bool {
     })
 }
 
-impl SafeSourceFetcher {
+fn is_symlink(path: &Path) -> Option<bool> {
+    Some(fs::symlink_metadata(path).ok()?.file_type().is_symlink())
+}
+
+fn tree_matches_metadata(
+    source: &Path,
+    metadata: &CacheMetadata,
+    limits: &crate::model::EngineLimits,
+) -> bool {
+    let mut files = 0u64;
+    let mut bytes = 0u64;
+
+    for entry in walkdir::WalkDir::new(source).follow_links(false) {
+        let Ok(entry) = entry else {
+            return false;
+        };
+        if entry.file_type().is_symlink() {
+            return false;
+        }
+        if entry.file_type().is_file() {
+            let Some(file_count) = files.checked_add(1) else {
+                return false;
+            };
+            let Some(file_bytes) = entry
+                .metadata()
+                .ok()
+                .and_then(|metadata| bytes.checked_add(metadata.len()))
+            else {
+                return false;
+            };
+            files = file_count;
+            bytes = file_bytes;
+        } else if !entry.file_type().is_dir() {
+            return false;
+        }
+    }
+
+    files == metadata.extracted_files
+        && bytes == metadata.extracted_bytes
+        && hash_tree(source, limits).is_ok_and(|digest| digest == metadata.content_digest)
+}
+
+fn write_completion_marker(
+    temporary: &Path,
+    metadata: &CacheMetadata,
+    dependency: &Dependency,
+    source_url: &Url,
+) -> Result<()> {
+    let encoded = serde_json::to_vec_pretty(metadata).map_err(|error| Error::Fetch {
+        package: dependency.id(),
+        source_url: source_url.to_string(),
+        message: error.to_string(),
+    })?;
+    fs::write(temporary.join(".complete.json"), encoded).map_err(|source| Error::Io {
+        operation: "write cache completion marker".to_owned(),
+        path: temporary.to_owned(),
+        source,
+    })
+}
+
+fn publish_cache_entry(temporary: &Path, destination: &Path) -> Result<()> {
+    if destination.exists() {
+        fs::remove_dir_all(destination).map_err(|source| Error::Io {
+            operation: "replace incomplete cache entry".to_owned(),
+            path: destination.to_owned(),
+            source,
+        })?;
+    }
+    fs::rename(temporary, destination).map_err(|source| Error::Io {
+        operation: "publish cache entry".to_owned(),
+        path: destination.to_owned(),
+        source,
+    })
+}
+
+impl SourceFetcher {
     pub(super) fn destination(&self, dependency: &Dependency) -> std::path::PathBuf {
         let key = hex::encode(Sha256::digest(dependency.id().as_bytes()));
         self.cache.join(dependency.ecosystem.to_string()).join(key)
@@ -63,87 +244,13 @@ impl SafeSourceFetcher {
             .ok()
             .and_then(|bytes| serde_json::from_slice::<CacheMetadata>(&bytes).ok())?;
 
-        let expected_version = dependency
-            .resolved_version
-            .as_deref()
-            .unwrap_or(&dependency.requirement);
-        if metadata.package_id != dependency.id()
-            || metadata.resolved_version != expected_version
-            || metadata.integrity.as_deref() != dependency.integrity.as_deref()
-            || metadata.fetcher_version != env!("CARGO_PKG_VERSION")
-            || metadata.source_url.is_empty()
-            || !Url::parse(&metadata.source_url)
-                .ok()
-                .is_some_and(|url| matches!(url.scheme(), "http" | "https"))
-            || dependency
-                .source_url
-                .as_deref()
-                .is_some_and(|source_url| source_url != metadata.source_url)
-            || metadata.digest.is_empty()
-            || !integrity_matches_digest(dependency.integrity.as_deref(), &metadata.digest)
-            || metadata.content_digest.is_empty()
-            || metadata.extracted_files > self.limits.max_extracted_files
-            || metadata.extracted_bytes > self.limits.max_extracted_bytes
-            || (dependency.ecosystem == Ecosystem::Deno
-                && !dependency.requirement.starts_with("jsr:")
-                && metadata.extracted_files > self.policy.max_deno_modules as u64)
-        {
+        if !metadata.matches_dependency(self, dependency) {
             return None;
         }
 
-        let source_directory = Path::new(&metadata.source_directory);
-        if source_directory.is_absolute()
-            || source_directory
-                .components()
-                .any(|component| !matches!(component, Component::Normal(_)))
-        {
-            return None;
-        }
-        let source = destination.join(source_directory);
-        if fs::symlink_metadata(&destination)
-            .ok()?
-            .file_type()
-            .is_symlink()
-            || fs::symlink_metadata(&source).ok()?.file_type().is_symlink()
-        {
-            return None;
-        }
-        let destination = fs::canonicalize(&destination).ok()?;
-        let source = fs::canonicalize(source).ok()?;
-        if !source.starts_with(&destination) || !source.is_dir() {
-            return None;
-        }
-
-        let mut files = 0u64;
-        let mut bytes = 0u64;
-        for entry in walkdir::WalkDir::new(&source).follow_links(false) {
-            let entry = entry.ok()?;
-            if entry.file_type().is_symlink() {
-                return None;
-            }
-            if entry.file_type().is_file() {
-                files = files.checked_add(1)?;
-                bytes = bytes.checked_add(entry.metadata().ok()?.len())?;
-            } else if !entry.file_type().is_dir() {
-                return None;
-            }
-        }
-        if files != metadata.extracted_files || bytes != metadata.extracted_bytes {
-            return None;
-        }
-        let content_digest = hash_tree(&source, &self.limits).ok()?;
-        if content_digest != metadata.content_digest {
-            return None;
-        }
-
-        Some(FetchMetadata {
-            source,
-            package_id: metadata.package_id,
-            resolved_version: metadata.resolved_version,
-            digest: metadata.digest,
-            source_url: metadata.source_url,
-            cache_hit: true,
-        })
+        let source = metadata.source_path(&destination)?;
+        tree_matches_metadata(&source, &metadata, &self.limits)
+            .then(|| metadata.into_fetch_metadata(source, true))
     }
 
     pub(super) fn publish(
@@ -163,59 +270,27 @@ impl SafeSourceFetcher {
                 source,
             })?;
         }
+
         let relative = source_directory
             .strip_prefix(temporary)
             .map_err(|error| Error::Fetch {
                 package: dependency.id(),
                 source_url: source_url.to_string(),
                 message: error.to_string(),
-            })?;
-        let content_digest = hash_tree(source_directory, &self.limits)?;
-        let metadata = CacheMetadata {
-            package_id: dependency.id(),
-            resolved_version: dependency
-                .resolved_version
-                .clone()
-                .unwrap_or_else(|| dependency.requirement.clone()),
-            integrity: dependency.integrity.clone(),
-            digest: digest.clone(),
-            source_url: source_url.to_string(),
-            source_directory: relative.to_string_lossy().into_owned(),
-            extracted_files: stats.files,
-            extracted_bytes: stats.bytes,
-            content_digest,
-            fetcher_version: env!("CARGO_PKG_VERSION").to_owned(),
-        };
-        let encoded = serde_json::to_vec_pretty(&metadata).map_err(|error| Error::Fetch {
-            package: dependency.id(),
-            source_url: source_url.to_string(),
-            message: error.to_string(),
-        })?;
-        fs::write(temporary.join(".complete.json"), encoded).map_err(|source| Error::Io {
-            operation: "write cache completion marker".to_owned(),
-            path: temporary.to_owned(),
-            source,
-        })?;
-        if destination.exists() {
-            fs::remove_dir_all(&destination).map_err(|source| Error::Io {
-                operation: "replace incomplete cache entry".to_owned(),
-                path: destination.clone(),
-                source,
-            })?;
-        }
-        fs::rename(temporary, &destination).map_err(|source| Error::Io {
-            operation: "publish cache entry".to_owned(),
-            path: destination.clone(),
-            source,
-        })?;
-        Ok(FetchMetadata {
-            source: destination.join(relative),
-            package_id: metadata.package_id,
-            resolved_version: metadata.resolved_version,
+            })?
+            .to_owned();
+        let metadata = CacheMetadata::new(
+            dependency,
+            source_url,
             digest,
-            source_url: metadata.source_url,
-            cache_hit: false,
-        })
+            &relative,
+            stats,
+            hash_tree(source_directory, &self.limits)?,
+        );
+
+        write_completion_marker(temporary, &metadata, dependency, source_url)?;
+        publish_cache_entry(temporary, &destination)?;
+        Ok(metadata.into_fetch_metadata(destination.join(relative), false))
     }
 }
 
@@ -223,9 +298,9 @@ impl SafeSourceFetcher {
 mod tests {
     use super::*;
 
-    fn cached_fixture() -> (tempfile::TempDir, SafeSourceFetcher, Dependency) {
+    fn cached_fixture() -> (tempfile::TempDir, SourceFetcher, Dependency) {
         let cache = tempfile::tempdir().unwrap();
-        let fetcher = SafeSourceFetcher::new(
+        let fetcher = SourceFetcher::new(
             cache.path().join("cache"),
             super::super::FetchPolicy::default(),
             crate::model::EngineLimits::default(),

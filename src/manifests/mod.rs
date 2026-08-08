@@ -11,7 +11,7 @@ use crate::{
 mod deno;
 mod npm;
 mod python;
-mod shared;
+pub(crate) mod shared;
 
 #[cfg(test)]
 use deno::strip_jsonc;

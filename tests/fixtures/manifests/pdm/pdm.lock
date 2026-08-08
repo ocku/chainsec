@@ -1,0 +1,12 @@
+[metadata]
+lock_version = "4.5.0"
+content_hash = "pdm-fixture"
+
+[[package]]
+name = "httpx"
+version = "0.27.2"
+summary = "The next generation HTTP client."
+groups = ["default"]
+files = [
+  { file = "httpx-0.27.2.tar.gz", hash = "sha256:pdm-fixture" },
+]

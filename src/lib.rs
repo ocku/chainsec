@@ -8,5 +8,5 @@ pub mod scanner;
 
 pub use engine::Engine;
 pub use error::{Error, Result};
-pub use fetcher::{FetchPolicy, SafeSourceFetcher, SourceFetcher};
+pub use fetcher::{ArtifactRepositories, FetchPolicy, Fetcher, SourceFetcher};
 pub use model::{EngineLimits, Report};

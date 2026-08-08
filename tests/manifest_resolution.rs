@@ -60,6 +60,48 @@ fn poetry_and_deno_locks_are_detected() {
 }
 
 #[test]
+fn uv_lock_enriches_resolved_artifacts() {
+    let discovery = manifests::discover(Path::new("tests/fixtures/manifests/uv")).unwrap();
+    let httpx = discovery
+        .dependencies
+        .iter()
+        .find(|dependency| dependency.name == "httpx")
+        .unwrap();
+
+    assert_eq!(httpx.resolved_version.as_deref(), Some("0.27.2"));
+    assert_eq!(httpx.integrity.as_deref(), Some("sha256:uv-fixture"));
+    assert_eq!(
+        httpx.source_url.as_deref(),
+        Some("https://files.pythonhosted.org/packages/httpx-0.27.2.tar.gz")
+    );
+    assert!(
+        httpx
+            .lockfile
+            .as_deref()
+            .is_some_and(|path| path.ends_with("uv.lock"))
+    );
+}
+
+#[test]
+fn pdm_lock_enriches_resolved_artifacts() {
+    let discovery = manifests::discover(Path::new("tests/fixtures/manifests/pdm")).unwrap();
+    let httpx = discovery
+        .dependencies
+        .iter()
+        .find(|dependency| dependency.name == "httpx")
+        .unwrap();
+
+    assert_eq!(httpx.resolved_version.as_deref(), Some("0.27.2"));
+    assert_eq!(httpx.integrity.as_deref(), Some("sha256:pdm-fixture"));
+    assert!(
+        httpx
+            .lockfile
+            .as_deref()
+            .is_some_and(|path| path.ends_with("pdm.lock"))
+    );
+}
+
+#[test]
 fn yarn_and_pnpm_locks_enrich_exact_artifacts() {
     let yarn = manifests::discover(Path::new("tests/fixtures/manifests/yarn")).unwrap();
     let left_pad = &yarn.dependencies[0];

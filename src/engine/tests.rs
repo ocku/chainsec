@@ -2,13 +2,13 @@ use async_trait::async_trait;
 
 use super::*;
 use crate::{
-    fetcher::SourceFetcher,
+    fetcher::Fetcher,
     model::{Dependency, FetchMetadata},
 };
 
 struct NeverFetch;
 #[async_trait]
-impl SourceFetcher for NeverFetch {
+impl Fetcher for NeverFetch {
     async fn fetch(
         &self,
         dependency: Dependency,
@@ -23,7 +23,7 @@ struct FixtureFetcher {
 }
 
 #[async_trait]
-impl SourceFetcher for FixtureFetcher {
+impl Fetcher for FixtureFetcher {
     async fn fetch(
         &self,
         dependency: Dependency,
@@ -64,6 +64,48 @@ async fn unlocked_dependencies_are_policy_issues() {
     .await
     .unwrap();
     assert_eq!(report.packages.len(), 1);
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|issue| issue.code == "policy_error")
+    );
+}
+
+#[tokio::test]
+async fn fetched_root_bypasses_lockfile_policy_but_dependencies_do_not() {
+    let source = tempfile::tempdir().unwrap();
+    fs::write(
+        source.path().join("package.json"),
+        r#"{"dependencies":{"left-pad":"^1"}}"#,
+    )
+    .unwrap();
+    let rules = crate::rules::built_in_rules();
+    let report = Engine::new(
+        &rules,
+        &NeverFetch,
+        EngineLimits::default(),
+        true,
+        true,
+        vec![],
+        false,
+    )
+    .analyze_fetched_root(FetchMetadata {
+        source: source.path().to_owned(),
+        package_id: "npm:remote@1.0.0#sha512-remote".to_owned(),
+        resolved_version: "1.0.0".to_owned(),
+        digest: "sha512-remote".to_owned(),
+        source_url: "https://registry.example.test/remote-1.0.0.tgz".to_owned(),
+        cache_hit: false,
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(report.packages[0].package_id, "root");
+    assert_eq!(
+        report.packages[0].source_url.as_deref(),
+        Some("https://registry.example.test/remote-1.0.0.tgz")
+    );
     assert!(
         report
             .issues

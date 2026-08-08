@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use super::entropy::shannon_entropy;
 use crate::model::{AnalysisPoint, Confidence, FindingType, Location, Risk};
 
 const MIN_HIGH_ENTROPY_BYTES: usize = 256;
@@ -55,7 +56,9 @@ fn classify_file(path: &Path, bytes: &[u8]) -> Option<FileKind> {
         return None;
     }
 
-    if bytes.len() >= MIN_HIGH_ENTROPY_BYTES && shannon_entropy(bytes) >= HIGH_ENTROPY_THRESHOLD {
+    if bytes.len() >= MIN_HIGH_ENTROPY_BYTES
+        && shannon_entropy(bytes.iter().copied()) >= HIGH_ENTROPY_THRESHOLD
+    {
         return Some(FileKind::HighEntropy);
     }
 
@@ -92,7 +95,7 @@ fn finding_details(
             "Inspect the file contents and provenance; do not execute opaque data without review.",
             format!(
                 "high-entropy file, size: {file_size} bytes, entropy: {:.2} bits/byte",
-                shannon_entropy(bytes)
+                shannon_entropy(bytes.iter().copied())
             ),
             Risk::Medium,
             Confidence::Medium,
@@ -143,22 +146,6 @@ fn is_known_static_asset(path: &Path, bytes: &[u8]) -> bool {
 
 fn is_binary(bytes: &[u8]) -> bool {
     bytes.contains(&0) || std::str::from_utf8(bytes).is_err()
-}
-
-fn shannon_entropy(bytes: &[u8]) -> f64 {
-    let mut counts = [0usize; 256];
-    for byte in bytes {
-        counts[*byte as usize] += 1;
-    }
-    let length = bytes.len() as f64;
-    counts
-        .iter()
-        .filter(|count| **count != 0)
-        .map(|count| {
-            let probability = *count as f64 / length;
-            -probability * probability.log2()
-        })
-        .sum()
 }
 
 #[cfg(test)]

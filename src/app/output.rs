@@ -33,13 +33,14 @@ fn human_report_header(report: &Report, color: bool) -> String {
 
 fn human_finding(finding: &chainsec::model::AnalysisPoint, color: bool) -> String {
     format!(
-        "{} {} {}:{}:{} — {}\n",
+        "{} {} [{}] {}:{}:{} — {}\n",
         paint(
             &format!("{:?}", finding.risk),
             risk_color(finding.risk),
             color
         ),
         display_rule_id(finding),
+        finding.package,
         finding.file.display(),
         finding.location.start_line,
         finding.location.start_column,

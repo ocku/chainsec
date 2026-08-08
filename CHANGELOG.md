@@ -2,6 +2,32 @@
 
 All notable changes are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Before `1.0.0`, minor releases may contain breaking API changes; report schema changes are explicitly versioned.
 
+
+## [0.2.0]
+
+### Breaking changes
+
+- Human-readable output is now the default. Automation that consumes reports must explicitly use `--format json` (or `--format sarif`). Human finding lines now include the package identifier.
+
+### Added
+
+- `--remote <source:package>` for scanning an npm, PyPI, JSR, or public GitHub full-commit package as the traversal root. Remote roots resolve without a lockfile; discovered dependencies retain the normal lockfile policy.
+- Layered configuration: `$HOME/.config/chainsec/config.toml` is overlaid by project `chainsec.toml`, with command-line values taking precedence. The legacy global `chainsec.toml` filename remains supported.
+- Configurable npm, PyPI, and JSR metadata endpoints for registry proxies and artifact repositories, with scoped bearer tokens sourced from named environment variables.
+- PDM lockfile (`pdm.lock`) resolution for Python dependencies.
+- `/etc/chainsec/chainsec.toml` as a machine-wide configuration fallback when neither a user-local nor project `chainsec.toml` is available.
+- `--cache-purge` to remove the resolved dependency cache without scanning; pair it with `--cache <dir>` to purge a specific cache.
+
+### Changed
+
+- HTTP acquisition is asynchronous; redirects are manually policy-checked and credential scope is re-evaluated at each hop.
+- Cache validation now verifies completion metadata, source identity and limits, safe extracted-tree structure, and a deterministic content-tree digest on each hit.
+- Source reads enforce the configured byte limit while reading, and scan-duration checks run throughout traversal and analysis.
+- Reorganized CLI/application, acquisition, manifest-resolution, and scanner modules into focused components.
+- The default dependency cache remains `.chainsec-cache` for a current working directory with `chainsec.toml`; other invocations now use the XDG/user cache directory, falling back to the system temporary directory. `--init` adds `.chainsec-cache` to `.gitignore`.
+- `allowed_hosts` now accumulates across global configuration, project configuration, and repeated `--allow-host` options, with duplicate hosts removed in that order.
+- `--remote` now enables online mode automatically; online mode without allowed hosts remains valid for local-only scans, while every outbound request remains host-policy checked.
+
 ## [0.1.0]
 
 ### Changed
