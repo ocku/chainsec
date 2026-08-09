@@ -19,6 +19,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - Persistent `[[suppressions]]`, which retain a required reason in JSON and exclude matching findings from human and SARIF reports and the failure threshold.
 - Bounded semantic matchers for JavaScript and TypeScript dynamic execution, string-table obfuscation, RC4-like decoders, and embedded bytecode virtual machines.
 - Expanded built-in detection for indirect/computed `eval`, string timers, Node VM APIs, Python reflective import access, Deno network APIs, browser-global mutation, and common code-obfuscation patterns.
+- Expanded unit, integration, CLI, semantic-matcher, and fixture coverage for the new reporting, traversal, suppression, exclusion, and rule behaviors.
 
 ### Changed
 
