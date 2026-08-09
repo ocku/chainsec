@@ -1,10 +1,27 @@
-use chainsec::model::{AnalysisPoint, Report, Risk};
+use std::collections::{BTreeMap, BTreeSet};
+
+use chainsec::model::{AnalysisPoint, Report, Risk, Rule};
 use serde_json::json;
 
-pub(super) fn human_report(report: &Report, color: bool) -> String {
-    let mut output = human_report_header(report, color);
+const HEURISTICS_URL: &str = "github.com/ocku/chainsec/docs/HEURISTICS.md";
 
-    for finding in &report.findings {
+pub(super) fn human_report(
+    report: &Report,
+    configured_rules: &[Rule],
+    threshold: Risk,
+    verbose: bool,
+    color: bool,
+) -> String {
+    let _ = configured_rules;
+    let mut output = human_report_header(report, color);
+    let findings = report
+        .findings
+        .iter()
+        .filter(|finding| !finding.suppressed && (verbose || finding.risk >= threshold))
+        .collect::<Vec<_>>();
+
+    let has_findings = !findings.is_empty();
+    for finding in findings {
         output.push_str(&human_finding(finding, color));
     }
 
@@ -17,21 +34,98 @@ pub(super) fn human_report(report: &Report, color: bool) -> String {
         ));
     }
 
+    output.push_str(&human_summary(report, threshold, verbose, color));
+    if has_findings {
+        output.push_str(&format!(
+            "\n{}\n",
+            paint(
+                &format!(
+                    "You can check out what each heuristic means at {}",
+                    HEURISTICS_URL
+                ),
+                "2",
+                color
+            )
+        ));
+    }
+    output
+}
+
+fn human_summary(report: &Report, threshold: Risk, verbose: bool, color: bool) -> String {
+    let capabilities = report
+        .capabilities
+        .iter()
+        .map(|capability| capability.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut alerts = BTreeMap::<Risk, BTreeMap<String, usize>>::new();
+
+    for finding in &report.findings {
+        if !finding.suppressed && (verbose || finding.risk >= threshold) {
+            *alerts
+                .entry(finding.risk)
+                .or_default()
+                .entry(display_rule_id(finding))
+                .or_default() += 1;
+        }
+    }
+
+    let alert_count = alerts.values().map(BTreeMap::len).sum::<usize>();
+    let mut output = format!(
+        "\n{}\n{}\n{} ({})\n",
+        paint("Summary", "1;36", color),
+        paint("───────", "36", color),
+        paint("Capabilities", "1", color),
+        capabilities.len(),
+    );
+
+    if capabilities.is_empty() {
+        output.push_str(&format!("  {}\n", paint("none", "2", color)));
+    } else {
+        for capability in capabilities {
+            output.push_str(&format!("  {}\n", paint(capability, "36", color)));
+        }
+    }
+
+    output.push_str(&format!(
+        "{} ({alert_count})\n",
+        paint("Alerts", "1", color),
+    ));
+    if alerts.is_empty() {
+        output.push_str(&format!("  {}\n", paint("none", "2", color)));
+        return output;
+    }
+
+    for risk in [Risk::Critical, Risk::High, Risk::Medium, Risk::Low] {
+        let Some(rules) = alerts.get(&risk) else {
+            continue;
+        };
+        for (rule, count) in rules {
+            let label = format!("{risk:?}");
+            let count = format!("{count:>3}");
+            output.push_str(&format!(
+                "  {} {}  {}\n",
+                paint(&format!("{label:<8}"), risk_color(risk), color),
+                paint(&count, "1", color),
+                paint(rule, "36", color),
+            ));
+        }
+    }
     output
 }
 
 fn human_report_header(report: &Report, color: bool) -> String {
     format!(
-        "{} {} — {} package(s), {} finding(s), {} issue(s)\n",
+        "{} {} — {} package(s), {} finding(s), {} capability type(s), {} issue(s)\n",
         paint("chainsec", "1;36", color),
         report.tool_version,
         report.statistics.packages,
         report.statistics.findings,
+        report.capabilities.len(),
         report.issues.len()
     )
 }
 
-fn human_finding(finding: &chainsec::model::AnalysisPoint, color: bool) -> String {
+fn human_finding(finding: &AnalysisPoint, color: bool) -> String {
     format!(
         "{} {} [{}] {}:{}:{} — {}\n",
         paint(

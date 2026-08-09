@@ -1,10 +1,15 @@
 use std::time::Duration;
 
-use chainsec::{Engine, EngineLimits, FetchPolicy, SourceFetcher, model::Report, rules};
+use chainsec::{
+    Engine, EngineLimits, FetchPolicy, SourceFetcher,
+    model::{Report, Risk, Suppression},
+    rules,
+};
 use tracing::info;
 
 use super::{
     cli::{Cli, OutputFormat},
+    config::SuppressionConfig,
     output::{human_report, sarif_report},
     remote,
 };
@@ -40,12 +45,50 @@ fn rule_selectors(cli: &Cli) -> chainsec::Result<Vec<chainsec::rules::RuleSelect
         .collect()
 }
 
+struct ConfiguredSuppression {
+    selector: chainsec::rules::RuleSelector,
+    package: Option<String>,
+    reason: String,
+}
+
+fn configured_suppressions(
+    suppressions: &[SuppressionConfig],
+) -> chainsec::Result<Vec<ConfiguredSuppression>> {
+    suppressions
+        .iter()
+        .map(|suppression| {
+            Ok(ConfiguredSuppression {
+                selector: rules::parse_rule_selector(&suppression.rule)?,
+                package: suppression.package.clone(),
+                reason: suppression.reason.clone(),
+            })
+        })
+        .collect()
+}
+
+fn apply_suppressions(report: &mut Report, suppressions: &[ConfiguredSuppression]) {
+    for finding in &mut report.findings {
+        if let Some(suppression) = suppressions.iter().find(|suppression| {
+            suppression.selector.matches_finding(finding)
+                && suppression
+                    .package
+                    .as_deref()
+                    .is_none_or(|package| package == finding.package)
+        }) {
+            finding.suppressed = true;
+            finding.suppression = Some(Suppression {
+                reason: suppression.reason.clone(),
+            });
+        }
+    }
+}
+
 fn configured_rules(cli: &Cli) -> chainsec::Result<Vec<chainsec::model::Rule>> {
     let selectors = rule_selectors(cli)?;
     let mut configured_rules = if cli.no_default_rules {
         Vec::new()
     } else {
-        rules::built_in_rules()
+        rules::default_rules()
     };
 
     for path in &cli.rule_packs {
@@ -73,6 +116,7 @@ async fn analyze(
     limits: EngineLimits,
     ignored_packages: &[String],
     ignored_paths: &[String],
+    suppressions: &[ConfiguredSuppression],
 ) -> chainsec::Result<Report> {
     let engine = Engine::new(
         configured_rules,
@@ -87,25 +131,35 @@ async fn analyze(
     .with_ignored_packages(ignored_packages.iter().cloned())
     .with_ignored_root_paths(ignored_paths.iter().cloned());
 
-    if let Some(remote) = &cli.remote {
+    let mut report = if let Some(remote) = &cli.remote {
         let fetched = fetcher
             .fetch_remote_root(remote::dependency(remote)?)
             .await?;
-        engine.analyze_fetched_root(fetched).await
+        engine.analyze_fetched_root(fetched).await?
     } else {
-        engine.analyze(&cli.path).await
-    }
+        engine.analyze(&cli.path).await?
+    };
+    apply_suppressions(&mut report, suppressions);
+    Ok(report)
 }
 
 fn render_report(
     format: OutputFormat,
     report: &Report,
     configured_rules: &[chainsec::model::Rule],
+    threshold: Risk,
+    verbose: bool,
     color: bool,
 ) -> chainsec::Result<String> {
     match format {
         OutputFormat::Json => serde_json::to_string_pretty(report).map_err(rendering_error),
-        OutputFormat::Human => Ok(human_report(report, color)),
+        OutputFormat::Human => Ok(human_report(
+            report,
+            configured_rules,
+            threshold,
+            verbose,
+            color,
+        )),
         OutputFormat::Sarif => {
             serde_json::to_string_pretty(&sarif_report(report, configured_rules))
                 .map_err(rendering_error)
@@ -123,6 +177,7 @@ pub(super) async fn run(
     cli: &Cli,
     ignored_packages: &[String],
     ignored_paths: &[String],
+    suppressions: &[SuppressionConfig],
     color: bool,
 ) -> chainsec::Result<(Report, String)> {
     let limits = engine_limits(cli);
@@ -134,6 +189,7 @@ pub(super) async fn run(
         limits.clone(),
     )?;
     let configured_rules = configured_rules(cli)?;
+    let suppressions = configured_suppressions(suppressions)?;
 
     info!(path = %cli.path.display(), "starting analysis");
     let report = analyze(
@@ -143,6 +199,7 @@ pub(super) async fn run(
         limits,
         ignored_packages,
         ignored_paths,
+        &suppressions,
     )
     .await?;
     info!(
@@ -151,7 +208,14 @@ pub(super) async fn run(
         issues = report.issues.len(),
         "analysis complete"
     );
-    let rendered = render_report(cli.format, &report, &configured_rules, color)?;
+    let rendered = render_report(
+        cli.format,
+        &report,
+        &configured_rules,
+        cli.fail_on.into(),
+        cli.verbose,
+        color,
+    )?;
 
     Ok((report, rendered))
 }

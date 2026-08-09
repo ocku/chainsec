@@ -4,8 +4,28 @@ use serde::Deserialize;
 
 use crate::{
     error::{Error, Result},
-    model::{AnalysisPoint, Confidence, FindingType, Language, Risk, Rule, RuleGroup},
+    model::{
+        AnalysisPoint, Confidence, FindingType, Language, Risk, Rule, RuleGroup, SemanticRule,
+    },
 };
+
+macro_rules! semantic_rule {
+    ($id:expr, $language:expr, $kind:expr, $risk:expr, $confidence:expr, $rationale:expr, $remediation:expr, $semantic:expr) => {
+        super::semantic_rule(
+            $id,
+            $language,
+            super::RuleDefinition {
+                finding_type: $kind,
+                risk: $risk,
+                confidence: $confidence,
+                rationale: $rationale,
+                remediation: $remediation,
+                query: "",
+            },
+            $semantic,
+        )
+    };
+}
 
 macro_rules! rule {
     ($id:expr, $language:expr, $kind:expr, $risk:expr, $confidence:expr, $rationale:expr, $remediation:expr, $query:expr) => {
@@ -24,6 +44,59 @@ macro_rules! rule {
     };
 }
 
+macro_rules! js_ts_rules {
+    ($rules:expr, $prefix:literal, $id:literal, $capability:expr, $kind:expr, $risk:expr, $confidence:expr, $rationale:expr, $remediation:expr, $query:expr) => {{
+        $rules.push(
+            rule!(
+                concat!($prefix, $id, ".js"),
+                Language::JavaScript,
+                $kind,
+                $risk,
+                $confidence,
+                $rationale,
+                $remediation,
+                $query
+            )
+            .with_capability($capability),
+        );
+        $rules.push(
+            rule!(
+                concat!($prefix, $id, ".ts"),
+                Language::TypeScript,
+                $kind,
+                $risk,
+                $confidence,
+                $rationale,
+                $remediation,
+                $query
+            )
+            .with_capability($capability),
+        );
+    }};
+    ($rules:expr, $prefix:literal, $id:literal, $kind:expr, $risk:expr, $confidence:expr, $rationale:expr, $remediation:expr, $query:expr) => {{
+        $rules.push(rule!(
+            concat!($prefix, $id, ".js"),
+            Language::JavaScript,
+            $kind,
+            $risk,
+            $confidence,
+            $rationale,
+            $remediation,
+            $query
+        ));
+        $rules.push(rule!(
+            concat!($prefix, $id, ".ts"),
+            Language::TypeScript,
+            $kind,
+            $risk,
+            $confidence,
+            $rationale,
+            $remediation,
+            $query
+        ));
+    }};
+}
+
 pub(super) struct RuleDefinition<'a> {
     pub(super) finding_type: FindingType,
     pub(super) risk: Risk,
@@ -33,9 +106,14 @@ pub(super) struct RuleDefinition<'a> {
     pub(super) query: &'a str,
 }
 
-pub(super) fn standard_rule(id: &str, language: Language, definition: RuleDefinition<'_>) -> Rule {
+pub(super) fn semantic_rule(
+    id: impl Into<String>,
+    language: Language,
+    definition: RuleDefinition<'_>,
+    semantic: SemanticRule,
+) -> Rule {
     Rule {
-        id: id.to_owned(),
+        id: canonical_rule_id(id.into(), language),
         version: 1,
         language,
         finding_type: definition.finding_type,
@@ -43,15 +121,65 @@ pub(super) fn standard_rule(id: &str, language: Language, definition: RuleDefini
         confidence: definition.confidence,
         rationale: definition.rationale.to_owned(),
         remediation: definition.remediation.to_owned(),
-        query: definition.query.to_owned(),
+        capability: None,
+        query: String::new(),
+        semantic: Some(semantic),
         entropy: None,
     }
 }
 
+pub(super) fn standard_rule(id: &str, language: Language, definition: RuleDefinition<'_>) -> Rule {
+    Rule {
+        id: canonical_rule_id(id.to_owned(), language),
+        version: 1,
+        language,
+        finding_type: definition.finding_type,
+        risk: definition.risk,
+        confidence: definition.confidence,
+        rationale: definition.rationale.to_owned(),
+        remediation: definition.remediation.to_owned(),
+        capability: None,
+        query: definition.query.to_owned(),
+        semantic: None,
+        entropy: None,
+    }
+}
+
+fn canonical_rule_id(id: String, language: Language) -> String {
+    let suffix = match language {
+        Language::Python => ".py",
+        Language::JavaScript => ".js",
+        Language::TypeScript => ".ts",
+    };
+    let Some(name) = id.strip_suffix(suffix) else {
+        return id;
+    };
+    let Some(name) = name.strip_prefix("chainsec.") else {
+        return id;
+    };
+    let language = match language {
+        Language::Python => "py",
+        Language::JavaScript => "js",
+        Language::TypeScript => "ts",
+    };
+    format!("chainsec.{language}.{name}")
+}
+
 mod built_in;
-mod guarddog;
+mod capabilities;
 
 pub use built_in::built_in_rules;
+pub use capabilities::capability_rules;
+
+/// Returns the complete default catalog used by the CLI.
+///
+/// Detection rules (including GuardDog-derived rules) are kept separate from
+/// informational-only capability rules.
+pub fn default_rules() -> Vec<Rule> {
+    let mut rules = built_in_rules();
+    rules.extend(capability_rules());
+    rules
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuleSelector {
@@ -207,6 +335,27 @@ fn validate_rule(rule: &Rule) -> Result<()> {
         });
     }
 
+    if let Some(semantic) = &rule.semantic {
+        let language_matches = matches!(
+            (semantic, rule.language),
+            (
+                SemanticRule::JsTsDynamicExecution
+                    | SemanticRule::JsTsStringTableObfuscation
+                    | SemanticRule::JsTsRc4Decoder
+                    | SemanticRule::JsTsVirtualMachine,
+                Language::JavaScript | Language::TypeScript
+            )
+        );
+        if !language_matches {
+            return Err(Error::InvalidConfiguration {
+                message: format!(
+                    "rule {} uses a semantic matcher for a different language",
+                    rule.id
+                ),
+            });
+        }
+    }
+
     Ok(())
 }
 
@@ -257,9 +406,34 @@ mod tests {
             confidence: Confidence::Medium,
             rationale: "rationale".to_owned(),
             remediation: "remediation".to_owned(),
+            capability: None,
             query: "(string) @match".to_owned(),
+            semantic: None,
             entropy,
         }
+    }
+
+    #[test]
+    fn default_catalog_preserves_the_rule_group_boundaries() {
+        let built_in = built_in_rules();
+        let capabilities = capability_rules();
+        let default = default_rules();
+
+        assert!(!built_in.is_empty());
+        assert!(
+            built_in
+                .iter()
+                .any(|rule| rule.id.starts_with("chainsec.py.detection.guarddog."))
+        );
+        assert!(!capabilities.is_empty());
+        assert!(capabilities.iter().all(|rule| rule.capability.is_some()));
+        assert!(
+            default
+                .iter()
+                .all(|rule| !rule.id.bytes().any(|byte| byte.is_ascii_uppercase()))
+        );
+        assert_eq!(default.len(), built_in.len() + capabilities.len());
+        validate_rules(&default).unwrap();
     }
 
     #[test]
@@ -305,17 +479,17 @@ mod tests {
     #[test]
     fn rule_selectors_match_grouped_globs() {
         let filesystem = Rule {
-            id: "GD_CAPABILITY_FILESYSTEM_READ_PY".to_owned(),
+            id: "chainsec.py.capability.filesystem-read".to_owned(),
             finding_type: FindingType::FilesystemAccess,
             ..rule(None)
         };
         let network = Rule {
-            id: "GD_CAPABILITY_NETWORK_DOWNLOAD_PY".to_owned(),
+            id: "chainsec.py.capability.network-download".to_owned(),
             finding_type: FindingType::NetworkAccess,
             ..rule(None)
         };
 
-        let selector = parse_rule_selector("filesystem:GD_CAPABILITY_*").unwrap();
+        let selector = parse_rule_selector("filesystem:chainsec.py.capability.*").unwrap();
         assert!(selector.matches_rule(&filesystem));
         assert!(!selector.matches_rule(&network));
         assert!(

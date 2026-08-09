@@ -1,6 +1,8 @@
 [package]
 name = "chainsec"
-version = "0.2.1"
+version = "0.3.0"
+description = "Recursive static source scanner for dependency security analysis"
+license-file = "LICENSE"
 edition = "2024"
 repository = "https://github.com/ocku/chainsec"
 

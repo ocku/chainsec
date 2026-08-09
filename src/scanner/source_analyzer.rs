@@ -8,10 +8,13 @@ use crate::{
     model::{AnalysisPoint, Language, Location, Rule},
 };
 
+use super::semantic;
+
 pub(super) struct CompiledRule<'a> {
     rule: &'a Rule,
-    query: Query,
-    capture_index: u32,
+    query: Option<Query>,
+    capture_index: Option<u32>,
+    semantic_matcher: Option<semantic::SemanticMatcher>,
 }
 
 pub fn validate_rules(rules: &[Rule]) -> Result<()> {
@@ -22,6 +25,14 @@ pub(super) fn compile_rules(rules: &[Rule]) -> Result<Vec<CompiledRule<'_>>> {
     rules
         .iter()
         .map(|rule| {
+            if let Some(semantic_rule) = &rule.semantic {
+                return Ok(CompiledRule {
+                    rule,
+                    query: None,
+                    capture_index: None,
+                    semantic_matcher: Some(semantic::compile(semantic_rule)?),
+                });
+            }
             let query =
                 Query::new(&grammar(rule.language), &rule.query).map_err(|error| Error::Scan {
                     path: PathBuf::from("<rules>"),
@@ -36,8 +47,9 @@ pub(super) fn compile_rules(rules: &[Rule]) -> Result<Vec<CompiledRule<'_>>> {
                     })?;
             Ok(CompiledRule {
                 rule,
-                query,
-                capture_index,
+                query: Some(query),
+                capture_index: Some(capture_index),
+                semantic_matcher: None,
             })
         })
         .collect()
@@ -66,54 +78,103 @@ pub(super) fn scan_file(
         .iter()
         .filter(|compiled| compiled.rule.language == language)
     {
-        let mut cursor = QueryCursor::new();
-        let mut matches = cursor.matches(&compiled.query, tree.root_node(), source);
-        while let Some(query_match) = matches.next() {
-            for capture in query_match
-                .captures
-                .iter()
-                .filter(|capture| capture.index == compiled.capture_index)
-            {
-                let node = capture.node;
-                let location = location_for(node.start_position(), node.end_position());
-                let matched_bytes = &source[node.byte_range()];
-                if compiled
-                    .rule
-                    .entropy
-                    .as_ref()
-                    .is_some_and(|matcher| !has_high_entropy(matched_bytes, matcher))
-                {
-                    continue;
+        match (
+            &compiled.rule.semantic,
+            &compiled.query,
+            compiled.capture_index,
+            &compiled.semantic_matcher,
+        ) {
+            (None, Some(query), Some(capture_index), None) => {
+                let mut cursor = QueryCursor::new();
+                let mut matches = cursor.matches(query, tree.root_node(), source);
+                while let Some(query_match) = matches.next() {
+                    for capture in query_match
+                        .captures
+                        .iter()
+                        .filter(|capture| capture.index == capture_index)
+                    {
+                        push_finding(
+                            &mut findings,
+                            compiled.rule,
+                            path,
+                            package,
+                            source,
+                            capture.node.byte_range(),
+                            location_for(
+                                capture.node.start_position(),
+                                capture.node.end_position(),
+                            ),
+                        );
+                    }
                 }
-
-                let matched_code = String::from_utf8_lossy(matched_bytes).into_owned();
-                let file = path.to_string_lossy();
-                findings.push(AnalysisPoint {
-                    id: AnalysisPoint::stable_id(
-                        &compiled.rule.id,
-                        compiled.rule.version,
-                        package,
-                        &file,
-                        &location,
-                        &matched_code,
-                    ),
-                    rule_id: compiled.rule.id.to_owned(),
-                    rule_version: compiled.rule.version,
-                    finding_type: compiled.rule.finding_type,
-                    risk: compiled.rule.risk,
-                    confidence: compiled.rule.confidence,
-                    rationale: compiled.rule.rationale.to_owned(),
-                    remediation: compiled.rule.remediation.to_owned(),
-                    package: package.to_owned(),
-                    file: path.to_owned(),
-                    location,
-                    matched_code,
-                    suppressed: false,
-                });
             }
+            (Some(_), None, None, Some(matcher)) => {
+                let text = std::str::from_utf8(source).map_err(|error| Error::Scan {
+                    path: path.to_owned(),
+                    message: format!("semantic matching requires valid UTF-8 source: {error}"),
+                })?;
+                for range in semantic::matches(matcher, text, tree.root_node()) {
+                    let location = location_for_offsets(source, &range);
+                    push_finding(
+                        &mut findings,
+                        compiled.rule,
+                        path,
+                        package,
+                        source,
+                        range,
+                        location,
+                    );
+                }
+            }
+            _ => unreachable!("compiled rule does not match its matcher"),
         }
     }
     Ok(findings)
+}
+
+fn push_finding(
+    findings: &mut Vec<AnalysisPoint>,
+    rule: &Rule,
+    path: &Path,
+    package: &str,
+    source: &[u8],
+    range: std::ops::Range<usize>,
+    location: Location,
+) {
+    let matched_bytes = &source[range];
+    if rule
+        .entropy
+        .as_ref()
+        .is_some_and(|matcher| !has_high_entropy(matched_bytes, matcher))
+    {
+        return;
+    }
+    let matched_code = String::from_utf8_lossy(matched_bytes).into_owned();
+    let file = path.to_string_lossy();
+    findings.push(AnalysisPoint {
+        id: AnalysisPoint::stable_id(
+            &rule.id,
+            rule.version,
+            package,
+            &file,
+            &location,
+            &matched_code,
+        ),
+        rule_id: rule.id.to_owned(),
+        rule_version: rule.version,
+        finding_type: rule.finding_type,
+        risk: rule.risk,
+        confidence: rule.confidence,
+        rationale: rule.rationale.to_owned(),
+        remediation: rule.remediation.to_owned(),
+        capability: rule.capability,
+        package: package.to_owned(),
+        file: path.to_owned(),
+        location,
+        matched_code,
+        suppressed: false,
+        suppression: None,
+    });
 }
 
 fn grammar(language: Language) -> tree_sitter::Language {
@@ -131,4 +192,17 @@ fn location_for(start: tree_sitter::Point, end: tree_sitter::Point) -> Location 
         end_line: end.row + 1,
         end_column: end.column + 1,
     }
+}
+
+fn location_for_offsets(source: &[u8], range: &std::ops::Range<usize>) -> Location {
+    let point_for = |offset: usize| {
+        let prefix = &source[..offset];
+        let row = prefix.iter().filter(|byte| **byte == b'\n').count();
+        let column = prefix
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(prefix.len(), |newline| prefix.len() - newline - 1);
+        tree_sitter::Point { row, column }
+    };
+    location_for(point_for(range.start), point_for(range.end))
 }

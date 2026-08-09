@@ -23,8 +23,9 @@ fn json_report_has_versioned_contract() {
         String::from_utf8_lossy(&output.stderr)
     );
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["schema_version"], "1.0.0");
+    assert_eq!(report["schema_version"], "1.1.0");
     assert!(report["findings"].as_array().unwrap().len() >= 3);
+    assert!(report["capabilities"].is_array());
     assert_eq!(report["statistics"]["packages"], 1);
 }
 
@@ -52,6 +53,47 @@ fn human_report_is_the_default_format() {
     let report = String::from_utf8(output.stdout).unwrap();
     assert!(report.starts_with("chainsec "));
     assert!(!report.trim_start().starts_with('{'));
+}
+
+#[test]
+fn human_report_filters_below_threshold_unless_verbose() {
+    let cache = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_chainsec"))
+        .args([
+            "tests/fixtures/scanner",
+            "--max-depth",
+            "0",
+            "--cache",
+            cache.path().to_str().unwrap(),
+            "--fail-on",
+            "critical",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let report = String::from_utf8(output.stdout).unwrap();
+    assert!(!report.contains("High execution:chainsec.py.detection.dynamic-code-execution"));
+    assert!(report.contains("Summary\n───────\nCapabilities ("));
+    assert!(report.contains("Alerts (0)\n  none"));
+
+    let verbose = Command::new(env!("CARGO_BIN_EXE_chainsec"))
+        .args([
+            "tests/fixtures/scanner",
+            "--max-depth",
+            "0",
+            "--cache",
+            cache.path().to_str().unwrap(),
+            "--fail-on",
+            "critical",
+            "--verbose",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(verbose.status.success());
+    let report = String::from_utf8(verbose.stdout).unwrap();
+    assert!(report.contains("High execution:chainsec.py.detection.dynamic-code-execution"));
 }
 
 #[test]
@@ -181,7 +223,7 @@ fn xdg_global_config_takes_precedence_over_home_config() {
         String::from_utf8_lossy(&output.stderr)
     );
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["schema_version"], "1.0.0");
+    assert_eq!(report["schema_version"], "1.1.0");
 }
 
 #[test]
@@ -330,7 +372,7 @@ fn excluded_rule_is_absent_from_the_report() {
             "--cache",
             cache.path().to_str().unwrap(),
             "--exclude-rule",
-            "PY001",
+            "chainsec.py.detection.dynamic-code-execution",
             "--fail-on",
             "high",
         ])
@@ -348,7 +390,7 @@ fn excluded_rule_is_absent_from_the_report() {
             .as_array()
             .unwrap()
             .iter()
-            .all(|finding| finding["rule_id"] != "PY001")
+            .all(|finding| finding["rule_id"] != "chainsec.py.detection.dynamic-code-execution")
     );
 }
 
@@ -374,7 +416,7 @@ fn ignore_rule_supports_grouped_globs() {
             "--ignore-rule",
             "network:*",
             "--ignore-rule",
-            "filesystem:PY*",
+            "filesystem:*",
             "--fail-on",
             "critical",
         ])
@@ -400,6 +442,55 @@ fn ignore_rule_supports_grouped_globs() {
 }
 
 #[test]
+fn configured_suppression_is_auditable_and_does_not_fail_the_scan() {
+    let project = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join("sample.py"), "eval(payload)\n").unwrap();
+    std::fs::write(
+        project.path().join("chainsec.toml"),
+        r#"
+max_depth = 0
+fail_on = "high"
+
+[[suppressions]]
+rule = "execution:chainsec.py.detection.dynamic-code-execution"
+package = "root"
+reason = "The expression is an approved, constrained evaluator."
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_chainsec"))
+        .arg(project.path())
+        .args([
+            "--format",
+            "json",
+            "--cache",
+            cache.path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let finding = report["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["rule_id"] == "chainsec.py.detection.dynamic-code-execution")
+        .unwrap();
+    assert_eq!(finding["suppressed"], true);
+    assert_eq!(
+        finding["suppression"]["reason"],
+        "The expression is an approved, constrained evaluator."
+    );
+}
+
+#[test]
 fn human_report_includes_rule_group_and_dependency() {
     let project = tempfile::tempdir().unwrap();
     let cache = tempfile::tempdir().unwrap();
@@ -420,6 +511,7 @@ fn human_report_includes_rule_group_and_dependency() {
             "human",
             "--fail-on",
             "critical",
+            "--verbose",
         ])
         .output()
         .unwrap();
@@ -430,7 +522,7 @@ fn human_report_includes_rule_group_and_dependency() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("filesystem:PY005"));
+    assert!(stdout.contains("filesystem:chainsec.py.detection.filesystem-open"));
     assert!(stdout.contains("[root]"));
 }
 
@@ -447,7 +539,7 @@ fn root_config_ignores_rules_and_paths() {
     .unwrap();
     std::fs::write(
         project.path().join("chainsec.toml"),
-        "max_depth = 0\nignored_rules = [\"execution:PY001\"]\nignored_paths = [\"tests/*\"]\nfail_on = \"high\"\n",
+        "max_depth = 0\nignored_rules = [\"execution:chainsec.py.detection.dynamic-code-execution\"]\nignored_paths = [\"tests/*\"]\nfail_on = \"high\"\n",
     )
     .unwrap();
 
@@ -458,6 +550,41 @@ fn root_config_ignores_rules_and_paths() {
             "json",
             "--cache",
             cache.path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(report["findings"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn cli_ignores_root_paths() {
+    let project = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    std::fs::create_dir(project.path().join("generated")).unwrap();
+    std::fs::write(
+        project.path().join("generated/ignored.py"),
+        "open('secret', 'w')\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_chainsec"))
+        .arg(project.path())
+        .args([
+            "--format",
+            "json",
+            "--max-depth",
+            "0",
+            "--cache",
+            cache.path().to_str().unwrap(),
+            "--ignore-path",
+            "generated/**",
         ])
         .output()
         .unwrap();
@@ -536,7 +663,10 @@ fn install_script_priorities_distinguish_npm_and_python() {
         .unwrap();
     assert_eq!(npm_output.status.code(), Some(1));
     let npm_report: serde_json::Value = serde_json::from_slice(&npm_output.stdout).unwrap();
-    assert_eq!(npm_report["findings"][0]["rule_id"], "NPM_INSTALL_SCRIPT");
+    assert_eq!(
+        npm_report["findings"][0]["rule_id"],
+        "chainsec.js.detection.manifest.install-hook"
+    );
     assert_eq!(npm_report["findings"][0]["risk"], "high");
 
     let python = tempfile::tempdir().unwrap();
@@ -561,7 +691,10 @@ fn install_script_priorities_distinguish_npm_and_python() {
         String::from_utf8_lossy(&python_output.stderr)
     );
     let python_report: serde_json::Value = serde_json::from_slice(&python_output.stdout).unwrap();
-    assert_eq!(python_report["findings"][0]["rule_id"], "PY_INSTALL_SCRIPT");
+    assert_eq!(
+        python_report["findings"][0]["rule_id"],
+        "chainsec.py.detection.manifest.install-hook"
+    );
     assert_eq!(python_report["findings"][0]["risk"], "medium");
 }
 
@@ -687,7 +820,7 @@ fn output_file_contains_analysis_and_leaves_stdout_empty() {
     assert!(output.stdout.is_empty());
     let report: serde_json::Value =
         serde_json::from_slice(&std::fs::read(report_file.path()).unwrap()).unwrap();
-    assert_eq!(report["schema_version"], "1.0.0");
+    assert_eq!(report["schema_version"], "1.1.0");
 }
 
 #[test]

@@ -1,16 +1,17 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://chainsec.dev/schema/report-1.0.0.json",
+  "$id": "https://chainsec.dev/schema/report-1.1.0.json",
   "title": "chainsec report",
   "type": "object",
-  "required": ["schema_version", "tool_version", "root", "policy", "packages", "findings", "issues", "statistics"],
+  "required": ["schema_version", "tool_version", "root", "policy", "packages", "findings", "capabilities", "issues", "statistics"],
   "properties": {
-    "schema_version": { "const": "1.0.0" },
+    "schema_version": { "const": "1.1.0" },
     "tool_version": { "type": "string" },
     "root": { "type": "string" },
     "policy": { "$ref": "#/$defs/policy" },
     "packages": { "type": "array", "items": { "$ref": "#/$defs/package" } },
     "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+    "capabilities": { "type": "array", "items": { "$ref": "#/$defs/capability" } },
     "issues": { "type": "array", "items": { "$ref": "#/$defs/issue" } },
     "statistics": { "$ref": "#/$defs/statistics" }
   },
@@ -75,7 +76,16 @@
         "file": { "type": "string" },
         "location": { "$ref": "#/$defs/location" },
         "matched_code": { "type": "string" },
-        "suppressed": { "type": "boolean" }
+        "suppressed": { "type": "boolean" },
+        "suppression": { "$ref": "#/$defs/suppression" }
+      },
+      "additionalProperties": false
+    },
+    "suppression": {
+      "type": "object",
+      "required": ["reason"],
+      "properties": {
+        "reason": { "type": "string" }
       },
       "additionalProperties": false
     },
@@ -87,6 +97,27 @@
         "start_column": { "type": "integer", "minimum": 1 },
         "end_line": { "type": "integer", "minimum": 1 },
         "end_column": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "capability": {
+      "type": "object",
+      "required": ["name", "evidence"],
+      "properties": {
+        "name": { "type": "string" },
+        "evidence": { "type": "array", "items": { "$ref": "#/$defs/capability_evidence" } }
+      },
+      "additionalProperties": false
+    },
+    "capability_evidence": {
+      "type": "object",
+      "required": ["rule_id", "package", "file", "location", "matched_code"],
+      "properties": {
+        "rule_id": { "type": "string" },
+        "package": { "type": "string" },
+        "file": { "type": "string" },
+        "location": { "$ref": "#/$defs/location" },
+        "matched_code": { "type": "string" }
       },
       "additionalProperties": false
     },

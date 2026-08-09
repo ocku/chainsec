@@ -5,10 +5,13 @@ mod report;
 
 pub use dependency::{Dependency, Ecosystem, FetchMetadata};
 pub use finding::{
-    AnalysisPoint, Confidence, EntropyMatcher, FindingType, Language, Location, Risk, Rule,
-    RuleGroup,
+    AnalysisPoint, Capability, Confidence, EntropyMatcher, FindingType, Language, Location,
+    Matcher, Risk, Rule, RuleGroup, SemanticRule, Suppression,
 };
 pub use limits::{EngineLimits, SerializableLimits};
-pub use report::{OperationalIssue, PackageReport, PolicySummary, Report, ScanStatistics};
+pub use report::{
+    CapabilityEvidence, CapabilityReport, OperationalIssue, PackageReport, PolicySummary, Report,
+    ScanStatistics,
+};
 
-pub const REPORT_SCHEMA_VERSION: &str = "1.0.0";
+pub const REPORT_SCHEMA_VERSION: &str = "1.1.0";
