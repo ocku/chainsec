@@ -9,6 +9,7 @@ use walkdir::WalkDir;
 mod entropy;
 mod file_analyzer;
 mod filesystem;
+mod semantic;
 mod source_analyzer;
 
 #[cfg(test)]
@@ -161,7 +162,10 @@ fn record_file_analysis(
     };
 
     let is_exempt_fixture = is_test_fixture(path)
-        && matches!(finding.rule_id.as_str(), "FILE_BINARY" | "FILE_COMPRESSED");
+        && matches!(
+            finding.rule_id.as_str(),
+            "chainsec.detection.file.binary" | "chainsec.detection.file.compressed"
+        );
     if !is_exempt_fixture && deduplicated.insert(finding.id.clone()) {
         outcome.findings.push(finding);
     }

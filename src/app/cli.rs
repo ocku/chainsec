@@ -117,6 +117,14 @@ pub(crate) struct Cli {
     )]
     pub(crate) ignored_rules: Vec<String>,
 
+    /// Ignore root-project paths matching GLOB (for example, tests/**); repeat for multiple globs.
+    #[arg(
+        long = "ignore-path",
+        visible_alias = "exclude-path",
+        value_name = "GLOB"
+    )]
+    pub(crate) ignored_paths: Vec<String>,
+
     /// Report format.
     #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
     pub(crate) format: OutputFormat,
@@ -124,6 +132,10 @@ pub(crate) struct Cli {
     /// Exit 1 when an unsuppressed finding meets this severity.
     #[arg(long, value_enum, default_value_t = Severity::High)]
     pub(crate) fail_on: Severity,
+
+    /// Include findings below --fail-on in the human-readable report.
+    #[arg(long)]
+    pub(crate) verbose: bool,
 
     /// Write the analysis report to this file instead of stdout.
     #[arg(short, long, value_name = "PATH")]
@@ -148,5 +160,19 @@ mod tests {
         let cli = Cli::try_parse_from(["chainsec"]).unwrap();
 
         assert!(!cli.online);
+    }
+
+    #[test]
+    fn ignore_path_accepts_repeated_globs_and_exclude_alias() {
+        let cli = Cli::try_parse_from([
+            "chainsec",
+            "--ignore-path",
+            "tests/**",
+            "--exclude-path",
+            "generated/**",
+        ])
+        .unwrap();
+
+        assert_eq!(cli.ignored_paths, ["tests/**", "generated/**"]);
     }
 }

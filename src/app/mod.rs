@@ -47,7 +47,7 @@ pub(super) async fn execute() -> ExitCode {
         Err(error) => return configuration_error(error),
     };
 
-    let (ignored_packages, ignored_paths) =
+    let (ignored_packages, ignored_paths, suppressions) =
         match config::apply(&mut cli, config, config_path.as_deref(), &matches) {
             Ok(value) => value,
             Err(error) => return configuration_error(error),
@@ -69,7 +69,15 @@ pub(super) async fn execute() -> ExitCode {
     let color =
         matches!(cli.format, OutputFormat::Human) && cli.output.is_none() && stdout_is_terminal;
 
-    match analysis::run(&cli, &ignored_packages, &ignored_paths, color).await {
+    match analysis::run(
+        &cli,
+        &ignored_packages,
+        &ignored_paths,
+        &suppressions,
+        color,
+    )
+    .await
+    {
         Ok((report, rendered)) => {
             if let Err(error) = write_report(cli.output.as_deref(), &rendered) {
                 if let Some(path) = &cli.output {

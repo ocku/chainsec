@@ -33,7 +33,8 @@ See the [AI Assistance Notice](AI_NOTICE.md).
 
 What it can find, from the built-in versioned rule catalog:
 
-- Dynamic execution (`eval`, `exec`, `Function`-style constructs) and dynamic module loading
+- Dynamic execution (`eval`, indirect/computed `eval`, `Function`, string timers, Node VM APIs) and dynamic module loading
+- Obfuscator structures including string tables, flattened dispatchers, RC4-like decoders, embedded bytecode VMs, and PyArmor markers
 - Process execution and shell-out to external commands
 - Decoded payloads (base64 and similar decode-then-use patterns) and high-entropy or opaque blobs that may hide payloads
 - Network access (HTTP requests, sockets, DNS) embedded in dependency code
@@ -43,7 +44,7 @@ What it can find, from the built-in versioned rule catalog:
 - Package installation hooks (`setup.py`, npm `preinstall`/`install`/`postinstall` entries), which are reported but never executed
 - Syntax-aware equivalents of GuardDog source-code analyzers, plus custom JSON/YAML rule packs
 
-How it works: Tree-sitter acts as a scalpel. Instead of blunt regex or substring matching over raw text, `chainsec` parses each source file into a concrete syntax tree and runs versioned Tree-sitter queries against it, surgically detecting malicious code and bad practices at the exact construct level — a call to `eval` is matched as a call expression, not as the letters "eval" appearing anywhere in text. This keeps detections precise (fewer false positives from comments, strings, or look-alike identifiers) and pinpoints exact source locations. Complementary bounded file-level heuristics (magic bytes, compression formats, entropy) flag opaque or binary files, and string-literal entropy analysis catches embedded secrets and encoded payloads.
+How it works: Tree-sitter acts as a scalpel. For patterns where syntax alone is insufficient, chainsec also uses bounded per-file semantic matchers: simple aliases, literal arguments, and direct import/loading relationships are correlated without executing code or following cross-file data flow. Instead of blunt regex or substring matching over raw text, `chainsec` parses each source file into a concrete syntax tree and runs versioned Tree-sitter queries against it, surgically detecting malicious code and bad practices at the exact construct level — a call to `eval` is matched as a call expression, not as the letters "eval" appearing anywhere in text. This keeps detections precise (fewer false positives from comments, strings, or look-alike identifiers) and pinpoints exact source locations. Complementary bounded file-level heuristics (magic bytes, compression formats, entropy) flag opaque or binary files, and string-literal entropy analysis catches embedded secrets and encoded payloads.
 
 ## How it works
 
@@ -109,15 +110,22 @@ Without a project `chainsec.toml`, ChainSec uses a centralized cache (`$XDG_CACH
 
 ## Example output
 
-A human report lists each finding with its risk, rule, package, and exact source location:
+A human report summarizes the findings that meet the failure threshold and lists unique capabilities and alerts. Use `--verbose` to include findings below `--fail-on`.
 
 ```text
-chainsec 0.2.0 — 3 package(s), 2 finding(s), 0 issue(s)
-High execution:PY001 [root] src/main.py:12:5 — eval(user_input)
-Medium network:PY004 [root] src/client.py:34:9 — requests.get(url)
+chainsec 0.3.0 — 3 package(s), 2 finding(s), 2 capability type(s), 0 issue(s)
+High python:chainsec.py.detection.dynamic-code-execution:ArbitraryCodeExecution [root] src/main.py:12:5 — eval(user_input)
+
+Summary
+───────
+Capabilities (2)
+  filesystem:read
+  network:connect
+Alerts (1)
+  High       1  python:chainsec.py.detection.dynamic-code-execution:ArbitraryCodeExecution
 ```
 
-JSON reports use schema version `1.0.0` and include stable finding IDs, provenance, and structured issues. See [`docs/RULES_AND_REPORTS.md`](docs/RULES_AND_REPORTS.md) and the [report schema](docs/schema/report.schema.json).
+JSON reports use schema version `1.1.0` and include stable finding IDs, provenance, structured issues, informational capability evidence, and configured suppression reasons. See [`docs/RULES_AND_REPORTS.md`](docs/RULES_AND_REPORTS.md) and the [report schema](docs/schema/report.schema.json).
 
 ## Documentation
 
@@ -125,6 +133,7 @@ JSON reports use schema version `1.0.0` and include stable finding IDs, provenan
 - [Configuration and CLI reference](docs/CONFIGURATION.md)
 - [Dependency resolution and acquisition](docs/RESOLUTION.md)
 - [Rules, reports, and exit status](docs/RULES_AND_REPORTS.md)
+- [Heuristics and capability reference](docs/HEURISTICS.md)
 - [Security model](docs/SECURITY_MODEL.md)
 - [Development and releases](docs/DEVELOPMENT.md)
 - [Frequently asked questions](docs/FAQ.md)

@@ -107,7 +107,7 @@ pub(super) fn is_test_fixture(path: &Path) -> bool {
 
 pub(super) fn language_for(path: &Path) -> Option<Language> {
     match path.extension()?.to_str()? {
-        "py" => Some(Language::Python),
+        "py" | "pyx" | "pyi" => Some(Language::Python),
         "js" | "jsx" | "mjs" | "cjs" => Some(Language::JavaScript),
         "ts" | "tsx" | "mts" | "cts" => Some(Language::TypeScript),
         _ => None,
@@ -154,7 +154,11 @@ fn read_non_source_prefix(path: &Path) -> Result<Vec<u8>> {
 mod tests {
     use std::io::Write;
 
-    use super::read_source_file;
+    use std::path::Path;
+
+    use crate::model::Language;
+
+    use super::{language_for, read_source_file};
 
     #[test]
     fn source_reads_are_limited_even_when_metadata_is_stale() {
@@ -162,5 +166,15 @@ mod tests {
         file.as_file().write_all(b"oversized").unwrap();
 
         assert!(read_source_file(file.path(), 8).is_err());
+    }
+
+    #[test]
+    fn recognizes_python_source_extensions() {
+        for extension in ["py", "pyx", "pyi"] {
+            assert_eq!(
+                language_for(Path::new(&format!("module.{extension}"))),
+                Some(Language::Python)
+            );
+        }
     }
 }

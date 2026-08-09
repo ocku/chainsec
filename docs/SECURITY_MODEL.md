@@ -6,7 +6,7 @@ This document defines the `chainsec` security contract. Static analysis reduces 
 
 The scan root, manifests, lockfiles, dependency names, URLs, downloaded bytes, archives, cache contents, and source text are untrusted. Trusted components are the `chainsec` binary, its Rust dependencies, configured rules, operating system, DNS/TLS stack, and explicitly configured report destination.
 
-`chainsec` analyzes `.py`, `.js`, `.jsx`, `.mjs`, `.cjs`, `.ts`, `.tsx`, `.mts`, and `.cts` files. Supported declaration and lockfile formats are listed in the README. Unsupported lockfile versions produce errors; unsupported resolution forms do not silently fall back to mutable latest versions.
+`chainsec` analyzes `.py`, `.pyx`, `.pyi`, `.js`, `.jsx`, `.mjs`, `.cjs`, `.ts`, `.tsx`, `.mts`, and `.cts` files. Supported declaration and lockfile formats are listed in the README. Unsupported lockfile versions produce errors; unsupported resolution forms do not silently fall back to mutable latest versions.
 
 ## Enforced invariants
 
@@ -64,7 +64,7 @@ Directory symlinks are not followed. `.git`, `.chainsec-cache`, `node_modules`, 
 
 ## Data and report contract
 
-JSON schema `1.0.0` is documented in `docs/schema/report.schema.json`. Findings have stable content-derived IDs, versioned rule IDs, package identifiers, matched code, and source locations. Resolved version, source URL, digest, and source path are recorded in separate package records and linked to findings through the finding's package identifier. Failures are structured issues with a code, operation, package, message, and fatality rather than findings. `--ignore-rule` omits matching `group:rule-id-glob` selectors from reports; ignored selectors are not represented in the current report schema. The suppression field is retained for schema compatibility; the current CLI has no baseline or suppression-file mechanism, so emitted findings are unsuppressed.
+JSON schema `1.1.0` is documented in `docs/schema/report.schema.json`. Findings have stable content-derived IDs, versioned rule IDs, package identifiers, matched code, and source locations. Resolved version, source URL, digest, and source path are recorded in separate package records and linked to findings through the finding's package identifier. The `capabilities` array records informational behavior and its evidence separately from findings. Failures are structured issues with a code, operation, package, message, and fatality rather than findings. `--ignore-rule` omits matching `group:rule-id-glob` selectors from reports; ignored selectors are not represented in the current report schema. Persistent `[[suppressions]]` mark matching findings as suppressed and record their required reason in JSON; suppressed findings are excluded from human and SARIF reports and do not affect the failure threshold.
 
 Reports may be partial: manifest, resolution, fetch, extraction, and scan failures are normally added to `issues` while traversal continues for other packages. Invalid configuration or failures before a report can be created may produce only an error on stderr. With `--output`, the report is written directly to the requested path rather than atomically renamed; parent directories must already exist, and a write failure exits with code `3`.
 

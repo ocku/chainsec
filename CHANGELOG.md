@@ -3,6 +3,29 @@
 All notable changes are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Before `1.0.0`, minor releases may contain breaking API changes; report schema changes are explicitly versioned.
 
 
+## [0.3.0]
+
+### Breaking changes
+
+- JSON report schema is now `1.1.0`. Reports include a required `capabilities` array; consumers that validate the schema or reject unknown fields must update accordingly.
+- Built-in rule IDs now use the `chainsec.*` namespace and rule selectors use canonical finding-type groups. Update `--ignore-rule`, `ignored_rules`, and integrations that match rule IDs.
+- Human reports now show only unsuppressed findings at or above `--fail-on` by default, followed by capability and alert summaries. Use `--verbose` to include lower-severity findings.
+
+### Added
+
+- Structured, informational capability reporting for network, filesystem, process, browser-profile, clipboard, and code-execution behavior, with evidence available in JSON reports.
+- `--verbose` to include findings below the configured `--fail-on` threshold in human-readable reports.
+- Repeated `--ignore-path <GLOB>` root-project exclusions, with `--exclude-path` as a compatibility alias. Persistent exclusions remain available through `ignored_paths` in configuration.
+- Persistent `[[suppressions]]`, which retain a required reason in JSON and exclude matching findings from human and SARIF reports and the failure threshold.
+- Bounded semantic matchers for JavaScript and TypeScript dynamic execution, string-table obfuscation, RC4-like decoders, and embedded bytecode virtual machines.
+- Expanded built-in detection for indirect/computed `eval`, string timers, Node VM APIs, Python reflective import access, Deno network APIs, browser-global mutation, and common code-obfuscation patterns.
+- Expanded unit, integration, CLI, semantic-matcher, and fixture coverage for the new reporting, traversal, suppression, exclusion, and rule behaviors.
+
+### Changed
+
+- Analyze packages concurrently by dependency depth while preserving bounded fetching, deterministic report output, and package limits.
+- Summarize unique capabilities and alerts in human-readable output; JSON contains all findings and capabilities, while SARIF contains unsuppressed findings.
+
 ## [0.2.1]
 
 ### Fixed

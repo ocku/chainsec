@@ -88,14 +88,64 @@ impl RuleGroup {
             "execution" => Some(Self::Execution),
             "obfuscation" => Some(Self::Obfuscation),
             "process" => Some(Self::Process),
-            "network" | "network-access" => Some(Self::Network),
-            "filesystem" | "filesystem-access" | "fs" => Some(Self::Filesystem),
+            "network" => Some(Self::Network),
+            "filesystem" => Some(Self::Filesystem),
             "secret" => Some(Self::Secret),
             "loading" => Some(Self::Loading),
             "deserialization" => Some(Self::Deserialization),
             "install" => Some(Self::Install),
             "file" => Some(Self::File),
             _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Capability {
+    NetworkListen,
+    NetworkRawSocket,
+    NetworkDownload,
+    NetworkResolveDns,
+    NetworkConnect,
+    NetworkTls,
+    SecretReadBrowserProfile,
+    SecretReadEnvironment,
+    SecretReadFile,
+    FilesystemEnumerate,
+    FilesystemArchive,
+    FilesystemRead,
+    FilesystemSetPermissions,
+    FilesystemDelete,
+    FilesystemWrite,
+    ProcessSpawn,
+    ProcessSchedule,
+    RuntimeReadClipboard,
+    CodeDynamicExecution,
+}
+
+impl Capability {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::NetworkListen => "network:listen",
+            Self::NetworkRawSocket => "network:raw-socket",
+            Self::NetworkDownload => "network:download",
+            Self::NetworkResolveDns => "network:resolve-dns",
+            Self::NetworkConnect => "network:connect",
+            Self::NetworkTls => "network:tls",
+            Self::SecretReadBrowserProfile => "secret:read-browser-profile",
+            Self::SecretReadEnvironment => "secret:read-environment",
+            Self::SecretReadFile => "secret:read-file",
+            Self::FilesystemEnumerate => "filesystem:enumerate",
+            Self::FilesystemArchive => "filesystem:archive",
+            Self::FilesystemRead => "filesystem:read",
+            Self::FilesystemSetPermissions => "filesystem:set-permissions",
+            Self::FilesystemDelete => "filesystem:delete",
+            Self::FilesystemWrite => "filesystem:write",
+            Self::ProcessSpawn => "process:spawn",
+            Self::ProcessSchedule => "process:schedule",
+            Self::RuntimeReadClipboard => "runtime:read-clipboard",
+            Self::CodeDynamicExecution => "code:dynamic-execution",
         }
     }
 }
@@ -122,6 +172,25 @@ fn default_maximum_whitespace_ratio() -> f64 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticRule {
+    JsTsDynamicExecution,
+    JsTsStringTableObfuscation,
+    JsTsRc4Decoder,
+    JsTsVirtualMachine,
+}
+
+/// The mechanism used to find a rule match. Tree-sitter queries remain the
+/// portable rule-pack format; semantic matchers perform bounded, per-file
+/// structural matching that cannot be expressed as a syntax query alone.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Matcher {
+    TreeSitterQuery { query: String },
+    Semantic { semantic: SemanticRule },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Rule {
     pub id: String,
@@ -132,9 +201,35 @@ pub struct Rule {
     pub confidence: Confidence,
     pub rationale: String,
     pub remediation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability: Option<Capability>,
+    /// Existing rule packs use `query`; semantic rules leave it empty and set
+    /// `semantic` instead. Keeping this field preserves pack compatibility.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub query: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic: Option<SemanticRule>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entropy: Option<EntropyMatcher>,
+}
+
+impl Rule {
+    #[must_use]
+    pub fn with_capability(mut self, capability: Capability) -> Self {
+        self.capability = Some(capability);
+        self
+    }
+
+    pub fn matcher(&self) -> Matcher {
+        match &self.semantic {
+            Some(semantic) => Matcher::Semantic {
+                semantic: semantic.clone(),
+            },
+            None => Matcher::TreeSitterQuery {
+                query: self.query.clone(),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,6 +238,11 @@ pub struct Location {
     pub start_column: usize,
     pub end_line: usize,
     pub end_column: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Suppression {
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,11 +255,15 @@ pub struct AnalysisPoint {
     pub confidence: Confidence,
     pub rationale: String,
     pub remediation: String,
+    #[serde(skip)]
+    pub capability: Option<Capability>,
     pub package: String,
     pub file: PathBuf,
     pub location: Location,
     pub matched_code: String,
     pub suppressed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suppression: Option<Suppression>,
 }
 
 impl AnalysisPoint {

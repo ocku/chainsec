@@ -2,9 +2,11 @@
 
 ## Reports
 
-JSON reports use schema version `1.0.0`; the schema is in [`schema/report.schema.json`](schema/report.schema.json). Findings include a stable SHA-256 ID, rule ID/version, risk, confidence, rationale, remediation, package identifier, source location, matched code, and suppression state. Resolved package provenance is recorded in separate `packages` records and linked to findings through the finding's package identifier. Operational issues are structured separately from findings.
+JSON reports use schema version `1.1.0`; the schema is in [`schema/report.schema.json`](schema/report.schema.json). Findings include a stable SHA-256 ID, rule ID/version, risk, confidence, rationale, remediation, package identifier, source location, matched code, and suppression state. Resolved package provenance is recorded in separate `packages` records and linked to findings through the finding's package identifier. Operational issues and observed capabilities are structured separately from findings.
 
-`--ignore-rule` removes matching rules before reporting; ignored selectors are not recorded in the current report schema. The suppression field is retained for schema compatibility, and emitted findings are unsuppressed because the CLI has no baseline or suppression-file mechanism.
+`chainsec` scans dependency source without executing it. The `capabilities` array inventories observed behavior using stable `domain:action[-target]` names: `network:listen`, `network:connect`, `network:tls`, `network:download`, `network:resolve-dns`, `network:raw-socket`, `filesystem:read`, `filesystem:write`, `filesystem:delete`, `filesystem:enumerate`, `filesystem:archive`, `filesystem:set-permissions`, `process:spawn`, `process:schedule`, `secret:read-environment`, `secret:read-file`, `secret:read-browser-profile`, `runtime:read-clipboard`, and `code:dynamic-execution`. Each record includes the rule, package, source location, and matched code that established the capability. Capabilities are informational: they do not count as findings and do not affect `--fail-on` exit status.
+
+`--ignore-rule` removes matching rules before reporting; ignored selectors are not recorded in the current report schema. Configured `[[suppressions]]` leave matching findings in JSON with `suppressed: true` and a `suppression.reason`, but exclude them from human and SARIF output and from `--fail-on` evaluation.
 
 A report may be partial. Manifest, resolution, fetch, extraction, and scan failures are normally recorded in the `issues` array and traversal continues for other packages. A package with an acquisition or scan issue may therefore be absent from `packages`, or may be present without all transitive dependencies analyzed.
 
@@ -12,22 +14,29 @@ When `--output` is supplied, `chainsec` writes the analysis directly to the spec
 
 ## Example report
 
-Human output is the default report format. It is a compact summary followed by one line per finding and issue:
+Human output is the default report format. It lists unsuppressed findings that meet `--fail-on`, any operational issues, and a final summary of unique capabilities and unique alerts. Capability matching locations and source snippets are intentionally omitted from human output.
 
 ```text
-chainsec 0.2.0 — 3 package(s), 2 finding(s), 0 issue(s)
-High execution:PY001 [root] src/main.py:12:5 — eval(user_input)
-Medium network:PY004 [root] src/client.py:34:9 — requests.get(url)
+chainsec 0.3.0 — 3 package(s), 1 finding(s), 2 capability type(s), 0 issue(s)
+High python:chainsec.py.detection.dynamic-code-execution:ArbitraryCodeExecution [root] src/main.py:12:5 — eval(user_input)
+
+Summary
+───────
+Capabilities (2)
+  filesystem:read
+  network:connect
+Alerts (1)
+  High       1  python:chainsec.py.detection.dynamic-code-execution:ArbitraryCodeExecution
 ```
 
-Each finding line shows the risk, rule as `group:rule_id`, package identifier, file and `line:column`, and matched code. Use `--format json` or `--format sarif` for machine-readable output. Human reports are colorized only when written directly to a terminal.
+Each finding line shows the risk, rule as `language:rule_id:FindingType`, package identifier, file and `line:column`, and matched code. JSON and SARIF retain the same stable machine rule IDs. Pass `--verbose` to include findings below `--fail-on`; it does not expose capability evidence locations. Use `--format json` or `--format sarif` for complete machine-readable output. Human reports are colorized only when written directly to a terminal.
 
-A JSON report is a single object with `schema_version`, `tool_version`, `root`, `policy`, `packages`, `findings`, `issues`, and `statistics`:
+A JSON report is a single object with `schema_version`, `tool_version`, `root`, `policy`, `packages`, `findings`, `capabilities`, `issues`, and `statistics`:
 
 ```json
 {
-  "schema_version": "1.0.0",
-  "tool_version": "0.2.0",
+  "schema_version": "1.1.0",
+  "tool_version": "0.3.0",
   "root": "/path/to/project",
   "policy": { "require_lockfile": true, "offline": true, "trust_local_input": false, "allowed_hosts": [], "limits": { } },
   "packages": [
@@ -46,7 +55,7 @@ A JSON report is a single object with `schema_version`, `tool_version`, `root`, 
   "findings": [
     {
       "id": "sha256:...",
-      "rule_id": "PY001",
+      "rule_id": "chainsec.py.detection.dynamic-code-execution",
       "rule_version": 1,
       "finding_type": "arbitrary_code_execution",
       "risk": "high",
@@ -60,8 +69,14 @@ A JSON report is a single object with `schema_version`, `tool_version`, `root`, 
       "suppressed": false
     }
   ],
+  "capabilities": [
+    {
+      "name": "network:connect",
+      "evidence": [{ "rule_id": "chainsec.py.capability.network-connect", "package": "root", "file": "src/client.py", "location": { "start_line": 34, "start_column": 9, "end_line": 34, "end_column": 26 }, "matched_code": "requests.get(url)" }]
+    }
+  ],
   "issues": [],
-  "statistics": { "packages": 3, "source_files": 42, "source_bytes": 81920, "findings": 2, "cache_hits": 1 }
+  "statistics": { "packages": 3, "source_files": 42, "source_bytes": 81920, "findings": 1, "cache_hits": 1 }
 }
 ```
 
@@ -69,11 +84,22 @@ SARIF output follows SARIF 2.1.0 with one rule per configured rule and one resul
 
 ## Built-in rules
 
-The built-in catalog covers dynamic execution, process execution, decoded payloads, network access, filesystem access, environment/secret access, unsafe deserialization, dynamic loading, package installation hooks, and syntax-aware equivalents of GuardDog source-code analyzers. Manifest checks report `PY_INSTALL_SCRIPT` for `setup.py` and `NPM_INSTALL_SCRIPT` for npm `preinstall`, `install`, or `postinstall` entries; these hooks are identified but never executed.
+The default catalog is assembled from two distinct groups:
 
-GuardDog-inspired source-code rules are implemented only through Tree-sitter syntax queries; their byte-signature and whole-file substring/count analyzers are omitted. Separate file-level heuristics may still use bounded magic-byte and entropy checks to flag opaque or compressed files.
+- `built_in` contains all detection rules, including ChainSec's independent Tree-sitter implementations of GuardDog source-code analyzer patterns. These produce findings and may also declare a capability when a detection supplies useful capability evidence.
+- `capabilities` contains informational-only rules that add capability evidence not already supplied by a detection. Every rule in this group declares a capability, so its matches never become findings. This group also includes capability-only patterns derived from GuardDog.
+
+The detection catalog covers dynamic execution, process execution, decoded payloads, common code-obfuscation patterns, network access (including Deno client/server APIs), filesystem access, environment/secret access, unsafe deserialization, dynamic loading, browser-global mutation, package installation hooks, and GuardDog-derived threat patterns. Manifest checks report `chainsec.py.detection.manifest.install-hook` for `setup.py` and npm `preinstall`, `install`, or `postinstall` entries; these hooks are identified but never executed.
+
+GuardDog-derived source-code rules are implemented only through Tree-sitter syntax queries; their byte-signature and whole-file substring/count analyzers are omitted. Their attribution is recorded in [`docs/THIRD_PARTY.md`](THIRD_PARTY.md). Separate file-level heuristics may still use bounded magic-byte and entropy checks to flag opaque or compressed files.
+
+Built-in dynamic-loading checks also identify direct or `getattr`/`setattr` Python reflective namespace access that can reach import machinery (`__globals__`, `__builtins__`, `__import__`, loaders, or module specifications). Built-in obfuscation heuristics identify character-code assembly (long arrays joined directly or through Python `chr`/`ord`, or long JavaScript/TypeScript arrays mapped through `String.fromCharCode`), string literals containing 16 or more consecutive hexadecimal, octal, or Unicode escapes (including two or more concatenated literals with at least eight escapes each), and generated or visually ambiguous identifiers such as `_0x1d8f` or `OO0O0O`. These are syntax-aware signals, not proof of malicious intent.
 
 High-entropy detection captures string-literal nodes with Tree-sitter and reports non-whitespace values of at least 32 characters whose Shannon entropy is at least 5.0 bits per character. Literals containing recognized HTTP(S) or FTP URLs are excluded. The string-literal rules do not inspect comments or arbitrary raw source bytes. Every file is also subject to bounded file-level checks for recognized compressed formats, binary data, and unusually high entropy. `chainsec` reads supported source files in full, subject to `--max-source-file`; for other files it reads only a prefix, currently up to 1 MiB. These file-level checks are heuristic and do not decode, execute, disassemble, or semantically analyze native code. Rules do not prove either exploitability or safety.
+
+## Rule ID format
+
+Built-in IDs are lowercase, descriptive dotted names. Source-language rules begin with `chainsec.py.`, `chainsec.js.`, or `chainsec.ts.`; language-agnostic file rules begin with `chainsec.`. Detection rules include `.detection.`, including `.detection.guarddog.` for GuardDog-derived patterns; informational rules include `.capability.`. For example, `chainsec.py.detection.dynamic-code-execution` and `chainsec.js.capability.filesystem-delete`. Use a `group:glob` selector to scope by behavior category, for example `filesystem:chainsec.*.capability.filesystem-delete` or `network:chainsec.*.detection.guarddog.reverse-shell`.
 
 ## Custom rule packs
 

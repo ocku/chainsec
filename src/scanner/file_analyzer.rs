@@ -1,16 +1,17 @@
 use std::path::Path;
 
+#[cfg(test)]
 use super::entropy::shannon_entropy;
 use crate::model::{AnalysisPoint, Confidence, FindingType, Location, Risk};
 
 const MIN_HIGH_ENTROPY_BYTES: usize = 256;
 const HIGH_ENTROPY_THRESHOLD: f64 = 7.0;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum FileKind {
     Compressed(&'static str),
     Binary,
-    HighEntropy,
+    HighEntropy(f64),
 }
 
 pub fn analyze_with_size(
@@ -21,7 +22,7 @@ pub fn analyze_with_size(
 ) -> Option<AnalysisPoint> {
     let kind = classify_file(path, bytes)?;
     let (rule_id, rationale, remediation, matched_code, risk, confidence) =
-        finding_details(kind, bytes, file_size);
+        finding_details(kind, file_size);
 
     let location = Location {
         start_line: 1,
@@ -39,11 +40,13 @@ pub fn analyze_with_size(
         confidence,
         rationale,
         remediation: remediation.to_owned(),
+        capability: None,
         package: package.to_owned(),
         file: path.to_owned(),
         location,
         matched_code: matched_code.to_owned(),
         suppressed: false,
+        suppression: None,
     })
 }
 
@@ -56,10 +59,11 @@ fn classify_file(path: &Path, bytes: &[u8]) -> Option<FileKind> {
         return None;
     }
 
-    if bytes.len() >= MIN_HIGH_ENTROPY_BYTES
-        && shannon_entropy(bytes.iter().copied()) >= HIGH_ENTROPY_THRESHOLD
-    {
-        return Some(FileKind::HighEntropy);
+    if bytes.len() >= MIN_HIGH_ENTROPY_BYTES {
+        let entropy = shannon_entropy_bytes(bytes);
+        if entropy >= HIGH_ENTROPY_THRESHOLD {
+            return Some(FileKind::HighEntropy(entropy));
+        }
     }
 
     is_binary(bytes).then_some(FileKind::Binary)
@@ -67,12 +71,11 @@ fn classify_file(path: &Path, bytes: &[u8]) -> Option<FileKind> {
 
 fn finding_details(
     kind: FileKind,
-    bytes: &[u8],
     file_size: u64,
 ) -> (&'static str, String, &'static str, String, Risk, Confidence) {
     match kind {
         FileKind::Compressed(format) => (
-            "FILE_COMPRESSED",
+            "chainsec.detection.file.compressed",
             format!(
                 "The file is compressed ({format}), which can conceal payloads from source analysis."
             ),
@@ -82,25 +85,41 @@ fn finding_details(
             Confidence::High,
         ),
         FileKind::Binary => (
-            "FILE_BINARY",
+            "chainsec.detection.file.binary",
             "The file contains binary data and cannot be fully inspected by the source analyser.".to_owned(),
             "Inspect the file with an appropriate binary analyser and verify its provenance.",
             format!("binary file, size: {file_size} bytes"),
             Risk::High,
             Confidence::High,
         ),
-        FileKind::HighEntropy => (
-            "FILE_HIGH_ENTROPY",
+        FileKind::HighEntropy(entropy) => (
+            "chainsec.detection.file.high-entropy-file",
             "The file has unusually high Shannon entropy and may contain encrypted, packed, or compressed data without a recognized signature.".to_owned(),
             "Inspect the file contents and provenance; do not execute opaque data without review.",
             format!(
                 "high-entropy file, size: {file_size} bytes, entropy: {:.2} bits/byte",
-                shannon_entropy(bytes.iter().copied())
+                entropy
             ),
             Risk::Medium,
             Confidence::Medium,
         ),
     }
+}
+
+fn shannon_entropy_bytes(bytes: &[u8]) -> f64 {
+    let mut frequencies = [0usize; 256];
+    for byte in bytes {
+        frequencies[*byte as usize] += 1;
+    }
+
+    let length = bytes.len() as f64;
+    frequencies.into_iter().fold(0.0, |entropy, count| {
+        if count == 0 {
+            return entropy;
+        }
+        let probability = count as f64 / length;
+        entropy - probability * probability.log2()
+    })
 }
 
 fn compression_format(bytes: &[u8]) -> Option<&'static str> {
@@ -153,10 +172,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn byte_entropy_matches_the_generic_entropy_calculation() {
+        let bytes = (0..=255).cycle().take(1024).collect::<Vec<_>>();
+        assert!((shannon_entropy_bytes(&bytes) - shannon_entropy(bytes)).abs() < f64::EPSILON);
+    }
+
+    #[test]
     fn recognizes_compressed_formats_before_binary_detection() {
         let finding =
             analyze_with_size(Path::new("payload.gz"), "root", &[0x1f, 0x8b, 0, 1], 4).unwrap();
-        assert_eq!(finding.rule_id, "FILE_COMPRESSED");
+        assert_eq!(finding.rule_id, "chainsec.detection.file.compressed");
         assert!(finding.matched_code.contains("gzip"));
     }
 
@@ -164,7 +189,7 @@ mod tests {
     fn recognizes_binary_files() {
         let finding =
             analyze_with_size(Path::new("payload.bin"), "root", &[0, 1, 2, 3], 4).unwrap();
-        assert_eq!(finding.rule_id, "FILE_BINARY");
+        assert_eq!(finding.rule_id, "chainsec.detection.file.binary");
     }
 
     #[test]
@@ -184,7 +209,7 @@ mod tests {
     fn does_not_trust_an_asset_extension_without_a_matching_signature() {
         let finding =
             analyze_with_size(Path::new("payload.png"), "root", &[0, 1, 2, 3], 4).unwrap();
-        assert_eq!(finding.rule_id, "FILE_BINARY");
+        assert_eq!(finding.rule_id, "chainsec.detection.file.binary");
     }
 
     #[test]
@@ -197,7 +222,7 @@ mod tests {
             analyze_with_size(Path::new("payload.dat"), "root", &bytes, bytes.len() as u64)
                 .unwrap()
                 .rule_id,
-            "FILE_HIGH_ENTROPY"
+            "chainsec.detection.file.high-entropy-file"
         );
     }
 }

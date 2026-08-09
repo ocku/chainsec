@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use super::{AnalysisPoint, SerializableLimits};
+use super::{AnalysisPoint, Location, SerializableLimits};
 use crate::model::REPORT_SCHEMA_VERSION;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +27,21 @@ pub struct OperationalIssue {
     pub fatal: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilityEvidence {
+    pub rule_id: String,
+    pub package: String,
+    pub file: PathBuf,
+    pub location: Location,
+    pub matched_code: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilityReport {
+    pub name: String,
+    pub evidence: Vec<CapabilityEvidence>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ScanStatistics {
     pub packages: u64,
@@ -44,6 +59,7 @@ pub struct Report {
     pub policy: PolicySummary,
     pub packages: Vec<PackageReport>,
     pub findings: Vec<AnalysisPoint>,
+    pub capabilities: Vec<CapabilityReport>,
     pub issues: Vec<OperationalIssue>,
     pub statistics: ScanStatistics,
 }
@@ -57,6 +73,7 @@ impl Report {
             policy,
             packages: Vec::new(),
             findings: Vec::new(),
+            capabilities: Vec::new(),
             issues: Vec::new(),
             statistics: ScanStatistics::default(),
         }
