@@ -5,6 +5,11 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [0.4.0]
 
+### Breaking changes
+
+- Removed the deprecated `--exclude-rule` and `--exclude-path` compatibility aliases. Use `--ignore-rule` and `--ignore-path` instead.
+- Removed semantic matchers from the custom rule-pack format. Migrate rules using `semantic` to Tree-sitter `query` definitions containing an `@match` capture.
+
 ### Added
 
 - `--threads <THREADS>` to bound concurrent package and source-file analysis, defaulting to 16 workers.
@@ -17,7 +22,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - Improved analyzer performance by approximately 100% through concurrent source-file analysis and reuse of a once-compiled Tree-sitter catalog.
 - Compile the configured Tree-sitter catalog once per scan and analyze source files concurrently through a shared bounded worker pool. All built-in source detections now use Tree-sitter queries rather than separate semantic matchers.
 - Rebalanced built-in prioritization: ordinary network requests remain informational capabilities, while credential-like environment access and screen capture are high-risk findings.
-- Reduced false positives from short static JavaScript/TypeScript `Function` constructors and high-entropy-looking encoding alphabets, character tables, regular-expression ranges, digest metadata, and serialized binary markers.
+- Reduced false positives from high-entropy-looking encoding alphabets, character tables, regular-expression ranges, digest metadata, and serialized binary markers.
 - Remote scans using the official PyPI metadata service now automatically allow `files.pythonhosted.org`, where official package artifacts are hosted.
 
 ### Fixed
@@ -37,7 +42,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 - Structured, informational capability reporting for network, filesystem, process, browser-profile, clipboard, and code-execution behavior, with evidence available in JSON reports.
 - `--verbose` to include findings below the configured `--fail-on` threshold in human-readable reports.
-- Repeated `--ignore-path <GLOB>` root-project exclusions, with `--exclude-path` as a compatibility alias. Persistent exclusions remain available through `ignored_paths` in configuration.
+- Repeated `--ignore-path <GLOB>` root-project exclusions, with `--exclude-path` as a compatibility alias until its removal in 0.4.0. Persistent exclusions remain available through `ignored_paths` in configuration.
 - Persistent `[[suppressions]]`, which retain a required reason in JSON and exclude matching findings from human and SARIF reports and the failure threshold.
 - Bounded semantic matchers for JavaScript and TypeScript dynamic execution, string-table obfuscation, RC4-like decoders, and embedded bytecode virtual machines.
 - Expanded built-in detection for indirect/computed `eval`, string timers, Node VM APIs, Python reflective import access, Deno network APIs, browser-global mutation, and common code-obfuscation patterns.
@@ -93,7 +98,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ### Added
 
-- Repeatable `--ignore-rule <GROUP:GLOB>` CLI option for omitting rule groups or matching rule IDs from scans and reports. `--exclude-rule` remains a compatibility alias.
+- Repeatable `--ignore-rule <GROUP:GLOB>` CLI option for omitting rule groups or matching rule IDs from scans and reports. `--exclude-rule` was provided as a compatibility alias until its removal in 0.4.0.
 - Lock-aware resolution for Poetry, Pipfile, uv, npm lock/shrinkwrap versions 1–3, Yarn Classic/Berry, pnpm 5.3/5.4/6/9, and Deno lock versions 1–4.
 - In-process HTTP(S) acquisition with offline defaults, host/redirect policy, finite timeouts, response limits, and integrity verification.
 - Safe wheel, ZIP, and tar-family extraction with traversal, link, special-file, duplicate-path, depth, count, and expanded-byte controls.

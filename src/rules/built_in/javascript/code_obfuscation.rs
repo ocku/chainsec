@@ -82,10 +82,16 @@ pub(super) fn rules() -> Vec<Rule> {
             "A generated string-table accessor indexes an opaque string array at runtime.",
             "Inspect the accessor and replace generated opaque code with reviewed source.",
             r#"
-                    ((variable_declarator
-                      name: (identifier) @string_table
-                      value: (array (string) (string) (string) (string) (string) . (_)*)) @match
-                    (#match? @string_table "^_0x[0-9A-Fa-f]{4,}$"))
+                    ((program
+                      (_)*
+                      [(lexical_declaration
+                         (variable_declarator
+                           value: (array (string) (string) (string) (string) (string) . (_)*)) @match)
+                       (variable_declaration
+                         (variable_declarator
+                           value: (array (string) (string) (string) (string) (string) . (_)*)) @match)]
+                      (_)*) @context
+                      (#match? @context "(?s)(?:const|let|var)\\s+[_$A-Za-z][\\w$]*\\s*=\\s*\\[(?:\\s*['\"][^'\"]*['\"]\\s*,){4}\\s*['\"][^'\"]*['\"][^\\]]*\\].{0,600}?(?:\\[\\s*[_$A-Za-z][\\w$]*\\s*\\]|\\.shift\\s*\\()"))
                     "#
         ),
         rule!(
@@ -156,20 +162,28 @@ pub(super) fn rules() -> Vec<Rule> {
             "A 256-byte stream-cipher-like decoder reconstructs runtime strings.",
             "Inspect the decoded content and do not execute reconstructed payloads.",
             r#"
-                    (call_expression
-                      function: (member_expression
-                        object: (identifier) @string
-                        property: (property_identifier) @decoder)
-                      arguments: (arguments
-                        (binary_expression
-                          operator: "^"
-                          right: (parenthesized_expression
-                            (binary_expression
-                              operator: "%"
-                              right: (number) @modulus)))) @match
-                      (#eq? @string "String")
-                      (#eq? @decoder "fromCharCode")
-                      (#eq? @modulus "256"))
+                    ((program
+                      (_)*
+                      [(lexical_declaration
+                         (variable_declarator
+                           value: [(call_expression
+                                     function: (identifier) @array
+                                     arguments: (arguments (number) @size))
+                                   (new_expression
+                                     constructor: (identifier) @array
+                                     arguments: (arguments (number) @size))]) @match)
+                       (variable_declaration
+                         (variable_declarator
+                           value: [(call_expression
+                                     function: (identifier) @array
+                                     arguments: (arguments (number) @size))
+                                   (new_expression
+                                     constructor: (identifier) @array
+                                     arguments: (arguments (number) @size))]) @match)]
+                      (_)*) @context
+                      (#eq? @array "Array")
+                      (#eq? @size "256")
+                      (#match? @context "(?s)(?:charCodeAt|fromCharCode).{0,2000}?(?:\\^|%\\s*256)"))
                     "#
         ),
         rule!(

@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use tree_sitter::{CaptureQuantifier, Node, Parser, Query, QueryCursor, StreamingIterator};
+use tree_sitter::{CaptureQuantifier, Parser, Query, QueryCursor, StreamingIterator};
 
 use super::entropy::has_high_entropy;
 use crate::{
@@ -131,9 +131,6 @@ pub(super) fn scan_file(
             .iter()
             .filter(|capture| capture.index == compiled.capture_index)
         {
-            if suppress_short_static_function(rule, capture.node, source) {
-                continue;
-            }
             push_finding(
                 &mut findings,
                 rule,
@@ -146,31 +143,6 @@ pub(super) fn scan_file(
         }
     }
     Ok(findings)
-}
-
-fn suppress_short_static_function(rule: &Rule, call: Node<'_>, source: &[u8]) -> bool {
-    if !matches!(rule.language, Language::JavaScript | Language::TypeScript)
-        || !rule.id.ends_with("dynamic-code-execution")
-        || call
-            .child_by_field_name("function")
-            .and_then(|callee| callee.utf8_text(source).ok())
-            != Some("Function")
-    {
-        return false;
-    }
-
-    let Some(arguments) = call.child_by_field_name("arguments") else {
-        return false;
-    };
-    let mut cursor = arguments.walk();
-    arguments.named_children(&mut cursor).all(|argument| {
-        argument.kind() == "string"
-            && argument
-                .utf8_text(source)
-                .ok()
-                .and_then(|literal| literal.get(1..literal.len().saturating_sub(1)))
-                .is_some_and(|value| value.chars().count() <= 32)
-    })
 }
 
 fn push_finding(

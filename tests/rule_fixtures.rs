@@ -230,12 +230,12 @@ const CASES: &[Case] = &[
     Case {
         rule_id: "chainsec.js.detection.heuristic.string-table",
         file: "case.js",
-        source: "const _0x1234 = ['a','b','c','d','e'];\n",
+        source: "const table = ['a','b','c','d','e'];\nfunction decode(i) { return table[i]; }\n",
     },
     Case {
         rule_id: "chainsec.ts.detection.heuristic.string-table",
         file: "case.ts",
-        source: "const _0x1234 = ['a','b','c','d','e'];\n",
+        source: "const table = ['a','b','c','d','e'];\nfunction decode(i: number) { return table[i]; }\n",
     },
     Case {
         rule_id: "chainsec.js.detection.javascript-obfuscator",
@@ -270,12 +270,12 @@ const CASES: &[Case] = &[
     Case {
         rule_id: "chainsec.js.detection.heuristic.rc4-decoder",
         file: "case.js",
-        source: "const state = Array(256); const key = input.charCodeAt(0); const result = String.fromCharCode(key ^ (state[0] % 256));\n",
+        source: "const state = Array(256);\nfunction decode(input) { return String.fromCharCode(input.charCodeAt(0) ^ state[0]); }\n",
     },
     Case {
         rule_id: "chainsec.ts.detection.heuristic.rc4-decoder",
         file: "case.ts",
-        source: "const state = Array(256); const key = input.charCodeAt(0); const result = String.fromCharCode(key ^ (state[0] % 256));\n",
+        source: "const state = Array(256);\nfunction decode(input: string) { return String.fromCharCode(input.charCodeAt(0) ^ state[0]); }\n",
     },
     Case {
         rule_id: "chainsec.js.detection.heuristic.embedded-vm",

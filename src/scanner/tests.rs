@@ -372,12 +372,13 @@ fn python_obfuscator_matches_only_known_markers() {
 }
 
 #[test]
-fn function_constructor_ignores_short_static_strings() {
+fn function_constructor_reports_short_static_payloads() {
     let directory = tempfile::tempdir().unwrap();
     fs::write(
         directory.path().join("constructors.js"),
         concat!(
             "Function('return 1');\n",
+            "Function(\"require('child_process')\")();\n",
             "Function('12345678901234567890123456789012');\n",
             "Function('123456789012345678901234567890123');\n",
             "Function(source);\n",
@@ -404,7 +405,10 @@ fn function_constructor_ignores_short_static_strings() {
     assert_eq!(
         matched_code,
         vec![
+            "Function(\"require('child_process')\")",
+            "Function('12345678901234567890123456789012')",
             "Function('123456789012345678901234567890123')",
+            "Function('return 1')",
             "Function('value', 'return ' + value)",
             "Function(source)",
         ]
