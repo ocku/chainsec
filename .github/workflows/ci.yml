@@ -6,33 +6,29 @@ on:
   pull_request:
     branches: [main]
 
-permissions: {}
-
-env:
-  CARGO_INCREMENTAL: "0"
-  CARGO_TERM_COLOR: always
-  CARGO_AUDIT_VERSION: "0.22.2"
+permissions:
+  contents: read
 
 jobs:
   check:
-    name: ${{ matrix.os }} / Rust 1.89.0
+    name: ${{ matrix.os }} / Rust stable
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-15-intel, windows-2025]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
-    permissions:
-      contents: read
-
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-        with:
-          persist-credentials: false
 
-      - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.89.0 --profile minimal --component rustfmt --component clippy
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust build data
+        uses: Swatinem/rust-cache@v2
 
       - name: Check formatting
         run: cargo fmt --all --check
@@ -48,22 +44,26 @@ jobs:
 
   audit:
     name: Dependency audit
-    runs-on: ubuntu-22.04
-    timeout-minutes: 30
-    permissions:
-      contents: read
-
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo tools
+        uses: actions/cache@v4
         with:
-          persist-credentials: false
+          path: ~/.cargo/bin/cargo-audit
+          key: ${{ runner.os }}-cargo-audit-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-audit-
 
-      - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.89.0 --profile minimal
+      - name: Install cargo-audit if needed
+        shell: bash
+        run: command -v cargo-audit >/dev/null 2>&1 || cargo install cargo-audit --locked
 
-      - name: Install pinned cargo-audit
-        run: cargo install cargo-audit --version "$CARGO_AUDIT_VERSION" --locked
-
-      - name: Audit committed lockfile
+      - name: Audit dependencies
         run: cargo audit
