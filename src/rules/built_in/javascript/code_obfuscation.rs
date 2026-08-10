@@ -86,12 +86,23 @@ pub(super) fn rules() -> Vec<Rule> {
                       (_)*
                       [(lexical_declaration
                          (variable_declarator
+                           name: (identifier) @table
                            value: (array (string) (string) (string) (string) (string) . (_)*)) @match)
                        (variable_declaration
                          (variable_declarator
+                           name: (identifier) @table
                            value: (array (string) (string) (string) (string) (string) . (_)*)) @match)]
-                      (_)*) @context
-                      (#match? @context "(?s)(?:const|let|var)\\s+[_$A-Za-z][\\w$]*\\s*=\\s*\\[(?:\\s*['\"][^'\"]*['\"]\\s*,){4}\\s*['\"][^'\"]*['\"][^\\]]*\\].{0,600}?(?:\\[\\s*[_$A-Za-z][\\w$]*\\s*\\]|\\.shift\\s*\\()"))
+                      (_)*
+                      (function_declaration
+                        body: (statement_block
+                          (_)*
+                          (return_statement
+                            (subscript_expression
+                              object: (identifier) @accessed_table))
+                          (_)*))
+                      (_)*)
+                      (#eq? @table @accessed_table)
+                      (#match? @table "^_0x[0-9A-Fa-f]{4,}$"))
                     "#
         ),
         rule!(
@@ -162,28 +173,48 @@ pub(super) fn rules() -> Vec<Rule> {
             "A 256-byte stream-cipher-like decoder reconstructs runtime strings.",
             "Inspect the decoded content and do not execute reconstructed payloads.",
             r#"
-                    ((program
-                      (_)*
-                      [(lexical_declaration
-                         (variable_declarator
-                           value: [(call_expression
-                                     function: (identifier) @array
-                                     arguments: (arguments (number) @size))
-                                   (new_expression
-                                     constructor: (identifier) @array
-                                     arguments: (arguments (number) @size))]) @match)
-                       (variable_declaration
-                         (variable_declarator
-                           value: [(call_expression
-                                     function: (identifier) @array
-                                     arguments: (arguments (number) @size))
-                                   (new_expression
-                                     constructor: (identifier) @array
-                                     arguments: (arguments (number) @size))]) @match)]
-                      (_)*) @context
+                    ((function_declaration
+                      body: (statement_block
+                        (_)*
+                        [(lexical_declaration
+                           (variable_declarator
+                             name: (identifier) @state
+                             value: [(call_expression
+                                       function: (identifier) @array
+                                       arguments: (arguments (number) @size))
+                                     (new_expression
+                                       constructor: (identifier) @array
+                                       arguments: (arguments (number) @size))]) @match)
+                         (variable_declaration
+                           (variable_declarator
+                             name: (identifier) @state
+                             value: [(call_expression
+                                       function: (identifier) @array
+                                       arguments: (arguments (number) @size))
+                                     (new_expression
+                                       constructor: (identifier) @array
+                                       arguments: (arguments (number) @size))]) @match)]
+                        (_)*
+                        (return_statement
+                          (call_expression
+                            function: (member_expression
+                              object: (identifier) @string
+                              property: (property_identifier) @from_char_code)
+                            arguments: (arguments
+                              (binary_expression
+                                left: (call_expression
+                                  function: (member_expression
+                                    property: (property_identifier) @char_code_at))
+                                operator: "^"
+                                right: (subscript_expression
+                                  object: (identifier) @used_state)))))
+                        (_)*))
                       (#eq? @array "Array")
                       (#eq? @size "256")
-                      (#match? @context "(?s)(?:charCodeAt|fromCharCode).{0,2000}?(?:\\^|%\\s*256)"))
+                      (#eq? @state @used_state)
+                      (#eq? @string "String")
+                      (#eq? @from_char_code "fromCharCode")
+                      (#eq? @char_code_at "charCodeAt"))
                     "#
         ),
         rule!(

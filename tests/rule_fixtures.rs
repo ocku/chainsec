@@ -230,12 +230,12 @@ const CASES: &[Case] = &[
     Case {
         rule_id: "chainsec.js.detection.heuristic.string-table",
         file: "case.js",
-        source: "const table = ['a','b','c','d','e'];\nfunction decode(i) { return table[i]; }\n",
+        source: "const _0x1234 = ['a','b','c','d','e'];\nfunction decode(i) { return _0x1234[i]; }\n",
     },
     Case {
         rule_id: "chainsec.ts.detection.heuristic.string-table",
         file: "case.ts",
-        source: "const table = ['a','b','c','d','e'];\nfunction decode(i: number) { return table[i]; }\n",
+        source: "const _0x1234 = ['a','b','c','d','e'];\nfunction decode(i: number) { return _0x1234[i]; }\n",
     },
     Case {
         rule_id: "chainsec.js.detection.javascript-obfuscator",
@@ -270,12 +270,12 @@ const CASES: &[Case] = &[
     Case {
         rule_id: "chainsec.js.detection.heuristic.rc4-decoder",
         file: "case.js",
-        source: "const state = Array(256);\nfunction decode(input) { return String.fromCharCode(input.charCodeAt(0) ^ state[0]); }\n",
+        source: "function decode(input) { const state = Array(256); return String.fromCharCode(input.charCodeAt(0) ^ state[0]); }\n",
     },
     Case {
         rule_id: "chainsec.ts.detection.heuristic.rc4-decoder",
         file: "case.ts",
-        source: "const state = Array(256);\nfunction decode(input: string) { return String.fromCharCode(input.charCodeAt(0) ^ state[0]); }\n",
+        source: "function decode(input: string) { const state = Array(256); return String.fromCharCode(input.charCodeAt(0) ^ state[0]); }\n",
     },
     Case {
         rule_id: "chainsec.js.detection.heuristic.embedded-vm",
@@ -965,6 +965,26 @@ fn benchmark_false_positive_shapes_do_not_match() {
         "chainsec.ts.detection.heuristic.string-table",
         "case.ts",
         "const values = ['one', 'two', 'three', 'four', 'five'];\n",
+    );
+    assert_no_match(
+        "chainsec.js.detection.heuristic.string-table",
+        "case.js",
+        "const weekdays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'];\nfunction firstWeekday() { return weekdays[0]; }\n",
+    );
+    assert_no_match(
+        "chainsec.ts.detection.heuristic.string-table",
+        "case.ts",
+        "const weekdays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'];\nfunction firstWeekday(): string { return weekdays[0]; }\n",
+    );
+    assert_no_match(
+        "chainsec.js.detection.heuristic.rc4-decoder",
+        "case.js",
+        "const scratch = Array(256);\nfunction hash(input) { return input.charCodeAt(0) ^ 0x5a; }\n",
+    );
+    assert_no_match(
+        "chainsec.ts.detection.heuristic.rc4-decoder",
+        "case.ts",
+        "const scratch = Array(256);\nfunction hash(input: string): number { return input.charCodeAt(0) ^ 0x5a; }\n",
     );
     assert_no_match(
         "chainsec.js.detection.heuristic.string-table",
