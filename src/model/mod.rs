@@ -5,8 +5,8 @@ mod report;
 
 pub use dependency::{Dependency, Ecosystem, FetchMetadata};
 pub use finding::{
-    AnalysisPoint, Capability, Confidence, EntropyMatcher, FindingType, Language, Location,
-    Matcher, Risk, Rule, RuleGroup, SemanticRule, Suppression,
+    AnalysisPoint, Capability, Confidence, EntropyMatcher, FindingType, Language, Location, Risk,
+    Rule, RuleGroup, Suppression,
 };
 pub use limits::{EngineLimits, SerializableLimits};
 pub use report::{

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde_json::Value as JsonValue;
 
-use super::super::{
+use crate::manifests::{
     NpmLockContext,
     shared::{github_archive, manifest_error, read, strip_url_fragment},
 };

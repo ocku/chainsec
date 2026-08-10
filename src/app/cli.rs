@@ -5,6 +5,17 @@ use clap::{Parser, ValueEnum, builder::ArgPredicate};
 
 use super::config::parse_human_size;
 
+fn parse_positive_usize(value: &str) -> Result<usize, String> {
+    value
+        .parse::<usize>()
+        .map_err(|_| "must be a positive integer".to_owned())
+        .and_then(|value| {
+            (value > 0)
+                .then_some(value)
+                .ok_or_else(|| "must be at least 1".to_owned())
+        })
+}
+
 #[derive(Debug, Clone, Copy, serde::Deserialize, ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum OutputFormat {
@@ -72,6 +83,10 @@ pub(crate) struct Cli {
     #[arg(long, default_value_t = 300)]
     pub(crate) max_scan_seconds: u64,
 
+    /// Maximum number of worker threads used for concurrent package analysis.
+    #[arg(long, value_name = "THREADS", default_value_t = 16, value_parser = parse_positive_usize)]
+    pub(crate) threads: usize,
+
     /// Directory used for content-identified dependency source.
     #[arg(long)]
     pub(crate) cache: Option<PathBuf>,
@@ -110,19 +125,11 @@ pub(crate) struct Cli {
     pub(crate) no_default_rules: bool,
 
     /// Ignore rules matching GROUP:GLOB (for example, network:*); repeat for multiple selectors.
-    #[arg(
-        long = "ignore-rule",
-        visible_alias = "exclude-rule",
-        value_name = "GROUP:GLOB"
-    )]
+    #[arg(long = "ignore-rule", value_name = "GROUP:GLOB")]
     pub(crate) ignored_rules: Vec<String>,
 
     /// Ignore root-project paths matching GLOB (for example, tests/**); repeat for multiple globs.
-    #[arg(
-        long = "ignore-path",
-        visible_alias = "exclude-path",
-        value_name = "GLOB"
-    )]
+    #[arg(long = "ignore-path", value_name = "GLOB")]
     pub(crate) ignored_paths: Vec<String>,
 
     /// Report format.
@@ -163,12 +170,23 @@ mod tests {
     }
 
     #[test]
-    fn ignore_path_accepts_repeated_globs_and_exclude_alias() {
+    fn threads_default_to_sixteen_and_must_be_positive() {
+        let cli = Cli::try_parse_from(["chainsec"]).unwrap();
+        assert_eq!(cli.threads, 16);
+
+        assert!(Cli::try_parse_from(["chainsec", "--threads", "0"]).is_err());
+
+        let cli = Cli::try_parse_from(["chainsec", "--threads", "2"]).unwrap();
+        assert_eq!(cli.threads, 2);
+    }
+
+    #[test]
+    fn ignore_path_accepts_repeated_globs() {
         let cli = Cli::try_parse_from([
             "chainsec",
             "--ignore-path",
             "tests/**",
-            "--exclude-path",
+            "--ignore-path",
             "generated/**",
         ])
         .unwrap();

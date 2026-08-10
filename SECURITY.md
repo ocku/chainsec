@@ -35,7 +35,7 @@ Maintainers will acknowledge receipt when the report is reviewed, investigate im
 
 ## Maintainer release process
 
-Before publishing a release, maintainers should run the complete checklist in [`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md), including `cargo audit` against the committed lockfile and the locked CI-equivalent format, Clippy, test, and release-build commands. Review every dependency change and triage every audit advisory; do not silently suppress an advisory. Build signed artifacts and checksums from a clean, pinned environment, and record security fixes in the changelog and release notes.
+Before publishing a source-only release, maintainers should run the complete checklist in [`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md), including `cargo audit` against the committed lockfile and the locked CI-equivalent format, Clippy, test, and release-build commands. Review every dependency change and triage every audit advisory; do not silently suppress an advisory. Create the release from a clean, reviewed commit using the repository's pinned Rust toolchain, and record security fixes in the changelog and release notes. The project does not build or upload release binaries.
 
 The CI dependency-audit job is a merge gate, not a substitute for release review. A release must not be cut from a failed or bypassed audit, and generated reports or test fixtures must not contain credentials or other sensitive data.
 

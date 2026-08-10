@@ -104,8 +104,6 @@ fn configured_rules(cli: &Cli) -> chainsec::Result<Vec<chainsec::model::Rule>> {
         });
     }
 
-    chainsec::scanner::validate_rules(&configured_rules)?;
-
     Ok(configured_rules)
 }
 
@@ -127,7 +125,7 @@ async fn analyze(
         cli.allowed_hosts.clone(),
         cli.trust_local_input,
     )
-    .with_ignored_rule_selectors(rule_selectors(cli)?)
+    .with_max_analysis_threads(cli.threads)
     .with_ignored_packages(ignored_packages.iter().cloned())
     .with_ignored_root_paths(ignored_paths.iter().cloned());
 

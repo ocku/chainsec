@@ -19,6 +19,7 @@ pub struct Engine<'a> {
     ignored_rule_selectors: Vec<RuleSelector>,
     ignored_packages: HashSet<String>,
     ignored_root_paths: Vec<String>,
+    max_analysis_threads: usize,
 }
 
 impl<'a> Engine<'a> {
@@ -48,7 +49,17 @@ impl<'a> Engine<'a> {
             ignored_rule_selectors: Vec::new(),
             ignored_packages: HashSet::new(),
             ignored_root_paths: Vec::new(),
+            max_analysis_threads: 16,
         }
+    }
+
+    /// Limits the number of packages analyzed concurrently.
+    ///
+    /// Values below one are clamped to one.
+    #[must_use]
+    pub fn with_max_analysis_threads(mut self, threads: usize) -> Self {
+        self.max_analysis_threads = threads.max(1);
+        self
     }
 
     #[must_use]

@@ -1,15 +1,16 @@
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
+    sync::Arc,
     time::Instant,
 };
 
+use rayon::prelude::*;
 use walkdir::WalkDir;
 
 mod entropy;
 mod file_analyzer;
 mod filesystem;
-mod semantic;
 mod source_analyzer;
 
 #[cfg(test)]
@@ -19,9 +20,28 @@ use filesystem::MAX_NON_SOURCE_ANALYSIS_BYTES;
 use filesystem::{
     compile_ignored_paths, included, is_test_fixture, language_for, read_entry_contents,
 };
-use source_analyzer::{CompiledRule, compile_rules, scan_file};
+use source_analyzer::{CompiledRuleSet, compile_rules, scan_file};
 
 pub use source_analyzer::validate_rules;
+
+pub(crate) struct AnalysisResources {
+    rules: Vec<CompiledRuleSet>,
+    pool: rayon::ThreadPool,
+}
+
+impl AnalysisResources {
+    pub(crate) fn new(rules: &[Rule], max_threads: usize) -> Result<Self> {
+        let rules = compile_rules(rules)?;
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(max_threads.max(1))
+            .build()
+            .map_err(|error| Error::Scan {
+                path: PathBuf::from("<analysis>"),
+                message: format!("failed to create analysis worker pool: {error}"),
+            })?;
+        Ok(Self { rules, pool })
+    }
+}
 
 use crate::{
     error::{Error, Result},
@@ -35,11 +55,10 @@ pub struct ScanOutcome {
     pub scanned_bytes: u64,
 }
 
-struct SourceFile<'a> {
-    path: &'a Path,
-    package: &'a str,
+struct PendingSourceFile {
+    path: PathBuf,
     language: Language,
-    source: &'a [u8],
+    source: Vec<u8>,
     size: u64,
 }
 
@@ -47,16 +66,16 @@ struct SourceFile<'a> {
 ///
 /// The synchronous [`scan`] function remains available for callers that do not
 /// already run inside an async runtime.
-pub async fn scan_async(
+pub(crate) async fn scan_async(
     root: PathBuf,
     package: String,
-    rules: Vec<Rule>,
+    resources: Arc<AnalysisResources>,
     limits: EngineLimits,
     ignored_paths: Vec<String>,
 ) -> Result<ScanOutcome> {
     let scan_root = root.clone();
     tokio::task::spawn_blocking(move || {
-        scan_with_ignored_paths(&scan_root, &package, &rules, &limits, &ignored_paths)
+        scan_with_resources(&scan_root, &package, &limits, &ignored_paths, &resources)
     })
     .await
     .map_err(|error| Error::Scan {
@@ -81,11 +100,37 @@ pub fn scan_with_ignored_paths(
     limits: &EngineLimits,
     ignored_paths: &[String],
 ) -> Result<ScanOutcome> {
+    let threads = std::thread::available_parallelism()
+        .map(|parallelism| parallelism.get())
+        .unwrap_or(1);
+    scan_with_ignored_paths_with_threads(root, package, rules, limits, ignored_paths, threads)
+}
+
+fn scan_with_ignored_paths_with_threads(
+    root: &Path,
+    package: &str,
+    rules: &[Rule],
+    limits: &EngineLimits,
+    ignored_paths: &[String],
+    max_threads: usize,
+) -> Result<ScanOutcome> {
+    let resources = AnalysisResources::new(rules, max_threads)?;
+    scan_with_resources(root, package, limits, ignored_paths, &resources)
+}
+
+fn scan_with_resources(
+    root: &Path,
+    package: &str,
+    limits: &EngineLimits,
+    ignored_paths: &[String],
+    resources: &AnalysisResources,
+) -> Result<ScanOutcome> {
     let ignored_paths = compile_ignored_paths(ignored_paths)?;
-    let compiled = compile_rules(rules)?;
     let started = Instant::now();
     let mut outcome = ScanOutcome::default();
     let mut deduplicated = HashSet::new();
+    let batch_size = resources.pool.current_num_threads().max(1) * 2;
+    let mut pending_sources = Vec::with_capacity(batch_size);
     let walker = WalkDir::new(root)
         .follow_links(false)
         .into_iter()
@@ -102,6 +147,17 @@ pub fn scan_with_ignored_paths(
         }
 
         let language = language_for(entry.path());
+        if language.is_some()
+            && outcome
+                .scanned_files
+                .saturating_add(pending_sources.len() as u64)
+                >= limits.max_source_files
+        {
+            return Err(Error::LimitExceeded {
+                resource: "source files".to_owned(),
+                limit: limits.max_source_files,
+            });
+        }
         let (source, file_size) = read_entry_contents(&entry, language, limits)?;
         ensure_within_duration(started, limits)?;
         let relative = entry.path().strip_prefix(root).unwrap_or(entry.path());
@@ -116,24 +172,36 @@ pub fn scan_with_ignored_paths(
         ensure_within_duration(started, limits)?;
 
         if let Some(language) = language {
-            let source_file = SourceFile {
-                path: relative,
-                package,
+            pending_sources.push(PendingSourceFile {
+                path: relative.to_owned(),
                 language,
-                source: &source,
+                source,
                 size: file_size,
-            };
-            record_source_findings(
-                &mut outcome,
-                &mut deduplicated,
-                source_file,
-                limits,
-                &compiled,
-            )?;
-            ensure_within_duration(started, limits)?;
+            });
+            if pending_sources.len() >= batch_size {
+                record_source_batch(
+                    resources,
+                    &mut outcome,
+                    &mut deduplicated,
+                    &pending_sources,
+                    package,
+                    limits,
+                    started,
+                )?;
+                pending_sources.clear();
+            }
         }
     }
 
+    record_source_batch(
+        resources,
+        &mut outcome,
+        &mut deduplicated,
+        &pending_sources,
+        package,
+        limits,
+        started,
+    )?;
     outcome.findings.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(outcome)
 }
@@ -171,29 +239,50 @@ fn record_file_analysis(
     }
 }
 
-fn record_source_findings(
+fn record_source_batch(
+    resources: &AnalysisResources,
     outcome: &mut ScanOutcome,
     deduplicated: &mut HashSet<String>,
-    file: SourceFile<'_>,
+    files: &[PendingSourceFile],
+    package: &str,
     limits: &EngineLimits,
-    rules: &[CompiledRule<'_>],
+    started: Instant,
 ) -> Result<()> {
-    outcome.scanned_files += 1;
-    if outcome.scanned_files > limits.max_source_files {
-        return Err(Error::LimitExceeded {
-            resource: "source files".to_owned(),
-            limit: limits.max_source_files,
-        });
+    if files.is_empty() {
+        return Ok(());
     }
+    let analyses = resources.pool.install(|| {
+        files
+            .par_iter()
+            .map(|file| {
+                ensure_within_duration(started, limits)?;
+                scan_file(
+                    &file.path,
+                    package,
+                    file.language,
+                    &file.source,
+                    &resources.rules,
+                )
+            })
+            .collect::<Result<Vec<_>>>()
+    })?;
 
-    outcome.scanned_bytes = outcome.scanned_bytes.saturating_add(file.size);
-    for finding in scan_file(file.path, file.package, file.language, file.source, rules)? {
-        if deduplicated.insert(finding.id.clone()) {
-            outcome.findings.push(finding);
+    for (file, findings) in files.iter().zip(analyses) {
+        outcome.scanned_files += 1;
+        if outcome.scanned_files > limits.max_source_files {
+            return Err(Error::LimitExceeded {
+                resource: "source files".to_owned(),
+                limit: limits.max_source_files,
+            });
+        }
+        outcome.scanned_bytes = outcome.scanned_bytes.saturating_add(file.size);
+        for finding in findings {
+            if deduplicated.insert(finding.id.clone()) {
+                outcome.findings.push(finding);
+            }
         }
     }
-
-    Ok(())
+    ensure_within_duration(started, limits)
 }
 
 #[cfg(test)]

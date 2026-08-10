@@ -3,6 +3,28 @@
 All notable changes are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Before `1.0.0`, minor releases may contain breaking API changes; report schema changes are explicitly versioned.
 
 
+## [0.4.0]
+
+### Added
+
+- `--threads <THREADS>` to bound concurrent package and source-file analysis, defaulting to 16 workers.
+- Syntax-aware JavaScript and TypeScript detections for computed global execution, string timers, Node VM execution, Worker/Blob execution, and javascript-obfuscator output, including its generated VM identifier convention.
+- `chainsec.detection.file.native-artifact` to identify ELF, Mach-O, PE, and WebAssembly executables or libraries as high-risk findings with explicit format information.
+- Source file and byte totals to the human-readable report header.
+
+### Changed
+
+- Improved analyzer performance by approximately 100% through concurrent source-file analysis and reuse of a once-compiled Tree-sitter catalog.
+- Compile the configured Tree-sitter catalog once per scan and analyze source files concurrently through a shared bounded worker pool. All built-in source detections now use Tree-sitter queries rather than separate semantic matchers.
+- Rebalanced built-in prioritization: ordinary network requests remain informational capabilities, while credential-like environment access and screen capture are high-risk findings.
+- Reduced false positives from short static JavaScript/TypeScript `Function` constructors and high-entropy-looking encoding alphabets, character tables, regular-expression ranges, digest metadata, and serialized binary markers.
+- Remote scans using the official PyPI metadata service now automatically allow `files.pythonhosted.org`, where official package artifacts are hosted.
+
+### Fixed
+
+- Avoid scanning the same resolved package or source directory more than once when dependency declarations converge on it.
+- Continue registry resolution for unlocked dependencies that carry a source URL but do not yet have a resolved version and integrity.
+
 ## [0.3.0]
 
 ### Breaking changes

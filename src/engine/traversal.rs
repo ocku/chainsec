@@ -2,6 +2,7 @@ use std::{
     collections::{HashSet, VecDeque},
     fs,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use futures::{StreamExt, stream};
@@ -22,14 +23,6 @@ use super::{
 };
 
 const MAX_CONCURRENT_FETCHES: usize = 16;
-const MAX_CONCURRENT_PACKAGE_ANALYSES: usize = 8;
-
-fn package_analysis_concurrency() -> usize {
-    std::thread::available_parallelism()
-        .map(|parallelism| parallelism.get())
-        .unwrap_or(1)
-        .min(MAX_CONCURRENT_PACKAGE_ANALYSES)
-}
 
 pub(super) struct PendingPackage {
     pub(super) package_id: String,
@@ -58,7 +51,9 @@ struct FetchRequest {
 
 struct Traversal {
     queue: VecDeque<PendingPackage>,
-    visited: HashSet<String>,
+    visited_package_ids: HashSet<String>,
+    visited_sources: HashSet<PathBuf>,
+    visited_count: usize,
 }
 
 impl PendingPackage {
@@ -72,13 +67,21 @@ impl PendingPackage {
             python_context: None,
         }
     }
+
+    fn resolved_package_id(&self) -> &str {
+        self.fetched
+            .as_ref()
+            .map_or(&self.package_id, |metadata| &metadata.package_id)
+    }
 }
 
 impl Traversal {
     fn new(root: PathBuf, fetched: Option<FetchMetadata>) -> Self {
         Self {
             queue: VecDeque::from([PendingPackage::root(root, fetched)]),
-            visited: HashSet::new(),
+            visited_package_ids: HashSet::new(),
+            visited_sources: HashSet::new(),
+            visited_count: 0,
         }
     }
 
@@ -96,11 +99,19 @@ impl Traversal {
             .is_some_and(|pending| pending.depth == depth)
         {
             let pending = self.queue.pop_front().expect("frontier entry must exist");
-            if !self.visited.insert(pending.package_id.clone()) {
+            if self
+                .visited_package_ids
+                .contains(pending.resolved_package_id())
+                || self.visited_sources.contains(&pending.source)
+            {
                 continue;
             }
+            self.visited_package_ids
+                .insert(pending.resolved_package_id().to_owned());
+            self.visited_sources.insert(pending.source.clone());
+            self.visited_count += 1;
 
-            if self.visited.len() > package_limit {
+            if self.visited_count > package_limit {
                 push_package_limit_issue(report, pending.package_id, package_limit as u64);
                 break;
             }
@@ -115,7 +126,7 @@ impl Traversal {
     }
 
     fn visited_count(&self) -> usize {
-        self.visited.len()
+        self.visited_count
     }
 }
 
@@ -127,10 +138,16 @@ impl Engine<'_> {
     ) -> Result<Report> {
         let root = canonicalize_root(root)?;
         let mut report = Report::new(root.clone(), self.policy.clone());
+        let resources = Arc::new(scanner::AnalysisResources::new(
+            self.rules,
+            self.max_analysis_threads,
+        )?);
         let mut traversal = Traversal::new(root, fetched);
 
         while let Some(frontier) = traversal.next_frontier(&mut report, self.limits.max_packages) {
-            let fetch_requests = self.analyze_frontier(frontier, &mut report).await;
+            let fetch_requests = self
+                .analyze_frontier(frontier, &mut report, Arc::clone(&resources))
+                .await;
             let fetch_requests = limit_fetch_requests(
                 fetch_requests,
                 &mut report,
@@ -155,13 +172,14 @@ impl Engine<'_> {
         &self,
         frontier: Vec<PendingPackage>,
         report: &mut Report,
+        resources: Arc<scanner::AnalysisResources>,
     ) -> Vec<FetchRequest> {
         let analyses = stream::iter(
             frontier
                 .iter()
-                .map(|pending| self.scan_and_discover(pending)),
+                .map(|pending| self.scan_and_discover(pending, Arc::clone(&resources))),
         )
-        .buffered(package_analysis_concurrency())
+        .buffered(self.max_analysis_threads)
         .collect::<Vec<_>>()
         .await;
         let mut fetch_requests = Vec::new();
@@ -250,12 +268,16 @@ impl Engine<'_> {
         packages
     }
 
-    async fn scan_and_discover(&self, pending: &PendingPackage) -> ScanAndDiscovery {
+    async fn scan_and_discover(
+        &self,
+        pending: &PendingPackage,
+        resources: Arc<scanner::AnalysisResources>,
+    ) -> ScanAndDiscovery {
         let scan_task = async {
             scanner::scan_async(
                 pending.source.clone(),
                 pending.package_id.clone(),
-                self.rules.to_vec(),
+                resources,
                 self.limits.clone(),
                 if pending.depth == 0 {
                     self.ignored_root_paths.clone()
