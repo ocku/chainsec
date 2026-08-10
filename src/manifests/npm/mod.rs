@@ -18,24 +18,20 @@ mod package_lock;
 mod pnpm;
 mod yarn;
 
-pub(super) fn install_scripts(path: &Path) -> Result<Option<Vec<String>>> {
+pub(super) fn parse(path: &Path) -> Result<(Vec<Dependency>, Option<Vec<String>>)> {
     let value: JsonValue =
         serde_json::from_str(&read(path)?).map_err(|error| manifest_error(path, error))?;
-    let Some(scripts) = value.get("scripts").and_then(JsonValue::as_object) else {
-        return Ok(None);
-    };
-    let lifecycle = ["preinstall", "install", "postinstall"];
-    let found = lifecycle
-        .into_iter()
-        .filter(|name| scripts.contains_key(*name))
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    Ok((!found.is_empty()).then_some(found))
-}
-
-pub(super) fn parse(path: &Path) -> Result<Vec<Dependency>> {
-    let value: JsonValue =
-        serde_json::from_str(&read(path)?).map_err(|error| manifest_error(path, error))?;
+    let install_scripts = value
+        .get("scripts")
+        .and_then(JsonValue::as_object)
+        .map(|scripts| {
+            ["preinstall", "install", "postinstall"]
+                .into_iter()
+                .filter(|name| scripts.contains_key(*name))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .filter(|scripts| !scripts.is_empty());
     let mut by_name = HashMap::new();
     for section in ["dependencies", "optionalDependencies", "peerDependencies"] {
         if let Some(entries) = value.get(section).and_then(JsonValue::as_object) {
@@ -52,7 +48,7 @@ pub(super) fn parse(path: &Path) -> Result<Vec<Dependency>> {
             }
         }
     }
-    Ok(by_name.into_values().collect())
+    Ok((by_name.into_values().collect(), install_scripts))
 }
 
 pub(super) fn enrich(

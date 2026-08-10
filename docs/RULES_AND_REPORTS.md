@@ -17,7 +17,7 @@ When `--output` is supplied, `chainsec` writes the analysis directly to the spec
 Human output is the default report format. It lists unsuppressed findings that meet `--fail-on`, any operational issues, and a final summary of unique capabilities and unique alerts. Capability matching locations and source snippets are intentionally omitted from human output.
 
 ```text
-chainsec 0.3.0 — 3 package(s), 1 finding(s), 2 capability type(s), 0 issue(s)
+chainsec 0.4.0 — 3 package(s), 42 source file(s), 81920 source byte(s), 1 finding(s), 2 capability type(s), 0 issue(s)
 High python:chainsec.py.detection.dynamic-code-execution:ArbitraryCodeExecution [root] src/main.py:12:5 — eval(user_input)
 
 Summary
@@ -36,7 +36,7 @@ A JSON report is a single object with `schema_version`, `tool_version`, `root`, 
 ```json
 {
   "schema_version": "1.1.0",
-  "tool_version": "0.3.0",
+  "tool_version": "0.4.0",
   "root": "/path/to/project",
   "policy": { "require_lockfile": true, "offline": true, "trust_local_input": false, "allowed_hosts": [], "limits": { } },
   "packages": [
@@ -89,13 +89,13 @@ The default catalog is assembled from two distinct groups:
 - `built_in` contains all detection rules, including ChainSec's independent Tree-sitter implementations of GuardDog source-code analyzer patterns. These produce findings and may also declare a capability when a detection supplies useful capability evidence.
 - `capabilities` contains informational-only rules that add capability evidence not already supplied by a detection. Every rule in this group declares a capability, so its matches never become findings. This group also includes capability-only patterns derived from GuardDog.
 
-The detection catalog covers dynamic execution, process execution, decoded payloads, common code-obfuscation patterns, network access (including Deno client/server APIs), filesystem access, environment/secret access, unsafe deserialization, dynamic loading, browser-global mutation, package installation hooks, and GuardDog-derived threat patterns. Manifest checks report `chainsec.py.detection.manifest.install-hook` for `setup.py` and npm `preinstall`, `install`, or `postinstall` entries; these hooks are identified but never executed.
+The detection catalog covers dynamic execution, process execution, decoded payloads, common code-obfuscation patterns (including javascript-obfuscator structures), network access (including Deno client/server APIs), filesystem access, environment/secret access, unsafe deserialization, dynamic loading, browser-global mutation, package installation hooks, and GuardDog-derived threat patterns. Manifest checks report `chainsec.py.detection.manifest.install-hook` for `setup.py` and npm `preinstall`, `install`, or `postinstall` entries; these hooks are identified but never executed.
 
 GuardDog-derived source-code rules are implemented only through Tree-sitter syntax queries; their byte-signature and whole-file substring/count analyzers are omitted. Their attribution is recorded in [`docs/THIRD_PARTY.md`](THIRD_PARTY.md). Separate file-level heuristics may still use bounded magic-byte and entropy checks to flag opaque or compressed files.
 
 Built-in dynamic-loading checks also identify direct or `getattr`/`setattr` Python reflective namespace access that can reach import machinery (`__globals__`, `__builtins__`, `__import__`, loaders, or module specifications). Built-in obfuscation heuristics identify character-code assembly (long arrays joined directly or through Python `chr`/`ord`, or long JavaScript/TypeScript arrays mapped through `String.fromCharCode`), string literals containing 16 or more consecutive hexadecimal, octal, or Unicode escapes (including two or more concatenated literals with at least eight escapes each), and generated or visually ambiguous identifiers such as `_0x1d8f` or `OO0O0O`. These are syntax-aware signals, not proof of malicious intent.
 
-High-entropy detection captures string-literal nodes with Tree-sitter and reports non-whitespace values of at least 32 characters whose Shannon entropy is at least 5.0 bits per character. Literals containing recognized HTTP(S) or FTP URLs are excluded. The string-literal rules do not inspect comments or arbitrary raw source bytes. Every file is also subject to bounded file-level checks for recognized compressed formats, binary data, and unusually high entropy. `chainsec` reads supported source files in full, subject to `--max-source-file`; for other files it reads only a prefix, currently up to 1 MiB. These file-level checks are heuristic and do not decode, execute, disassemble, or semantically analyze native code. Rules do not prove either exploitability or safety.
+High-entropy detection captures string-literal nodes with Tree-sitter and reports non-whitespace values of at least 32 characters whose Shannon entropy is at least 5.0 bits per character. Recognized URLs, encoding alphabets, character tables, structured literals, regular-expression ranges, digest metadata, and serialized binary markers are excluded. The string-literal rules do not inspect comments or arbitrary raw source bytes. Every file is also subject to bounded file-level checks for recognized compressed formats, recognized native artifacts, unknown binary data, and unusually high entropy. ELF, Mach-O, PE, and WebAssembly artifacts always receive a high-risk finding with explicit format information; ChainSec identifies their format but does not inspect native instructions. `chainsec` reads supported source files in full, subject to `--max-source-file`; for other files it reads only a prefix, currently up to 1 MiB. These file-level checks are heuristic and do not decode, execute, disassemble, or semantically analyze native code. Rules do not prove either exploitability or safety.
 
 ## Rule ID format
 

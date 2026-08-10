@@ -184,11 +184,7 @@ impl SourceFetcher {
     }
 
     async fn resolve_unlocked_dependency(&self, dependency: &mut Dependency) -> Result<()> {
-        if dependency.is_local()
-            || dependency.is_resolved()
-            || !self.policy.allow_unlocked
-            || dependency.source_url.is_some()
-        {
+        if dependency.is_local() || dependency.is_resolved() || !self.policy.allow_unlocked {
             return Ok(());
         }
 

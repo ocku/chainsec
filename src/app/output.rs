@@ -115,10 +115,12 @@ fn human_summary(report: &Report, threshold: Risk, verbose: bool, color: bool) -
 
 fn human_report_header(report: &Report, color: bool) -> String {
     format!(
-        "{} {} — {} package(s), {} finding(s), {} capability type(s), {} issue(s)\n",
+        "{} {} — {} package(s), {} source file(s), {} source byte(s), {} finding(s), {} capability type(s), {} issue(s)\n",
         paint("chainsec", "1;36", color),
         report.tool_version,
         report.statistics.packages,
+        report.statistics.source_files,
+        report.statistics.source_bytes,
         report.statistics.findings,
         report.capabilities.len(),
         report.issues.len()

@@ -16,6 +16,7 @@ use super::credentials::{ScopedCredential, authorization_for};
 pub struct ArtifactRepositories {
     npm_metadata_base_url: Url,
     pypi_metadata_base_url: Url,
+    pypi_artifact_base_url: Url,
     jsr_metadata_base_url: Url,
     credentials: Vec<ScopedCredential>,
 }
@@ -26,6 +27,7 @@ impl fmt::Debug for ArtifactRepositories {
             .debug_struct("ArtifactRepositories")
             .field("npm_metadata_base_url", &self.npm_metadata_base_url)
             .field("pypi_metadata_base_url", &self.pypi_metadata_base_url)
+            .field("pypi_artifact_base_url", &self.pypi_artifact_base_url)
             .field("jsr_metadata_base_url", &self.jsr_metadata_base_url)
             .field("credential_count", &self.credentials.len())
             .finish()
@@ -39,6 +41,9 @@ impl Default for ArtifactRepositories {
             "https://pypi.org/pypi",
             "https://jsr.io",
         )
+        .and_then(|repositories| {
+            repositories.with_pypi_artifact_base_url("https://files.pythonhosted.org")
+        })
         .expect("built-in repository URLs are valid")
     }
 }
@@ -49,12 +54,12 @@ impl ArtifactRepositories {
         pypi_metadata_base_url: impl AsRef<str>,
         jsr_metadata_base_url: impl AsRef<str>,
     ) -> Result<Self> {
+        let pypi_metadata_base_url =
+            parse_base_url("PyPI metadata", pypi_metadata_base_url.as_ref())?;
         Ok(Self {
             npm_metadata_base_url: parse_base_url("npm metadata", npm_metadata_base_url.as_ref())?,
-            pypi_metadata_base_url: parse_base_url(
-                "PyPI metadata",
-                pypi_metadata_base_url.as_ref(),
-            )?,
+            pypi_artifact_base_url: pypi_metadata_base_url.clone(),
+            pypi_metadata_base_url,
             jsr_metadata_base_url: parse_base_url("JSR metadata", jsr_metadata_base_url.as_ref())?,
             credentials: Vec::new(),
         })
@@ -66,8 +71,19 @@ impl ArtifactRepositories {
     }
 
     pub fn with_pypi_metadata_base_url(mut self, value: impl AsRef<str>) -> Result<Self> {
-        self.pypi_metadata_base_url = parse_base_url("PyPI metadata", value.as_ref())?;
+        let base_url = parse_base_url("PyPI metadata", value.as_ref())?;
+        self.pypi_artifact_base_url = base_url.clone();
+        self.pypi_metadata_base_url = base_url;
         Ok(self)
+    }
+
+    pub fn with_pypi_artifact_base_url(mut self, value: impl AsRef<str>) -> Result<Self> {
+        self.pypi_artifact_base_url = parse_base_url("PyPI artifact", value.as_ref())?;
+        Ok(self)
+    }
+
+    pub fn pypi_artifact_base_url(&self) -> &Url {
+        &self.pypi_artifact_base_url
     }
 
     pub fn with_jsr_metadata_base_url(mut self, value: impl AsRef<str>) -> Result<Self> {
@@ -223,6 +239,10 @@ mod tests {
                 .unwrap()
                 .as_str(),
             "https://artifacts.example/artifactory/api/pypi/pypi-remote/pypi/Example_Package/1.2.3/json"
+        );
+        assert_eq!(
+            repositories.pypi_artifact_base_url().as_str(),
+            "https://artifacts.example/artifactory/api/pypi/pypi-remote/pypi/"
         );
         assert_eq!(
             repositories

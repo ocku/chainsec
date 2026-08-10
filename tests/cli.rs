@@ -52,6 +52,8 @@ fn human_report_is_the_default_format() {
     );
     let report = String::from_utf8(output.stdout).unwrap();
     assert!(report.starts_with("chainsec "));
+    assert!(report.contains(" source file(s), "));
+    assert!(report.contains(" source byte(s), "));
     assert!(!report.trim_start().starts_with('{'));
 }
 
@@ -357,7 +359,7 @@ fn custom_rule_pack_is_loaded_end_to_end() {
 }
 
 #[test]
-fn excluded_rule_is_absent_from_the_report() {
+fn ignored_rule_is_absent_from_the_report() {
     let project = tempfile::tempdir().unwrap();
     let cache = tempfile::tempdir().unwrap();
     std::fs::write(project.path().join("sample.py"), "eval(payload)\n").unwrap();
@@ -371,7 +373,7 @@ fn excluded_rule_is_absent_from_the_report() {
             "0",
             "--cache",
             cache.path().to_str().unwrap(),
-            "--exclude-rule",
+            "--ignore-rule",
             "chainsec.py.detection.dynamic-code-execution",
             "--fail-on",
             "high",
@@ -494,11 +496,7 @@ reason = "The expression is an approved, constrained evaluator."
 fn human_report_includes_rule_group_and_dependency() {
     let project = tempfile::tempdir().unwrap();
     let cache = tempfile::tempdir().unwrap();
-    std::fs::write(
-        project.path().join("sample.py"),
-        "open('output.txt', 'w')\n",
-    )
-    .unwrap();
+    std::fs::write(project.path().join("sample.py"), "open('/etc/passwd')\n").unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_chainsec"))
         .arg(project.path())

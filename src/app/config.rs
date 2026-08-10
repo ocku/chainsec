@@ -394,6 +394,16 @@ pub(super) fn apply(
     apply!(allow_unlocked, "allow_unlocked");
     apply!(trust_local_input, "trust_local_input");
     apply!(online, "online");
+    if cli.remote.is_some()
+        && matches!(
+            matches.value_source("online"),
+            Some(ValueSource::CommandLine)
+        )
+    {
+        return Err(chainsec::Error::InvalidConfiguration {
+            message: "--online is redundant with --remote".to_owned(),
+        });
+    }
     // A remote traversal root necessarily requires network acquisition; it takes
     // precedence over a configuration file's offline default.
     if cli.remote.is_some() {
@@ -453,6 +463,11 @@ pub(super) fn apply(
     validate_ignored_packages(&ignored_packages)?;
     let suppressions = config.suppressions.unwrap_or_default();
     validate_suppressions(&suppressions)?;
+    if cli.verbose && !matches!(cli.format, OutputFormat::Human) {
+        return Err(chainsec::Error::InvalidConfiguration {
+            message: "--verbose is only valid with --format human".to_owned(),
+        });
+    }
     Ok((ignored_packages, cli.ignored_paths.clone(), suppressions))
 }
 
@@ -559,5 +574,42 @@ mod tests {
         apply(&mut cli, config, None, &matches).unwrap();
 
         assert!(cli.online);
+    }
+
+    #[test]
+    fn remote_rejects_explicit_online_flag() {
+        let matches = Cli::command()
+            .try_get_matches_from(["chainsec", "--remote", "npm:express", "--online"])
+            .unwrap();
+        let mut cli = Cli::from_arg_matches(&matches).unwrap();
+
+        let error = apply(&mut cli, FileConfig::default(), None, &matches).unwrap_err();
+
+        assert!(error.to_string().contains("--online is redundant"));
+    }
+
+    #[test]
+    fn verbose_rejects_machine_format_from_cli() {
+        let matches = Cli::command()
+            .try_get_matches_from(["chainsec", "--verbose", "--format", "json"])
+            .unwrap();
+        let mut cli = Cli::from_arg_matches(&matches).unwrap();
+
+        let error = apply(&mut cli, FileConfig::default(), None, &matches).unwrap_err();
+
+        assert!(error.to_string().contains("--verbose is only valid"));
+    }
+
+    #[test]
+    fn verbose_rejects_machine_format_from_configuration() {
+        let matches = Cli::command()
+            .try_get_matches_from(["chainsec", "--verbose"])
+            .unwrap();
+        let mut cli = Cli::from_arg_matches(&matches).unwrap();
+        let config: FileConfig = toml::from_str("format = \"sarif\"").unwrap();
+
+        let error = apply(&mut cli, config, None, &matches).unwrap_err();
+
+        assert!(error.to_string().contains("--verbose is only valid"));
     }
 }

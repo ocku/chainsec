@@ -4,35 +4,15 @@ use serde::Deserialize;
 
 use crate::{
     error::{Error, Result},
-    model::{
-        AnalysisPoint, Confidence, FindingType, Language, Risk, Rule, RuleGroup, SemanticRule,
-    },
+    model::{AnalysisPoint, Confidence, FindingType, Language, Risk, Rule, RuleGroup},
 };
-
-macro_rules! semantic_rule {
-    ($id:expr, $language:expr, $kind:expr, $risk:expr, $confidence:expr, $rationale:expr, $remediation:expr, $semantic:expr) => {
-        super::semantic_rule(
-            $id,
-            $language,
-            super::RuleDefinition {
-                finding_type: $kind,
-                risk: $risk,
-                confidence: $confidence,
-                rationale: $rationale,
-                remediation: $remediation,
-                query: "",
-            },
-            $semantic,
-        )
-    };
-}
 
 macro_rules! rule {
     ($id:expr, $language:expr, $kind:expr, $risk:expr, $confidence:expr, $rationale:expr, $remediation:expr, $query:expr) => {
-        super::standard_rule(
+        $crate::rules::standard_rule(
             $id,
             $language,
-            super::RuleDefinition {
+            $crate::rules::RuleDefinition {
                 finding_type: $kind,
                 risk: $risk,
                 confidence: $confidence,
@@ -44,59 +24,6 @@ macro_rules! rule {
     };
 }
 
-macro_rules! js_ts_rules {
-    ($rules:expr, $prefix:literal, $id:literal, $capability:expr, $kind:expr, $risk:expr, $confidence:expr, $rationale:expr, $remediation:expr, $query:expr) => {{
-        $rules.push(
-            rule!(
-                concat!($prefix, $id, ".js"),
-                Language::JavaScript,
-                $kind,
-                $risk,
-                $confidence,
-                $rationale,
-                $remediation,
-                $query
-            )
-            .with_capability($capability),
-        );
-        $rules.push(
-            rule!(
-                concat!($prefix, $id, ".ts"),
-                Language::TypeScript,
-                $kind,
-                $risk,
-                $confidence,
-                $rationale,
-                $remediation,
-                $query
-            )
-            .with_capability($capability),
-        );
-    }};
-    ($rules:expr, $prefix:literal, $id:literal, $kind:expr, $risk:expr, $confidence:expr, $rationale:expr, $remediation:expr, $query:expr) => {{
-        $rules.push(rule!(
-            concat!($prefix, $id, ".js"),
-            Language::JavaScript,
-            $kind,
-            $risk,
-            $confidence,
-            $rationale,
-            $remediation,
-            $query
-        ));
-        $rules.push(rule!(
-            concat!($prefix, $id, ".ts"),
-            Language::TypeScript,
-            $kind,
-            $risk,
-            $confidence,
-            $rationale,
-            $remediation,
-            $query
-        ));
-    }};
-}
-
 pub(super) struct RuleDefinition<'a> {
     pub(super) finding_type: FindingType,
     pub(super) risk: Risk,
@@ -104,28 +31,6 @@ pub(super) struct RuleDefinition<'a> {
     pub(super) rationale: &'a str,
     pub(super) remediation: &'a str,
     pub(super) query: &'a str,
-}
-
-pub(super) fn semantic_rule(
-    id: impl Into<String>,
-    language: Language,
-    definition: RuleDefinition<'_>,
-    semantic: SemanticRule,
-) -> Rule {
-    Rule {
-        id: canonical_rule_id(id.into(), language),
-        version: 1,
-        language,
-        finding_type: definition.finding_type,
-        risk: definition.risk,
-        confidence: definition.confidence,
-        rationale: definition.rationale.to_owned(),
-        remediation: definition.remediation.to_owned(),
-        capability: None,
-        query: String::new(),
-        semantic: Some(semantic),
-        entropy: None,
-    }
 }
 
 pub(super) fn standard_rule(id: &str, language: Language, definition: RuleDefinition<'_>) -> Rule {
@@ -140,7 +45,6 @@ pub(super) fn standard_rule(id: &str, language: Language, definition: RuleDefini
         remediation: definition.remediation.to_owned(),
         capability: None,
         query: definition.query.to_owned(),
-        semantic: None,
         entropy: None,
     }
 }
@@ -335,27 +239,6 @@ fn validate_rule(rule: &Rule) -> Result<()> {
         });
     }
 
-    if let Some(semantic) = &rule.semantic {
-        let language_matches = matches!(
-            (semantic, rule.language),
-            (
-                SemanticRule::JsTsDynamicExecution
-                    | SemanticRule::JsTsStringTableObfuscation
-                    | SemanticRule::JsTsRc4Decoder
-                    | SemanticRule::JsTsVirtualMachine,
-                Language::JavaScript | Language::TypeScript
-            )
-        );
-        if !language_matches {
-            return Err(Error::InvalidConfiguration {
-                message: format!(
-                    "rule {} uses a semantic matcher for a different language",
-                    rule.id
-                ),
-            });
-        }
-    }
-
     Ok(())
 }
 
@@ -408,7 +291,6 @@ mod tests {
             remediation: "remediation".to_owned(),
             capability: None,
             query: "(string) @match".to_owned(),
-            semantic: None,
             entropy,
         }
     }

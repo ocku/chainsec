@@ -5,7 +5,7 @@
 use std::fs;
 
 use chainsec::{
-    model::{EngineLimits, Language, Rule},
+    model::{EngineLimits, Language, Risk, Rule},
     rules, scanner,
 };
 
@@ -18,6 +18,11 @@ struct Case {
 const CASES: &[Case] = &[
     // Built-in Python rules.
     Case {
+        rule_id: "chainsec.py.detection.dynamic-import",
+        file: "case.py",
+        source: "import importlib\nmodule = importlib.import_module(module_name)\n",
+    },
+    Case {
         rule_id: "chainsec.py.detection.dynamic-code-execution",
         file: "case.py",
         source: "eval(user_input)\n",
@@ -25,7 +30,7 @@ const CASES: &[Case] = &[
     Case {
         rule_id: "chainsec.py.detection.decoded-payload",
         file: "case.py",
-        source: "import base64\nbase64.b64decode(payload)\n",
+        source: "import base64\nbase64.b64decode('QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFB')\n",
     },
     Case {
         rule_id: "chainsec.py.detection.process-spawn",
@@ -40,7 +45,7 @@ const CASES: &[Case] = &[
     Case {
         rule_id: "chainsec.py.detection.filesystem-open",
         file: "case.py",
-        source: "open(\"data.txt\")\n",
+        source: "open(\"/etc/passwd\")\n",
     },
     Case {
         rule_id: "chainsec.py.detection.unsafe-deserialization",
@@ -56,7 +61,7 @@ const CASES: &[Case] = &[
     Case {
         rule_id: "chainsec.js.detection.decoded-payload",
         file: "case.js",
-        source: "atob(payload);\n",
+        source: "atob('QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFB');\n",
     },
     Case {
         rule_id: "chainsec.js.detection.process-spawn",
@@ -87,7 +92,7 @@ const CASES: &[Case] = &[
     Case {
         rule_id: "chainsec.ts.detection.decoded-payload",
         file: "case.ts",
-        source: "atob(payload);\n",
+        source: "atob('QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFB');\n",
     },
     Case {
         rule_id: "chainsec.ts.detection.process-spawn",
@@ -183,44 +188,94 @@ const CASES: &[Case] = &[
     },
     // Semantic obfuscation and dynamic-execution rules.
     Case {
-        rule_id: "chainsec.js.detection.heuristic.dynamic-code-execution",
+        rule_id: "chainsec.js.detection.heuristic.computed-global-execution",
         file: "case.js",
         source: "globalThis['eval'](payload);\n",
     },
     Case {
-        rule_id: "chainsec.ts.detection.heuristic.dynamic-code-execution",
+        rule_id: "chainsec.ts.detection.heuristic.computed-global-execution",
         file: "case.ts",
+        source: "window['Function'](payload);\n",
+    },
+    Case {
+        rule_id: "chainsec.js.detection.heuristic.string-timer-execution",
+        file: "case.js",
         source: "setTimeout('payload()', 0);\n",
+    },
+    Case {
+        rule_id: "chainsec.ts.detection.heuristic.string-timer-execution",
+        file: "case.ts",
+        source: "setInterval('payload()', 0);\n",
+    },
+    Case {
+        rule_id: "chainsec.js.detection.heuristic.vm-context-execution",
+        file: "case.js",
+        source: "vm.runInThisContext(payload);\n",
+    },
+    Case {
+        rule_id: "chainsec.ts.detection.heuristic.vm-context-execution",
+        file: "case.ts",
+        source: "vm.runInNewContext(payload);\n",
+    },
+    Case {
+        rule_id: "chainsec.js.detection.heuristic.worker-blob-execution",
+        file: "case.js",
+        source: "new Worker(URL.createObjectURL(payload));\n",
+    },
+    Case {
+        rule_id: "chainsec.ts.detection.heuristic.worker-blob-execution",
+        file: "case.ts",
+        source: "new Worker(blob);\n",
     },
     Case {
         rule_id: "chainsec.js.detection.heuristic.string-table",
         file: "case.js",
-        source: "const table = ['a','b','c','d','e','f','g','h','i','j'];\nfunction decode(i) { return table[i]; }\n",
+        source: "const _0x1234 = ['a','b','c','d','e'];\nfunction decode(i) { return _0x1234[i]; }\n",
     },
     Case {
         rule_id: "chainsec.ts.detection.heuristic.string-table",
         file: "case.ts",
-        source: "const table = ['a','b','c','d','e','f','g','h','i','j'];\nfunction decode(i) { return table[i]; }\n",
+        source: "const _0x1234 = ['a','b','c','d','e'];\nfunction decode(i: number) { return _0x1234[i]; }\n",
+    },
+    Case {
+        rule_id: "chainsec.js.detection.javascript-obfuscator",
+        file: "case.js",
+        source: "function _0x4a7b(){const _0x2f1c=['alpha','bravo','charlie','delta'];_0x4a7b=function(){return _0x2f1c;};return _0x4a7b();}\n",
+    },
+    Case {
+        rule_id: "chainsec.ts.detection.javascript-obfuscator",
+        file: "case.ts",
+        source: "function _0x4a7b(){const _0x2f1c=['alpha','bravo','charlie','delta'];_0x4a7b=function(){return _0x2f1c;};return _0x4a7b();}\n",
+    },
+    Case {
+        rule_id: "chainsec.js.detection.javascript-obfuscator-vm-identifier",
+        file: "case.js",
+        source: "const vmz_8b26be = 1;\n",
+    },
+    Case {
+        rule_id: "chainsec.ts.detection.javascript-obfuscator-vm-identifier",
+        file: "case.ts",
+        source: "const vme_60ad03 = 1;\n",
     },
     Case {
         rule_id: "chainsec.js.detection.heuristic.control-flow-flattening",
         file: "case.js",
-        source: "while (cursor < order.length) { switch (order[cursor++]) { case '0': run(); break; } }\n",
+        source: "while (cursor < order.length) { switch (order[cursor++]) { case '0': run(); break; case '1': stop(); break; } }\n",
     },
     Case {
         rule_id: "chainsec.ts.detection.heuristic.control-flow-flattening",
         file: "case.ts",
-        source: "while (cursor < order.length) { switch (order[cursor++]) { case '0': run(); break; } }\n",
+        source: "while (cursor < order.length) { switch (order[cursor++]) { case '0': run(); break; case '1': stop(); break; } }\n",
     },
     Case {
         rule_id: "chainsec.js.detection.heuristic.rc4-decoder",
         file: "case.js",
-        source: "const state = Array(256); const key = input.charCodeAt(0); const result = String.fromCharCode(key ^ (state[0] % 256));\n",
+        source: "function decode(input) { const state = Array(256); return String.fromCharCode(input.charCodeAt(0) ^ state[0]); }\n",
     },
     Case {
         rule_id: "chainsec.ts.detection.heuristic.rc4-decoder",
         file: "case.ts",
-        source: "const state = Array(256); const key = input.charCodeAt(0); const result = String.fromCharCode(key ^ (state[0] % 256));\n",
+        source: "function decode(input: string) { const state = Array(256); return String.fromCharCode(input.charCodeAt(0) ^ state[0]); }\n",
     },
     Case {
         rule_id: "chainsec.js.detection.heuristic.embedded-vm",
@@ -766,6 +821,38 @@ fn every_built_in_rule_has_a_test_case() {
 }
 
 #[test]
+fn unverifiable_dynamic_imports_are_high_risk() {
+    let all_rules = rules::default_rules();
+    for rule_id in [
+        "chainsec.py.detection.dynamic-import",
+        "chainsec.js.detection.dynamic-require",
+        "chainsec.ts.detection.dynamic-require",
+    ] {
+        let rule = all_rules
+            .iter()
+            .find(|rule| rule.id == rule_id)
+            .unwrap_or_else(|| panic!("unknown rule {rule_id}"));
+        assert_eq!(rule.risk, Risk::High, "{rule_id} must be high risk");
+    }
+}
+
+#[test]
+fn every_language_rule_id_starts_with_its_language() {
+    for rule in rules::default_rules() {
+        let prefix = match rule.language {
+            Language::Python => "chainsec.py.",
+            Language::JavaScript => "chainsec.js.",
+            Language::TypeScript => "chainsec.ts.",
+        };
+        assert!(
+            rule.id.starts_with(prefix),
+            "rule {} must start with {prefix}",
+            rule.id
+        );
+    }
+}
+
+#[test]
 fn every_rule_matches_its_fixture() {
     let all_rules = rules::default_rules();
     for case in CASES {
@@ -809,6 +896,215 @@ fn assert_language_extension(rule: &Rule, case: &Case) {
         case.file, expected,
         "rule {} fixture {} does not match its language {:?}",
         rule.id, case.file, rule.language
+    );
+}
+
+#[test]
+fn benchmark_false_positive_shapes_do_not_match() {
+    assert_no_match(
+        "chainsec.js.capability.secret-read-file",
+        "case.js",
+        "const options = { env: 'env', proxyEnv: 'proxyEnv', package: 'proxy-from-env' };\n",
+    );
+    assert_no_match(
+        "chainsec.ts.capability.secret-read-file",
+        "case.ts",
+        "const options = { env: 'env', proxyEnv: 'proxyEnv', package: 'proxy-from-env' };\n",
+    );
+    assert_no_match(
+        "chainsec.py.capability.secret-read-file",
+        "case.py",
+        "options = {'env': 'env', 'proxy_env': 'proxyEnv', 'package': 'proxy-from-env'}\n",
+    );
+    assert_no_match(
+        "chainsec.js.detection.character-code-assembly",
+        "case.js",
+        "const expanded = [...color].map(character => character + character).join('');\n",
+    );
+    assert_no_match(
+        "chainsec.ts.detection.character-code-assembly",
+        "case.ts",
+        "const expanded = [...color].map(character => character + character).join('');\n",
+    );
+    assert_no_match(
+        "chainsec.py.detection.dynamic-import",
+        "case.py",
+        "import importlib\nimportlib.import_module(\"pathlib\")\n__import__('json')\n",
+    );
+    assert_no_match(
+        "chainsec.js.detection.dynamic-require",
+        "case.js",
+        "require(42);\n",
+    );
+    assert_no_match(
+        "chainsec.ts.detection.dynamic-require",
+        "case.ts",
+        "require(42);\n",
+    );
+    assert_no_match(
+        "chainsec.ts.detection.write-browser-global",
+        "case.ts",
+        "state.lastKey = key;\n",
+    );
+    assert_no_match(
+        "chainsec.js.detection.heuristic.string-timer-execution",
+        "case.js",
+        "setTimeout(setStatus, 1, \"\");\n",
+    );
+    assert_no_match(
+        "chainsec.ts.detection.heuristic.string-timer-execution",
+        "case.ts",
+        "setInterval(setStatus, 1, \"\");\n",
+    );
+    assert_no_match(
+        "chainsec.js.detection.heuristic.string-table",
+        "case.js",
+        "const values = ['one', 'two', 'three', 'four', 'five'];\n",
+    );
+    assert_no_match(
+        "chainsec.ts.detection.heuristic.string-table",
+        "case.ts",
+        "const values = ['one', 'two', 'three', 'four', 'five'];\n",
+    );
+    assert_no_match(
+        "chainsec.js.detection.heuristic.string-table",
+        "case.js",
+        "const weekdays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'];\nfunction firstWeekday() { return weekdays[0]; }\n",
+    );
+    assert_no_match(
+        "chainsec.ts.detection.heuristic.string-table",
+        "case.ts",
+        "const weekdays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'];\nfunction firstWeekday(): string { return weekdays[0]; }\n",
+    );
+    assert_no_match(
+        "chainsec.js.detection.heuristic.rc4-decoder",
+        "case.js",
+        "const scratch = Array(256);\nfunction hash(input) { return input.charCodeAt(0) ^ 0x5a; }\n",
+    );
+    assert_no_match(
+        "chainsec.ts.detection.heuristic.rc4-decoder",
+        "case.ts",
+        "const scratch = Array(256);\nfunction hash(input: string): number { return input.charCodeAt(0) ^ 0x5a; }\n",
+    );
+    assert_no_match(
+        "chainsec.js.detection.heuristic.string-table",
+        "case.js",
+        "let usedModels; usedModels = ['rgb', 'hex', 'ansi256'];\n",
+    );
+    assert_no_match(
+        "chainsec.js.detection.heuristic.string-table",
+        "case.js",
+        "const colorNames = [...foregroundColorNames, ...backgroundColorNames];\n",
+    );
+    assert_no_match(
+        "chainsec.ts.detection.heuristic.string-table",
+        "case.ts",
+        "let usedModels: string[]; usedModels = ['rgb', 'hex', 'ansi256'];\n",
+    );
+    assert_no_match(
+        "chainsec.ts.detection.heuristic.string-table",
+        "case.ts",
+        "const colorNames = [...foregroundColorNames, ...backgroundColorNames];\n",
+    );
+    assert_no_match(
+        "chainsec.js.detection.heuristic.string-table",
+        "case.js",
+        "const names = []; const seen = []; const bytes = new Uint8Array(5);\n",
+    );
+    assert_no_match(
+        "chainsec.js.detection.heuristic.string-table",
+        "case.js",
+        "operands = [];\nallowedValues = ['beforeAll', 'before', 'after', 'afterAll'];\nr = [i, ...this.yargs.getAliases()[i] || []];\n",
+    );
+    assert_no_match(
+        "chainsec.ts.detection.heuristic.string-table",
+        "case.ts",
+        "const names: string[] = []; const seen: string[] = []; const bytes = new Uint8Array(5);\n",
+    );
+    assert_no_match(
+        "chainsec.js.detection.heuristic.control-flow-flattening",
+        "case.js",
+        "while (node) { switch (parent.type) { case 'program': visit(); break; case 'block': leave(); break; } }\n",
+    );
+    assert_no_match(
+        "chainsec.ts.detection.heuristic.control-flow-flattening",
+        "case.ts",
+        "while (index < input.length) { switch (ch) { case '{': open(); break; case '}': close(); break; } index++; }\n",
+    );
+    assert_no_match(
+        "chainsec.js.detection.heuristic.control-flow-flattening",
+        "case.js",
+        "while (state) { switch (state) { case 0: run(); break; case 1: /* order[cursor++] */ stop(); break; } }\n",
+    );
+    assert_no_match(
+        "chainsec.js.detection.heuristic.control-flow-flattening",
+        "case.js",
+        "while (pos < len) { const token = attr[pos]; switch (token[FIELDS.TYPE]) { case tokens.space: consume(); break; default: fail(); } pos++; }\n",
+    );
+    assert_no_match(
+        "chainsec.ts.detection.heuristic.control-flow-flattening",
+        "case.ts",
+        "while (pos < len) { const token = attr[pos]; switch (token[FIELDS.TYPE]) { case tokens.space: consume(); break; default: fail(); } pos++; }\n",
+    );
+    assert_no_match(
+        "chainsec.js.detection.heuristic.string-table",
+        "case.js",
+        "const _0x1234 = [1, 2, 3, 4, 5];\n",
+    );
+    assert_no_match(
+        "chainsec.ts.detection.heuristic.string-table",
+        "case.ts",
+        "const _0x1234: string[] = [];\n",
+    );
+    assert_no_match(
+        "chainsec.js.detection.encoded-escapes",
+        "case.js",
+        "const codePage = \"\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\";\n",
+    );
+    assert_no_match(
+        "chainsec.js.detection.heuristic.high-entropy-string",
+        "case.js",
+        "const base58Alphabet = \"123456789abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ\";\n",
+    );
+    assert_no_match(
+        "chainsec.ts.detection.decoded-payload",
+        "case.ts",
+        "const decoded = atob(encoded);\n",
+    );
+    assert_no_match(
+        "chainsec.ts.detection.heuristic.high-entropy-string",
+        "case.ts",
+        concat!(
+            "const base32 = \"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567\";\n",
+            "const base32Hex = \"0123456789ABCDEFGHIJKLMNOPQRSTUV\";\n",
+            "const crockford = \"0123456789ABCDEFGHJKMNPQRSTVWXYZ\";\n",
+            "const ascii85 = \"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~\";\n",
+            "const digest = \"sha-512=:WZDPaVn/7XgHaAy8pmojAkGWoRx2UFChF41A2svX+TaPm+AbwAgBWnrIiYllu7BNNyealdVLvRwEmTHWXvJwew==:\";\n",
+            "const binary = \"!<tag:yaml.org,2002:binary> AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDE=\\n\";\n",
+        ),
+    );
+}
+
+fn assert_no_match(rule_id: &str, file_name: &str, source: &str) {
+    let rules = rules::default_rules();
+    let rule = rules
+        .iter()
+        .find(|rule| rule.id == rule_id)
+        .unwrap_or_else(|| panic!("unknown rule {rule_id}"));
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(directory.path().join(file_name), source).unwrap();
+
+    let outcome = scanner::scan(
+        directory.path(),
+        "fixture",
+        std::slice::from_ref(rule),
+        &EngineLimits::default(),
+    )
+    .unwrap_or_else(|error| panic!("scan failed for {rule_id}: {error}"));
+
+    assert!(
+        outcome.findings.is_empty(),
+        "rule {rule_id} unexpectedly matched:\n{source}"
     );
 }
 

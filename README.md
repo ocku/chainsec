@@ -44,7 +44,7 @@ What it can find, from the built-in versioned rule catalog:
 - Package installation hooks (`setup.py`, npm `preinstall`/`install`/`postinstall` entries), which are reported but never executed
 - Syntax-aware equivalents of GuardDog source-code analyzers, plus custom JSON/YAML rule packs
 
-How it works: Tree-sitter acts as a scalpel. For patterns where syntax alone is insufficient, chainsec also uses bounded per-file semantic matchers: simple aliases, literal arguments, and direct import/loading relationships are correlated without executing code or following cross-file data flow. Instead of blunt regex or substring matching over raw text, `chainsec` parses each source file into a concrete syntax tree and runs versioned Tree-sitter queries against it, surgically detecting malicious code and bad practices at the exact construct level — a call to `eval` is matched as a call expression, not as the letters "eval" appearing anywhere in text. This keeps detections precise (fewer false positives from comments, strings, or look-alike identifiers) and pinpoints exact source locations. Complementary bounded file-level heuristics (magic bytes, compression formats, entropy) flag opaque or binary files, and string-literal entropy analysis catches embedded secrets and encoded payloads.
+How it works: Tree-sitter acts as a scalpel. Instead of blunt regex or substring matching over raw text, `chainsec` parses each source file into a concrete syntax tree and runs versioned Tree-sitter queries against it, surgically detecting malicious code and bad practices at the exact construct level — a call to `eval` is matched as a call expression, not as the letters "eval" appearing anywhere in text. This keeps detections precise (fewer false positives from comments, strings, or look-alike identifiers) and pinpoints exact source locations without executing code or following cross-file data flow. The configured query catalog is compiled once, and source files are analyzed through a bounded worker pool. Complementary bounded file-level heuristics identify compressed files, recognized native artifacts, unknown binary data, and high-entropy content; string-literal entropy analysis catches potential encoded payloads while excluding common structured values.
 
 ## How it works
 
@@ -113,7 +113,7 @@ Without a project `chainsec.toml`, ChainSec uses a centralized cache (`$XDG_CACH
 A human report summarizes the findings that meet the failure threshold and lists unique capabilities and alerts. Use `--verbose` to include findings below `--fail-on`.
 
 ```text
-chainsec 0.3.0 — 3 package(s), 2 finding(s), 2 capability type(s), 0 issue(s)
+chainsec 0.4.0 — 3 package(s), 42 source file(s), 81920 source byte(s), 2 finding(s), 2 capability type(s), 0 issue(s)
 High python:chainsec.py.detection.dynamic-code-execution:ArbitraryCodeExecution [root] src/main.py:12:5 — eval(user_input)
 
 Summary

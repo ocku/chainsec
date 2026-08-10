@@ -30,8 +30,19 @@ pub(super) fn add_allowed_host(cli: &mut Cli) -> chainsec::Result<()> {
             message: format!("remote source URL has no host: {url}"),
         })?;
 
-    if !cli.allowed_hosts.iter().any(|allowed| allowed == host) {
-        cli.allowed_hosts.push(host.to_owned());
+    let mut hosts = vec![host];
+    if dependency.ecosystem == Ecosystem::Python {
+        let artifact_host = cli
+            .artifactories
+            .pypi_artifact_base_url()
+            .host_str()
+            .expect("validated PyPI artifact URL has a host");
+        hosts.push(artifact_host);
+    }
+    for host in hosts {
+        if !cli.allowed_hosts.iter().any(|allowed| allowed == host) {
+            cli.allowed_hosts.push(host.to_owned());
+        }
     }
     Ok(())
 }
@@ -133,8 +144,7 @@ mod tests {
             ("jsr:@std/fs", "jsr.example.test"),
             (github_remote.as_str(), "codeload.github.com"),
         ] {
-            let mut cli =
-                Cli::try_parse_from(["chainsec", "--online", "--remote", remote]).unwrap();
+            let mut cli = Cli::try_parse_from(["chainsec", "--remote", remote]).unwrap();
             cli.artifactories = chainsec::ArtifactRepositories::new(
                 "https://npm.example.test/registry",
                 "https://pypi.example.test/simple",
@@ -146,6 +156,18 @@ mod tests {
 
             assert_eq!(cli.allowed_hosts, vec![host.to_owned()]);
         }
+    }
+
+    #[test]
+    fn adds_official_pypi_artifact_host() {
+        let mut cli = Cli::try_parse_from(["chainsec", "--remote", "pypi:pandas"]).unwrap();
+
+        add_allowed_host(&mut cli).unwrap();
+
+        assert_eq!(
+            cli.allowed_hosts,
+            vec!["pypi.org".to_owned(), "files.pythonhosted.org".to_owned()]
+        );
     }
 
     #[test]

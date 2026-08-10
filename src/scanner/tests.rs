@@ -4,11 +4,6 @@ use super::*;
 use crate::rules::default_rules as built_in_rules;
 
 #[test]
-fn all_built_in_tree_sitter_queries_compile() {
-    validate_rules(&built_in_rules()).unwrap();
-}
-
-#[test]
 fn structured_literal_detection_is_composable_and_case_insensitive() {
     let structured = [
         "https://example.com/resource",
@@ -19,7 +14,7 @@ fn structured_literal_detection_is_composable_and_case_insensitive() {
         "This is ordinary documentation.",
     ];
     let opaque = [
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/",
+        "nQ8zP4vLm7T2rX9aBcDeFgHiJkNoPqRsTuVwY3Z5mK6sA1bC8dE0fG9hI2jL7pR",
         "a string with no structural markers",
     ];
 
@@ -46,7 +41,9 @@ fn scanner_reports_only_high_entropy_string_literals() {
             "ordinary = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'\n",
             "alphabet = '0123456789abcdefghijklmnopqrstuvwxyz'\n",
             "borderline = 'aaabbbcccdddeeefffggghhhiiijjjkkklllmmmnnnooopppqrstuvwxyzABCDEF'\n",
-            "opaque = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'\n",
+            "alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'\n",
+            "base58_flickr = '123456789abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ'\n",
+            "opaque = 'nQ8zP4vLm7T2rX9aBcDeFgHiJkNoPqRsTuVwY3Z5mK6sA1bC8dE0fG9hI2jL7pR'\n",
             "url = 'https://example.com/api/v1/items?query=abcdefghijklmnopqrstuvwxyz0123456789'\n",
             "embedded_url = 'callback=https://example.com/api/v1/items?token=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'\n",
             "regex = r'^(?:[A-Za-z0-9._%+-]+)@(?:[A-Za-z0-9.-]+)\\\\.[A-Za-z]{2,}$'\n",
@@ -74,7 +71,7 @@ fn scanner_reports_only_high_entropy_string_literals() {
     assert!(
         entropy_findings[0]
             .matched_code
-            .contains("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+            .contains("nQ8zP4vLm7T2rX9a")
     );
 }
 
@@ -201,16 +198,16 @@ fn js010_only_reports_assignments_to_window() {
 }
 
 #[test]
-fn semantic_rules_detect_dynamic_execution_and_obfuscator_structures() {
+fn heuristic_rules_detect_dynamic_execution_and_obfuscator_structures() {
     let directory = tempfile::tempdir().unwrap();
     fs::write(
         directory.path().join("payload.js"),
         concat!(
             "globalThis['eval'](payload);\n",
             "setTimeout('runPayload()', 10);\n",
-            "const table = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'];\n",
-            "function decode(index) { return table[index]; }\n",
-            "while (cursor < order.length) { switch (order[cursor++]) { case '0': run(); break; } }\n",
+            "const _0x1234 = ['a', 'b', 'c', 'd', 'e'];\n",
+            "function accessor(s, Jf, JM) { let jA = 0; return jA++, { ['_$8ADRIL']: s, ['_$ohGP9r']: Jf, ['_$aGuiga']: JM }; }\n",
+            "while (cursor < order.length) { switch (order[cursor++]) { case '0': run(); break; case '1': done(); break; } }\n",
         ),
     ).unwrap();
     fs::write(
@@ -238,8 +235,8 @@ fn semantic_rules_detect_dynamic_execution_and_obfuscator_structures() {
         .map(|finding| finding.rule_id.as_str())
         .collect::<HashSet<_>>();
     for rule_id in [
-        "chainsec.js.detection.heuristic.dynamic-code-execution",
-        "chainsec.js.detection.heuristic.string-table",
+        "chainsec.js.detection.heuristic.string-timer-execution",
+        "chainsec.js.detection.javascript-obfuscator",
         "chainsec.js.detection.heuristic.control-flow-flattening",
         "chainsec.py.detection.heuristic.opaque-execution-input",
         "chainsec.py.detection.heuristic.dynamic-module",
@@ -250,13 +247,12 @@ fn semantic_rules_detect_dynamic_execution_and_obfuscator_structures() {
 }
 
 #[test]
-fn semantic_rules_do_not_flag_local_eval_or_static_imports() {
+fn built_in_timer_rule_does_not_flag_callbacks_or_static_imports() {
     let directory = tempfile::tempdir().unwrap();
     fs::write(
         directory.path().join("safe.js"),
         concat!(
-            "function eval(value) { return value; }\n",
-            "const result = eval(input);\n",
+            "const callback = () => {};\n",
             "setTimeout(callback, 10);\n",
         ),
     )
@@ -277,7 +273,7 @@ fn semantic_rules_do_not_flag_local_eval_or_static_imports() {
     assert!(!outcome.findings.iter().any(|finding| {
         matches!(
             finding.rule_id.as_str(),
-            "chainsec.js.detection.heuristic.dynamic-code-execution"
+            "chainsec.js.detection.heuristic.string-timer-execution"
                 | "chainsec.py.detection.heuristic.dynamic-module"
                 | "chainsec.py.detection.heuristic.opaque-execution-input"
         )
@@ -285,7 +281,7 @@ fn semantic_rules_do_not_flag_local_eval_or_static_imports() {
 }
 
 #[test]
-fn semantic_dynamic_execution_uses_syntax_not_line_heuristics() {
+fn dynamic_execution_query_uses_syntax_not_line_heuristics() {
     let directory = tempfile::tempdir().unwrap();
     fs::write(
         directory.path().join("contexts.ts"),
@@ -309,9 +305,7 @@ fn semantic_dynamic_execution_uses_syntax_not_line_heuristics() {
     let findings = outcome
         .findings
         .iter()
-        .filter(|finding| {
-            finding.rule_id == "chainsec.ts.detection.heuristic.dynamic-code-execution"
-        })
+        .filter(|finding| finding.rule_id == "chainsec.ts.detection.dynamic-code-execution")
         .collect::<Vec<_>>();
 
     assert_eq!(findings.len(), 1);
@@ -319,7 +313,33 @@ fn semantic_dynamic_execution_uses_syntax_not_line_heuristics() {
 }
 
 #[test]
-fn semantic_python_obfuscator_matches_only_known_markers() {
+fn numeric_require_is_not_reported_as_dynamic_loading() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(
+        directory.path().join("bundle.js"),
+        "require(23);\nrequire(moduleName);\n",
+    )
+    .unwrap();
+
+    let outcome = scan(
+        directory.path(),
+        "root",
+        &built_in_rules(),
+        &EngineLimits::default(),
+    )
+    .unwrap();
+    let findings = outcome
+        .findings
+        .iter()
+        .filter(|finding| finding.rule_id == "chainsec.js.detection.dynamic-require")
+        .collect::<Vec<_>>();
+
+    assert_eq!(findings.len(), 1);
+    assert_eq!(findings[0].location.start_line, 2);
+}
+
+#[test]
+fn python_obfuscator_matches_only_known_markers() {
     let directory = tempfile::tempdir().unwrap();
     fs::write(
         directory.path().join("ordinary.py"),
@@ -352,7 +372,51 @@ fn semantic_python_obfuscator_matches_only_known_markers() {
 }
 
 #[test]
-fn semantic_dynamic_execution_does_not_guess_alias_bindings() {
+fn function_constructor_reports_short_static_payloads() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(
+        directory.path().join("constructors.js"),
+        concat!(
+            "Function('return 1');\n",
+            "Function(\"require('child_process')\")();\n",
+            "Function('12345678901234567890123456789012');\n",
+            "Function('123456789012345678901234567890123');\n",
+            "Function(source);\n",
+            "Function('value', 'return ' + value);\n",
+        ),
+    )
+    .unwrap();
+
+    let outcome = scan(
+        directory.path(),
+        "root",
+        &built_in_rules(),
+        &EngineLimits::default(),
+    )
+    .unwrap();
+    let mut matched_code = outcome
+        .findings
+        .iter()
+        .filter(|finding| finding.rule_id == "chainsec.js.detection.dynamic-code-execution")
+        .map(|finding| finding.matched_code.as_str())
+        .collect::<Vec<_>>();
+    matched_code.sort_unstable();
+
+    assert_eq!(
+        matched_code,
+        vec![
+            "Function(\"require('child_process')\")",
+            "Function('12345678901234567890123456789012')",
+            "Function('123456789012345678901234567890123')",
+            "Function('return 1')",
+            "Function('value', 'return ' + value)",
+            "Function(source)",
+        ]
+    );
+}
+
+#[test]
+fn dynamic_execution_query_does_not_guess_alias_bindings() {
     let directory = tempfile::tempdir().unwrap();
     fs::write(
         directory.path().join("aliases.js"),
@@ -378,13 +442,12 @@ fn semantic_dynamic_execution_does_not_guess_alias_bindings() {
         !outcome
             .findings
             .iter()
-            .any(|finding| finding.rule_id
-                == "chainsec.js.detection.heuristic.dynamic-code-execution")
+            .any(|finding| finding.rule_id == "chainsec.js.detection.dynamic-code-execution")
     );
 }
 
 #[test]
-fn semantic_dynamic_execution_respects_lexical_shadowing_and_exact_ranges() {
+fn dynamic_execution_query_reports_direct_named_calls() {
     let directory = tempfile::tempdir().unwrap();
     fs::write(
         directory.path().join("scopes.js"),
@@ -406,33 +469,19 @@ fn semantic_dynamic_execution_respects_lexical_shadowing_and_exact_ranges() {
     let findings = outcome
         .findings
         .iter()
-        .filter(|finding| {
-            finding.rule_id == "chainsec.js.detection.heuristic.dynamic-code-execution"
-        })
+        .filter(|finding| finding.rule_id == "chainsec.js.detection.dynamic-code-execution")
         .collect::<Vec<_>>();
 
-    assert_eq!(findings.len(), 1);
-    assert_eq!(findings[0].location.start_line, 3);
-    assert_eq!(findings[0].matched_code, "eval(payload)");
-}
-
-#[test]
-fn semantic_matching_rejects_invalid_utf8_without_panicking() {
-    let directory = tempfile::tempdir().unwrap();
-    fs::write(
-        directory.path().join("invalid.js"),
-        b"const data = '\xff'; eval(payload);\n",
-    )
-    .unwrap();
-
-    let error = scan(
-        directory.path(),
-        "root",
-        &built_in_rules(),
-        &EngineLimits::default(),
-    )
-    .unwrap_err();
-    assert!(error.to_string().contains("requires valid UTF-8"));
+    assert_eq!(findings.len(), 3);
+    let mut matched_code = findings
+        .iter()
+        .map(|finding| finding.matched_code.as_str())
+        .collect::<Vec<_>>();
+    matched_code.sort_unstable();
+    assert_eq!(
+        matched_code,
+        vec!["Function(payload)", "eval(payload)", "eval(payload)"]
+    );
 }
 
 #[test]
@@ -441,8 +490,12 @@ fn scanner_ignores_character_formatting_as_obfuscation() {
     fs::write(
         directory.path().join("format.js"),
         concat!(
+            "const normalized = [...colorString].map(character => character + character).join('');\n",
+            "const booleanOpts = [].concat(opts.boolean).filter(Boolean);\n",
+            "const aliases = [name].concat(aliasList).join('|');\n",
             "const formatted = String.fromCharCode(parseInt(arg, 10))\n",
             "const decoded = String.fromCharCode(72, 101, 108, 108, 111)\n",
+            "const hidden = [104, 116, 116, 112, 115, 58, 47, 47].map(c => String.fromCharCode(c)).join('');\n",
         ),
     )
     .unwrap();
@@ -454,14 +507,63 @@ fn scanner_ignores_character_formatting_as_obfuscation() {
         &EngineLimits::default(),
     )
     .unwrap();
-    let findings = outcome
+    let decoded_findings = outcome
         .findings
         .iter()
         .filter(|finding| finding.rule_id == "chainsec.js.detection.decoded-payload")
         .collect::<Vec<_>>();
+    let assembly_findings = outcome
+        .findings
+        .iter()
+        .filter(|finding| finding.rule_id == "chainsec.js.detection.character-code-assembly")
+        .collect::<Vec<_>>();
 
-    assert_eq!(findings.len(), 1);
-    assert!(findings[0].matched_code.contains("72, 101"));
+    assert_eq!(decoded_findings.len(), 1);
+    assert!(decoded_findings[0].matched_code.contains("72, 101"));
+    assert_eq!(assembly_findings.len(), 1);
+    assert!(assembly_findings[0].matched_code.contains("104, 116"));
+}
+
+#[test]
+fn python_detection_rules_require_security_relevant_context() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(
+        directory.path().join("precision.py"),
+        concat!(
+            "import base64\n",
+            "import subprocess\n",
+            "formatted = ', '.join(values)\n",
+            "encoded = 'hello'.encode()\n",
+            "decoded = base64.b64decode(value)\n",
+            "open('data.txt')\n",
+            "subprocess.run(['python', '--version'])\n",
+            "assembled = ''.join([chr(a), chr(b), chr(c), chr(d), chr(e), chr(f), chr(g), chr(h)])\n",
+            "payload = base64.b64decode('QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFB')\n",
+            "open('/etc/passwd')\n",
+            "subprocess.run(command, shell=True)\n",
+        ),
+    )
+    .unwrap();
+
+    let outcome = scan(
+        directory.path(),
+        "root",
+        &built_in_rules(),
+        &EngineLimits::default(),
+    )
+    .unwrap();
+    let count = |rule_id: &str| {
+        outcome
+            .findings
+            .iter()
+            .filter(|finding| finding.rule_id == rule_id)
+            .count()
+    };
+
+    assert_eq!(count("chainsec.py.detection.character-assembly"), 1);
+    assert_eq!(count("chainsec.py.detection.decoded-payload"), 1);
+    assert_eq!(count("chainsec.py.detection.filesystem-open"), 1);
+    assert_eq!(count("chainsec.py.detection.process-spawn"), 1);
 }
 
 #[test]

@@ -9,7 +9,18 @@ This document is the reference for ChainSec's built-in static-analysis catalog. 
 - **Language coverage:** `{py, js, ts}` means one rule per listed language, using `chainsec.py.`, `chainsec.js.`, and `chainsec.ts.` IDs. A listed `js, ts` pair has one JavaScript and one TypeScript rule. Other entries show their exact single-language ID.
 - Built-in rules are version `1`. Rule selectors use the finding-type group, not the ID prefix: for example, `--ignore-rule 'obfuscation:chainsec.*high-entropy*'`.
 
-Most source rules are Tree-sitter queries. The explicitly marked **semantic** rules additionally correlate bounded information within one file, such as simple aliases, literal arguments, or directly related calls. They do not perform cross-file data-flow analysis.
+## Prioritization policy
+
+Risk is about the consequence of the behavior, not merely how broad the API match is:
+
+- **Capability / informational:** ordinary web requests, DNS lookups, and other routine access APIs are recorded as capabilities and do not create findings or affect exit status.
+- **Medium:** suspicious concealment such as encoded strings, string assembly, and control-flow obfuscation should receive review, but is not by itself proof of compromise. Stronger opaque-payload heuristics can be high risk when they indicate executable behavior.
+- **High:** arbitrary code execution, credential or secret access, persistence, destructive filesystem operations, and suspicious exfiltration/download behavior require immediate review.
+- **Critical:** highly specific compromise indicators such as reverse shells or encoded command cradles.
+
+Use `--fail-on high` (the default) to fail CI on the high-impact classes while retaining lower-risk detections in JSON/SARIF. Use `--verbose` when reviewing medium findings in human output.
+
+All source rules are Tree-sitter queries. They match parsed syntax only and do not perform cross-file data-flow analysis.
 
 ## Detection rules
 
@@ -17,17 +28,20 @@ Most source rules are Tree-sitter queries. The explicitly marked **semantic** ru
 
 | Rule ID or family | Languages | Risk / confidence | Matches |
 | --- | --- | --- | --- |
-| `chainsec.<lang>.detection.dynamic-code-execution` | py, js, ts | High / High | Python `eval`, `exec`, or `compile`; JavaScript/TypeScript `eval` or `Function` calls. |
-| `chainsec.detection.heuristic.dynamic-code-execution.{js,ts}` **semantic** | js, ts | High / High | Indirect or string-based JavaScript/TypeScript execution that reaches a runtime execution sink. |
+| `chainsec.<lang>.detection.dynamic-code-execution` | py, js, ts | High / High | Python `eval`, `exec`, or `compile`; JavaScript/TypeScript `eval` calls and `Function` calls, except constructors whose arguments are all static strings of at most 32 characters. |
+| `chainsec.<lang>.detection.heuristic.computed-global-execution` | js, ts | High / High | Computed `globalThis`, `window`, or `global` access to `eval` or `Function`. |
+| `chainsec.<lang>.detection.heuristic.string-timer-execution` | js, ts | High / High | A string literal passed to `setTimeout` or `setInterval`. |
+| `chainsec.<lang>.detection.heuristic.vm-context-execution` | js, ts | High / High | A Node `vm.runIn*Context` API invocation. |
+| `chainsec.<lang>.detection.heuristic.worker-blob-execution` | js, ts | High / High | A Worker initialized from `URL.createObjectURL(...)` or an identifier named `blob`. |
 | `chainsec.py.detection.heuristic.opaque-execution-input` | py | High / High | A decoded, deserialized, or decompressed value passed directly to `eval`, `exec`, or `FunctionType`. |
 | `chainsec.<lang>.detection.guarddog.base64-decoded-execution` | py, js, ts | High / High | Base64-decoded content passed directly to `eval`, `exec`, or `Function`. JS/TS also cover `Buffer.from(..., "base64")`. |
 | `chainsec.py.detection.guarddog.dynamic-import` | py | High / High | A dynamic import or serialized payload loader nested directly inside `exec`. |
 | `chainsec.py.detection.unsafe-deserialization` | py | High / High | `pickle.load(s)` or `yaml.load(s)`. |
-| `chainsec.<lang>.detection.dynamic-require` | js, ts | Medium / Medium | Node `require` with a non-literal module specifier. |
+| `chainsec.<lang>.detection.dynamic-require` | js, ts | High / Medium | Node `require` with a non-literal module specifier. |
 | `chainsec.py.detection.heuristic.dynamic-module` | py | High / High | `__import__`, `importlib.import_module`, or `loader.exec_module`. |
 | `chainsec.py.detection.reflective-namespace` | py | Medium / High | Direct or `getattr`/`setattr` access to `__globals__`, `__builtins__`, `__import__`, loaders, or module specs. |
 | `chainsec.<lang>.detection.guarddog.reflective-api` | py, js, ts | High / High | Python dangerous builtins resolved through `getattr` and immediately called; JS/TS reflective `Object.getOwnPropertyDescriptor(...).value` invocation. |
-| `chainsec.detection.guarddog.hidden-require.{js,ts}` | js, ts | High / High | `require` hidden behind a short computed `global[...]` alias. |
+| `chainsec.<lang>.detection.guarddog.hidden-require` | js, ts | High / High | `require` hidden behind a short computed `global[...]` alias. |
 | `chainsec.<lang>.detection.write-browser-global` | js, ts | Medium / High | Assignment to `window.property` or `window[...]`. |
 
 
@@ -36,9 +50,9 @@ Most source rules are Tree-sitter queries. The explicitly marked **semantic** ru
 | Rule ID or family | Languages | Risk / confidence | Matches |
 | --- | --- | --- | --- |
 | `chainsec.<lang>.detection.process-spawn` | py, js, ts | High / High | Python `os`/`subprocess` execution calls; bare JS/TS `exec`, `execFile`, `spawn`, or `fork`; or `new Deno.Command(...).spawn()`/`output()`/`outputSync()`. |
-| `chainsec.<lang>.detection.network-request` | py, js, ts | Medium / Medium | Python `requests`, `urllib`, `httpx`, or `socket` calls; JS/TS `fetch` and Deno network/server APIs. |
+| `chainsec.<lang>.detection.network-request` | py, js, ts | Informational / High | Python `requests`, `urllib`, `httpx`, or `socket` calls; JS/TS `fetch` and Deno network/server APIs. These are informational `network:connect` capabilities, not findings. |
 | `chainsec.py.detection.filesystem-open` | py | Medium / Medium | Calls to Python `open`. |
-| `chainsec.<lang>.detection.read-environment` | js, ts | Medium / High | Credential-named `process.env` properties, bracket access, or serializing the complete environment; or credential-named `Deno.env.get` calls. |
+| `chainsec.<lang>.detection.read-environment` | js, ts | High / High | Credential-named `process.env` properties, bracket access, or serializing the complete environment; or credential-named `Deno.env.get` calls. |
 | `chainsec.<lang>.detection.guarddog.autostart` | py, js, ts | High / High | Writes to shell profiles, service/autostart paths, or Windows Run registry locations. |
 | `chainsec.<lang>.detection.guarddog.destructive-deletion` | py, js, ts | High / High | Recursive deletion of absolute/home paths or literal destructive wipe commands. |
 | `chainsec.py.detection.guarddog.dns-exfiltration` | py | High / High | A dynamically constructed hostname passed directly to a Python DNS lookup. |
@@ -48,8 +62,8 @@ Most source rules are Tree-sitter queries. The explicitly marked **semantic** ru
 | `chainsec.<lang>.detection.guarddog.cryptomining` | py, js, ts | High / High | Mining software, pools/protocols, or Monero-wallet-shaped string literals. |
 | `chainsec.<lang>.detection.guarddog.download-and-execute` | py, js, ts | High / High | A downloader, package installer, or download-and-shell command passed directly to a process API; Python also matches `exec(compile(open(...)))`. |
 | `chainsec.<lang>.detection.guarddog.encoded-powershell` | py, js, ts | Critical / High | Encoded, hidden, or download-cradle PowerShell passed to process execution. |
-| `chainsec.py.detection.guarddog.screen-capture` | py | Medium / High | `ImageGrab`, `pyscreenshot`, or `pyautogui` screen-capture APIs. |
-| `chainsec.py.detection.guarddog.credential-environment` | py | Medium / High | Reads of credential-named `os.getenv` or `os.environ` variables. |
+| `chainsec.py.detection.guarddog.screen-capture` | py | High / High | `ImageGrab`, `pyscreenshot`, or `pyautogui` screen-capture APIs. |
+| `chainsec.py.detection.guarddog.credential-environment` | py | High / High | Reads of credential-named `os.getenv` or `os.environ` variables. |
 
 ### Obfuscation and opaque payloads
 
@@ -60,13 +74,15 @@ Most source rules are Tree-sitter queries. The explicitly marked **semantic** ru
 | `chainsec.<lang>.detection.character-code-assembly` | js, ts | Medium / High | An array of at least eight elements mapped through `String.fromCharCode` then joined. |
 | `chainsec.<lang>.detection.encoded-escapes` | py, js, ts | Medium / High | At least 16 consecutive hexadecimal, octal, or Unicode escapes in a literal, or two concatenated literals with at least eight each. |
 | `chainsec.<lang>.detection.ambiguous-identifier` | py, js, ts | Low / Medium | Generated hexadecimal-like names (for example `_0x1d8f`) or visually ambiguous `O/0/I/l/1` sequences; JS/TS also match repeated Unicode-escape identifiers. |
-| `chainsec.detection.heuristic.string-table.{js,ts}` **semantic** | js, ts | Medium / High | JavaScript-obfuscator-style string-table accessor structures. |
-| `chainsec.detection.heuristic.rc4-decoder.{js,ts}` **semantic** | js, ts | High / Medium | A 256-byte stream-cipher-like decoder that reconstructs strings. |
-| `chainsec.detection.heuristic.embedded-vm.{js,ts}` **semantic** | js, ts | High / Medium | Bytecode, opcode, and dispatch structures suggesting an embedded VM. |
-| `chainsec.detection.heuristic.control-flow-flattening.{js,ts}` | js, ts | Medium / High | A `while` loop containing a `switch` dispatcher. |
+| `chainsec.<lang>.detection.heuristic.string-table` | js, ts | Medium / High | JavaScript-obfuscator-style string-table accessor structures. |
+| `chainsec.<lang>.detection.javascript-obfuscator` | js, ts | Medium / High | The generated `_0x` string-array bootstrap/self-replacing accessor or incremented computed `_$…` accessor object emitted by [javascript-obfuscator](https://github.com/javascript-obfuscator/javascript-obfuscator). |
+| `chainsec.<lang>.detection.javascript-obfuscator-vm-identifier` | js, ts | Low / Medium | `vmz_` or `vme_` followed by at least six hexadecimal characters, a generated-name convention associated with javascript-obfuscator VM output. |
+| `chainsec.<lang>.detection.heuristic.rc4-decoder` | js, ts | High / Medium | A 256-byte stream-cipher-like decoder that reconstructs strings. |
+| `chainsec.<lang>.detection.heuristic.embedded-vm` | js, ts | High / Medium | Bytecode, opcode, and dispatch structures suggesting an embedded VM. |
+| `chainsec.<lang>.detection.heuristic.control-flow-flattening` | js, ts | Medium / High | A `while` loop switching over an indexed dispatch sequence whose cursor is updated in the switch expression. |
 | `chainsec.py.detection.heuristic.code-protector-marker` | py | Medium / High | PyArmor, Cython, or Nuitka bootstrap/marker identifiers. |
 | `chainsec.py.detection.guarddog.pyarmor` | py | Medium / High | PyArmor runtime, bootstrap, or verification calls. |
-| `chainsec.<lang>.detection.heuristic.high-entropy-string` | py, js, ts | Medium / Medium | A string-literal value of at least 32 non-whitespace characters, entropy at least 5.0 bits/character, and no more than 5% whitespace. Recognized HTTP(S) and FTP URLs are excluded. |
+| `chainsec.<lang>.detection.heuristic.high-entropy-string` | py, js, ts | Medium / Medium | A string-literal value of at least 32 non-whitespace characters, entropy at least 5.0 bits/character, and no more than 5% whitespace. Recognized URLs, encoding alphabets, character tables, structured literals, regular-expression ranges, digest metadata, and serialized binary markers are excluded. |
 
 ### Manifest and file heuristics
 
@@ -77,10 +93,11 @@ These checks are not Tree-sitter source rules.
 | `chainsec.py.detection.manifest.install-hook` | Medium / High | A Python `setup.py` installation script. ChainSec identifies it but never runs it. |
 | `chainsec.js.detection.manifest.install-hook` | High / High | npm `preinstall`, `install`, or `postinstall` lifecycle scripts. ChainSec identifies them but never runs them. |
 | `chainsec.detection.file.compressed` | High / High | Recognized compressed-file signatures, including gzip, bzip2, xz, zip, and zstd. |
-| `chainsec.detection.file.binary` | High / High | Non-UTF-8 data or NUL bytes when it is not a recognized static asset. |
+| `chainsec.detection.file.native-artifact` | High / High | Recognized ELF, Mach-O, PE, or WebAssembly executable/library signatures. Native artifacts are always high risk; ChainSec identifies the format but does not inspect its instructions. |
+| `chainsec.detection.file.binary` | High / High | Unrecognized non-UTF-8 data or NUL bytes when it is not a recognized static asset or native artifact. |
 | `chainsec.detection.file.high-entropy-file` | Medium / Medium | An unrecognized file of at least 256 bytes with Shannon entropy at least 7.0 bits/byte. |
 
-File checks examine all scanned files. Supported source files are read in full within `--max-source-file`; other files are analyzed from a bounded prefix of up to 1 MiB. Compression is recognized before binary and entropy classification. Known static assets with a matching signature are skipped to reduce noise.
+File checks examine all scanned files. Supported source files are read in full within `--max-source-file`; other files are analyzed from a bounded prefix of up to 1 MiB. Compression and native executable/library formats are recognized before unknown binary and entropy classification. Known static assets with a matching signature, including macOS icon files, are skipped to reduce noise.
 
 ## Capability rules
 

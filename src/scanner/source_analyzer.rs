@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use tree_sitter::{Parser, Query, QueryCursor, StreamingIterator};
+use tree_sitter::{CaptureQuantifier, Parser, Query, QueryCursor, StreamingIterator};
 
 use super::entropy::has_high_entropy;
 use crate::{
@@ -8,51 +8,92 @@ use crate::{
     model::{AnalysisPoint, Language, Location, Rule},
 };
 
-use super::semantic;
-
-pub(super) struct CompiledRule<'a> {
-    rule: &'a Rule,
-    query: Option<Query>,
-    capture_index: Option<u32>,
-    semantic_matcher: Option<semantic::SemanticMatcher>,
+pub(crate) struct CompiledRuleSet {
+    language: Language,
+    rules: Vec<Rule>,
+    query: Query,
+    pattern_rule_indexes: Vec<usize>,
+    capture_index: u32,
 }
 
 pub fn validate_rules(rules: &[Rule]) -> Result<()> {
     compile_rules(rules).map(|_| ())
 }
 
-pub(super) fn compile_rules(rules: &[Rule]) -> Result<Vec<CompiledRule<'_>>> {
-    rules
-        .iter()
-        .map(|rule| {
-            if let Some(semantic_rule) = &rule.semantic {
-                return Ok(CompiledRule {
-                    rule,
-                    query: None,
-                    capture_index: None,
-                    semantic_matcher: Some(semantic::compile(semantic_rule)?),
-                });
-            }
-            let query =
-                Query::new(&grammar(rule.language), &rule.query).map_err(|error| Error::Scan {
-                    path: PathBuf::from("<rules>"),
-                    message: format!("rule {}: {error}", rule.id),
-                })?;
-            let capture_index =
-                query
-                    .capture_index_for_name("match")
-                    .ok_or_else(|| Error::Scan {
-                        path: PathBuf::from("<rules>"),
-                        message: format!("rule {} has no @match capture", rule.id),
-                    })?;
-            Ok(CompiledRule {
-                rule,
-                query: Some(query),
-                capture_index: Some(capture_index),
-                semantic_matcher: None,
-            })
+pub(crate) fn compile_rules(rules: &[Rule]) -> Result<Vec<CompiledRuleSet>> {
+    [Language::Python, Language::JavaScript, Language::TypeScript]
+        .into_iter()
+        .filter_map(|language| {
+            let language_rules = rules
+                .iter()
+                .filter(|rule| rule.language == language)
+                .cloned()
+                .collect::<Vec<_>>();
+            (!language_rules.is_empty()).then_some((language, language_rules))
         })
+        .map(|(language, language_rules)| compile_rule_set(language, language_rules))
         .collect()
+}
+
+fn compile_rule_set(language: Language, rules: Vec<Rule>) -> Result<CompiledRuleSet> {
+    let grammar = grammar(language);
+    let mut combined_query = String::new();
+    let mut rule_offsets = Vec::with_capacity(rules.len());
+    for rule in &rules {
+        if !combined_query.is_empty() {
+            combined_query.push('\n');
+        }
+        rule_offsets.push(combined_query.len());
+        combined_query.push_str(&rule.query);
+    }
+
+    let query = Query::new(&grammar, &combined_query).map_err(|error| {
+        let rule_index = rule_index_for_offset(&rule_offsets, error.offset);
+        Error::Scan {
+            path: PathBuf::from("<rules>"),
+            message: format!("rule {}: {error}", rules[rule_index].id),
+        }
+    })?;
+    let capture_index = query
+        .capture_index_for_name("match")
+        .ok_or_else(|| Error::Scan {
+            path: PathBuf::from("<rules>"),
+            message: format!("combined {language:?} rules have no @match capture"),
+        })?;
+    let mut pattern_rule_indexes = Vec::with_capacity(query.pattern_count());
+    let mut rules_with_match_capture = vec![false; rules.len()];
+
+    for pattern_index in 0..query.pattern_count() {
+        let rule_index =
+            rule_index_for_offset(&rule_offsets, query.start_byte_for_pattern(pattern_index));
+        let quantifiers = query.capture_quantifiers(pattern_index);
+        rules_with_match_capture[rule_index] |=
+            quantifiers[capture_index as usize] != CaptureQuantifier::Zero;
+        pattern_rule_indexes.push(rule_index);
+    }
+
+    if let Some((rule_index, _)) = rules_with_match_capture
+        .iter()
+        .enumerate()
+        .find(|(_, has_capture)| !**has_capture)
+    {
+        return Err(Error::Scan {
+            path: PathBuf::from("<rules>"),
+            message: format!("rule {} has no @match capture", rules[rule_index].id),
+        });
+    }
+
+    Ok(CompiledRuleSet {
+        language,
+        rules,
+        query,
+        pattern_rule_indexes,
+        capture_index,
+    })
+}
+
+fn rule_index_for_offset(rule_offsets: &[usize], offset: usize) -> usize {
+    rule_offsets.partition_point(|rule_offset| *rule_offset <= offset) - 1
 }
 
 pub(super) fn scan_file(
@@ -60,7 +101,7 @@ pub(super) fn scan_file(
     package: &str,
     language: Language,
     source: &[u8],
-    rules: &[CompiledRule<'_>],
+    rule_sets: &[CompiledRuleSet],
 ) -> Result<Vec<AnalysisPoint>> {
     let grammar = grammar(language);
     let mut parser = Parser::new();
@@ -74,59 +115,31 @@ pub(super) fn scan_file(
     })?;
 
     let mut findings = Vec::new();
-    for compiled in rules
+    let Some(compiled) = rule_sets
         .iter()
-        .filter(|compiled| compiled.rule.language == language)
-    {
-        match (
-            &compiled.rule.semantic,
-            &compiled.query,
-            compiled.capture_index,
-            &compiled.semantic_matcher,
-        ) {
-            (None, Some(query), Some(capture_index), None) => {
-                let mut cursor = QueryCursor::new();
-                let mut matches = cursor.matches(query, tree.root_node(), source);
-                while let Some(query_match) = matches.next() {
-                    for capture in query_match
-                        .captures
-                        .iter()
-                        .filter(|capture| capture.index == capture_index)
-                    {
-                        push_finding(
-                            &mut findings,
-                            compiled.rule,
-                            path,
-                            package,
-                            source,
-                            capture.node.byte_range(),
-                            location_for(
-                                capture.node.start_position(),
-                                capture.node.end_position(),
-                            ),
-                        );
-                    }
-                }
-            }
-            (Some(_), None, None, Some(matcher)) => {
-                let text = std::str::from_utf8(source).map_err(|error| Error::Scan {
-                    path: path.to_owned(),
-                    message: format!("semantic matching requires valid UTF-8 source: {error}"),
-                })?;
-                for range in semantic::matches(matcher, text, tree.root_node()) {
-                    let location = location_for_offsets(source, &range);
-                    push_finding(
-                        &mut findings,
-                        compiled.rule,
-                        path,
-                        package,
-                        source,
-                        range,
-                        location,
-                    );
-                }
-            }
-            _ => unreachable!("compiled rule does not match its matcher"),
+        .find(|compiled| compiled.language == language)
+    else {
+        return Ok(findings);
+    };
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(&compiled.query, tree.root_node(), source);
+    while let Some(query_match) = matches.next() {
+        let rule_index = compiled.pattern_rule_indexes[query_match.pattern_index];
+        let rule = &compiled.rules[rule_index];
+        for capture in query_match
+            .captures
+            .iter()
+            .filter(|capture| capture.index == compiled.capture_index)
+        {
+            push_finding(
+                &mut findings,
+                rule,
+                path,
+                package,
+                source,
+                capture.node.byte_range(),
+                location_for(capture.node.start_position(), capture.node.end_position()),
+            );
         }
     }
     Ok(findings)
@@ -192,17 +205,4 @@ fn location_for(start: tree_sitter::Point, end: tree_sitter::Point) -> Location 
         end_line: end.row + 1,
         end_column: end.column + 1,
     }
-}
-
-fn location_for_offsets(source: &[u8], range: &std::ops::Range<usize>) -> Location {
-    let point_for = |offset: usize| {
-        let prefix = &source[..offset];
-        let row = prefix.iter().filter(|byte| **byte == b'\n').count();
-        let column = prefix
-            .iter()
-            .rposition(|byte| *byte == b'\n')
-            .map_or(prefix.len(), |newline| prefix.len() - newline - 1);
-        tree_sitter::Point { row, column }
-    };
-    location_for(point_for(range.start), point_for(range.end))
 }

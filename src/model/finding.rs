@@ -172,25 +172,6 @@ fn default_maximum_whitespace_ratio() -> f64 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SemanticRule {
-    JsTsDynamicExecution,
-    JsTsStringTableObfuscation,
-    JsTsRc4Decoder,
-    JsTsVirtualMachine,
-}
-
-/// The mechanism used to find a rule match. Tree-sitter queries remain the
-/// portable rule-pack format; semantic matchers perform bounded, per-file
-/// structural matching that cannot be expressed as a syntax query alone.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum Matcher {
-    TreeSitterQuery { query: String },
-    Semantic { semantic: SemanticRule },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Rule {
     pub id: String,
@@ -203,12 +184,7 @@ pub struct Rule {
     pub remediation: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capability: Option<Capability>,
-    /// Existing rule packs use `query`; semantic rules leave it empty and set
-    /// `semantic` instead. Keeping this field preserves pack compatibility.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub query: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub semantic: Option<SemanticRule>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entropy: Option<EntropyMatcher>,
 }
@@ -218,17 +194,6 @@ impl Rule {
     pub fn with_capability(mut self, capability: Capability) -> Self {
         self.capability = Some(capability);
         self
-    }
-
-    pub fn matcher(&self) -> Matcher {
-        match &self.semantic {
-            Some(semantic) => Matcher::Semantic {
-                semantic: semantic.clone(),
-            },
-            None => Matcher::TreeSitterQuery {
-                query: self.query.clone(),
-            },
-        }
     }
 }
 

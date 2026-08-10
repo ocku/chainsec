@@ -46,9 +46,9 @@ See [Rules, reports, and exit status](RULES_AND_REPORTS.md) for the full precede
 
 ## How do I ignore a rule or a package?
 
-- `--ignore-rule <GROUP:GLOB>` omits matching rules from scanning and reports, for example `--ignore-rule network:*` or `--ignore-rule filesystem:chainsec.py.detection.filesystem-open`. `--exclude-rule` is a compatibility alias.
+- `--ignore-rule <GROUP:GLOB>` omits matching rules from scanning and reports, for example `--ignore-rule network:*` or `--ignore-rule filesystem:chainsec.py.detection.filesystem-open`.
 - `ignored_packages = ["npm:legacy-package@1.2.3"]` in `chainsec.toml` omits a resolved dependency before it is fetched or scanned.
-- `--ignore-path <GLOB>` (or its compatibility alias `--exclude-path`) omits matching root-project paths for one scan; repeat it for multiple globs. Configure `ignored_paths = ["tests/**"]` for persistent exclusions. Neither form affects dependency source.
+- `--ignore-path <GLOB>` omits matching root-project paths for one scan; repeat it for multiple globs. Configure `ignored_paths = ["tests/**"]` for persistent exclusions. It does not affect dependency source.
 
 ## How do I add my own rules?
 

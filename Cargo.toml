@@ -1,15 +1,17 @@
 [package]
 name = "chainsec"
-version = "0.3.0"
+version = "0.4.0"
 description = "Recursive static source scanner for dependency security analysis"
 license-file = "LICENSE"
 edition = "2024"
+rust-version = "1.89"
 repository = "https://github.com/ocku/chainsec"
+exclude = ["docs/benchmarks/**"]
 
 [dependencies]
 async-trait = "0.1.89"
 base64 = "0.22.1"
-bzip2 = "0.5.2"
+bzip2 = "0.6.1"
 clap = { version = "4.5.47", features = ["derive"] }
 flate2 = "1.1.2"
 globset = "0.4.16"
@@ -18,6 +20,7 @@ hex = "0.4.3"
 node-semver = "2.2.0"
 pep440_rs = "0.7.3"
 regex = "1.11.2"
+rayon = "1.11.0"
 reqwest = { version = "0.12.23", default-features = false, features = ["rustls-tls"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.143"
@@ -36,7 +39,7 @@ tree-sitter-typescript = "0.23.2"
 url = "2.5.7"
 walkdir = "2.5.0"
 xz2 = "0.1.7"
-zip = { version = "4.6.0", default-features = false, features = ["deflate", "bzip2"] }
+zip = { version = "4.6.0", default-features = false, features = ["deflate-flate2", "bzip2"] }
 
 [dev-dependencies]
 tempfile = "3.21.0"

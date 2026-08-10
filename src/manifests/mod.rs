@@ -124,8 +124,8 @@ fn discover_npm(
         return Ok(HashMap::new());
     }
 
-    let mut npm_dependencies = npm::parse(&package)?;
-    if let Some(scripts) = npm::install_scripts(&package)? {
+    let (mut npm_dependencies, lifecycle_scripts) = npm::parse(&package)?;
+    if let Some(scripts) = lifecycle_scripts {
         install_scripts.push(InstallScriptWarning {
             language: Language::JavaScript,
             manifest: package.clone(),

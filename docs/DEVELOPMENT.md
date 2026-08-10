@@ -14,7 +14,7 @@ cargo audit
 
 ## Releases
 
-Releases are created manually.
+Releases are source-only and are created manually from a clean, reviewed commit. The release tag, `Cargo.toml` version, `Cargo.lock` package version, and exact `## [VERSION]` changelog heading must agree. Run the complete local checklist with the repository's pinned Rust toolchain before creating the tag, then publish changelog-derived release notes. The project does not build or upload release binaries.
 
 ## Architecture
 

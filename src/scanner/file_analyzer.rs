@@ -10,6 +10,7 @@ const HIGH_ENTROPY_THRESHOLD: f64 = 7.0;
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum FileKind {
     Compressed(&'static str),
+    NativeArtifact(&'static str),
     Binary,
     HighEntropy(f64),
 }
@@ -59,6 +60,10 @@ fn classify_file(path: &Path, bytes: &[u8]) -> Option<FileKind> {
         return None;
     }
 
+    if let Some(format) = native_artifact_format(bytes) {
+        return Some(FileKind::NativeArtifact(format));
+    }
+
     if bytes.len() >= MIN_HIGH_ENTROPY_BYTES {
         let entropy = shannon_entropy_bytes(bytes);
         if entropy >= HIGH_ENTROPY_THRESHOLD {
@@ -84,9 +89,19 @@ fn finding_details(
             Risk::High,
             Confidence::High,
         ),
+        FileKind::NativeArtifact(format) => (
+            "chainsec.detection.file.native-artifact",
+            format!(
+                "The file is a recognized {format} native executable or library artifact. It was not source-analysed."
+            ),
+            "Verify the artifact's package provenance and platform relevance; inspect it with a native-code analyser when needed.",
+            format!("native artifact: {format}, size: {file_size} bytes"),
+            Risk::High,
+            Confidence::High,
+        ),
         FileKind::Binary => (
             "chainsec.detection.file.binary",
-            "The file contains binary data and cannot be fully inspected by the source analyser.".to_owned(),
+            "The file contains unrecognized binary data and cannot be fully inspected by the source analyser.".to_owned(),
             "Inspect the file with an appropriate binary analyser and verify its provenance.",
             format!("binary file, size: {file_size} bytes"),
             Risk::High,
@@ -147,6 +162,39 @@ fn compression_format(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
+fn native_artifact_format(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x7fELF") {
+        Some("ELF")
+    } else if matches!(
+        bytes.get(..4),
+        Some(
+            [0xfe, 0xed, 0xfa, 0xce]
+                | [0xce, 0xfa, 0xed, 0xfe]
+                | [0xfe, 0xed, 0xfa, 0xcf]
+                | [0xcf, 0xfa, 0xed, 0xfe]
+                | [0xca, 0xfe, 0xba, 0xbe]
+                | [0xbe, 0xba, 0xfe, 0xca]
+        )
+    ) {
+        Some("Mach-O")
+    } else if is_pe_executable(bytes) {
+        Some("PE")
+    } else if bytes.starts_with(b"\0asm") {
+        Some("WebAssembly")
+    } else {
+        None
+    }
+}
+
+fn is_pe_executable(bytes: &[u8]) -> bool {
+    if !bytes.starts_with(b"MZ") || bytes.len() < 0x40 {
+        return false;
+    }
+
+    let offset = u32::from_le_bytes(bytes[0x3c..0x40].try_into().unwrap()) as usize;
+    bytes.get(offset..offset + 4) == Some(b"PE\0\0")
+}
+
 fn is_known_static_asset(path: &Path, bytes: &[u8]) -> bool {
     let extension = path.extension().and_then(|extension| extension.to_str());
     match extension
@@ -159,6 +207,7 @@ fn is_known_static_asset(path: &Path, bytes: &[u8]) -> bool {
         Some("webp") => bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP"),
         Some("ico") => bytes.starts_with(&[0, 0, 1, 0]),
         Some("bmp") => bytes.starts_with(b"BM"),
+        Some("icns") => bytes.starts_with(b"icns"),
         _ => false,
     }
 }
@@ -186,10 +235,34 @@ mod tests {
     }
 
     #[test]
-    fn recognizes_binary_files() {
+    fn recognizes_unidentified_binary_files() {
         let finding =
             analyze_with_size(Path::new("payload.bin"), "root", &[0, 1, 2, 3], 4).unwrap();
         assert_eq!(finding.rule_id, "chainsec.detection.file.binary");
+        assert_eq!(finding.risk, Risk::High);
+    }
+
+    #[test]
+    fn classifies_recognized_native_artifacts_as_high_risk() {
+        let elf =
+            analyze_with_size(Path::new("addon.node"), "root", b"\x7fELF\x02\x01", 6).unwrap();
+        assert_eq!(elf.rule_id, "chainsec.detection.file.native-artifact");
+        assert_eq!(elf.risk, Risk::High);
+        assert!(elf.matched_code.contains("ELF"));
+
+        let mut pe_bytes = vec![0; 0x44];
+        pe_bytes[..2].copy_from_slice(b"MZ");
+        pe_bytes[0x3c..0x40].copy_from_slice(&0x40_u32.to_le_bytes());
+        pe_bytes[0x40..].copy_from_slice(b"PE\0\0");
+        let pe = analyze_with_size(
+            Path::new("helper.exe"),
+            "root",
+            &pe_bytes,
+            pe_bytes.len() as u64,
+        )
+        .unwrap();
+        assert_eq!(pe.rule_id, "chainsec.detection.file.native-artifact");
+        assert_eq!(pe.risk, Risk::High);
     }
 
     #[test]
