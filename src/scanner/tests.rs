@@ -1,7 +1,10 @@
 use std::fs;
 
 use super::*;
-use crate::rules::default_rules as built_in_rules;
+use crate::{
+    model::{Confidence, FindingType, Risk},
+    rules::default_rules as built_in_rules,
+};
 
 #[test]
 fn structured_literal_detection_is_composable_and_case_insensitive() {
@@ -33,6 +36,104 @@ fn structured_literal_detection_is_composable_and_case_insensitive() {
 }
 
 #[test]
+fn scanner_detects_shebang_and_case_insensitive_source_files() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(
+        directory.path().join("postinstall"),
+        "#!/usr/bin/env python3\neval(payload)\n",
+    )
+    .unwrap();
+    fs::write(directory.path().join("UPPER.PY"), "eval(payload)\n").unwrap();
+    fs::write(
+        directory.path().join("launcher"),
+        "#!/usr/bin/env node\neval(payload)\n",
+    )
+    .unwrap();
+    fs::write(directory.path().join("UPPER.JS"), "eval(payload)\n").unwrap();
+
+    fs::write(directory.path().join("UPPER.TS"), "eval(payload)\n").unwrap();
+
+    let outcome = scan(
+        directory.path(),
+        "root",
+        &built_in_rules(),
+        &EngineLimits::default(),
+    )
+    .unwrap();
+
+    for file in [
+        "postinstall",
+        "UPPER.PY",
+        "launcher",
+        "UPPER.JS",
+        "UPPER.TS",
+    ] {
+        assert!(
+            outcome
+                .findings
+                .iter()
+                .any(|finding| finding.file == Path::new(file)),
+            "expected a syntax finding for {file}"
+        );
+    }
+}
+
+#[test]
+fn local_scans_exclude_node_modules() {
+    let directory = tempfile::tempdir().unwrap();
+    let vendored_module = directory.path().join("node_modules/evil");
+    fs::create_dir_all(&vendored_module).unwrap();
+    fs::write(vendored_module.join("index.js"), "eval(payload);\n").unwrap();
+
+    let outcome = scan(
+        directory.path(),
+        "root",
+        &built_in_rules(),
+        &EngineLimits::default(),
+    )
+    .unwrap();
+
+    assert!(
+        !outcome
+            .findings
+            .iter()
+            .any(|finding| finding.file == Path::new("node_modules/evil/index.js"))
+    );
+}
+
+#[test]
+fn scanner_detects_javascript_and_typescript_jsx_sources() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(
+        directory.path().join("payload.jsx"),
+        "const view = <div />;\neval(input);\n",
+    )
+    .unwrap();
+    fs::write(
+        directory.path().join("payload.tsx"),
+        "const view: JSX.Element = <div />;\neval(input);\n",
+    )
+    .unwrap();
+
+    let outcome = scan(
+        directory.path(),
+        "root",
+        &built_in_rules(),
+        &EngineLimits::default(),
+    )
+    .unwrap();
+
+    assert!(outcome.findings.iter().any(|finding| {
+        finding.file == Path::new("payload.jsx")
+            && finding.rule_id == "chainsec.js.detection.dynamic-code-execution"
+    }));
+    assert!(outcome.findings.iter().any(|finding| {
+        finding.file == Path::new("payload.tsx")
+            && finding.rule_id == "chainsec.ts.detection.dynamic-code-execution"
+    }));
+}
+
+#[test]
 fn scanner_reports_only_high_entropy_string_literals() {
     let directory = tempfile::tempdir().unwrap();
     fs::write(
@@ -53,6 +154,36 @@ fn scanner_reports_only_high_entropy_string_literals() {
         ),
     )
     .unwrap();
+    for (file, rule_id) in [
+        (
+            "entropy.js",
+            "chainsec.js.detection.heuristic.high-entropy-string",
+        ),
+        (
+            "entropy.ts",
+            "chainsec.ts.detection.heuristic.high-entropy-string",
+        ),
+    ] {
+        fs::write(
+            directory.path().join(file),
+            "const opaque = `nQ8zP4vLm7T2rX9aBcDeFgHiJkNoPqRsTuVwY3Z5mK6sA1bC8dE0fG9hI2jL7pR`;\n",
+        )
+        .unwrap();
+        let outcome = scan(
+            &directory.path().join(file),
+            "root",
+            &built_in_rules(),
+            &EngineLimits::default(),
+        )
+        .unwrap();
+        assert!(
+            outcome
+                .findings
+                .iter()
+                .any(|finding| finding.rule_id == rule_id),
+            "expected template literal entropy finding for {file}"
+        );
+    }
 
     let outcome = scan(
         directory.path(),
@@ -72,6 +203,115 @@ fn scanner_reports_only_high_entropy_string_literals() {
         entropy_findings[0]
             .matched_code
             .contains("nQ8zP4vLm7T2rX9a")
+    );
+}
+
+#[test]
+fn scanner_reports_recovered_parse_errors_without_skipping_analysis() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(directory.path().join("malformed.js"), "eval(input); {\n").unwrap();
+
+    let outcome = scan(
+        directory.path(),
+        "root",
+        &built_in_rules(),
+        &EngineLimits::default(),
+    )
+    .unwrap();
+
+    assert!(
+        outcome
+            .issues
+            .iter()
+            .any(|issue| issue.code == "parse_error")
+    );
+    assert!(
+        outcome
+            .findings
+            .iter()
+            .any(|finding| finding.rule_id == "chainsec.js.detection.dynamic-code-execution")
+    );
+}
+
+#[test]
+fn scanner_can_fail_closed_on_recovered_parse_errors() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(directory.path().join("malformed.js"), "eval(input); {\n").unwrap();
+    let limits = EngineLimits {
+        fail_on_parse_error: true,
+        ..EngineLimits::default()
+    };
+
+    let error = scan(directory.path(), "root", &built_in_rules(), &limits).unwrap_err();
+    assert!(matches!(error, Error::Scan { .. }));
+}
+
+#[test]
+fn duplicate_source_matches_do_not_consume_the_finding_budget() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(directory.path().join("duplicate.js"), "eval(input);\n").unwrap();
+    let duplicate_rule = Rule {
+        id: "duplicate-eval".to_owned(),
+        version: 1,
+        language: Language::JavaScript,
+        finding_type: FindingType::ArbitraryCodeExecution,
+        risk: Risk::High,
+        confidence: Confidence::High,
+        rationale: "test".to_owned(),
+        remediation: "test".to_owned(),
+        capability: None,
+        query: "(call_expression function: (identifier) @match (#eq? @match \"eval\"))".to_owned(),
+        entropy: None,
+    };
+    let limits = EngineLimits {
+        max_findings: 1,
+        ..EngineLimits::default()
+    };
+
+    let outcome = scan(
+        directory.path(),
+        "root",
+        &[duplicate_rule.clone(), duplicate_rule],
+        &limits,
+    )
+    .unwrap();
+    assert_eq!(outcome.findings.len(), 1);
+}
+
+#[test]
+fn scanner_enforces_the_finding_budget() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(
+        directory.path().join("repeated.js"),
+        "eval(input);\neval(input);\neval(input);\n",
+    )
+    .unwrap();
+    let limits = EngineLimits {
+        max_findings: 2,
+        ..EngineLimits::default()
+    };
+
+    let error = scan(directory.path(), "root", &built_in_rules(), &limits).unwrap_err();
+
+    assert!(matches!(
+        error,
+        Error::LimitExceeded { ref resource, limit: 2 } if resource == "findings"
+    ));
+}
+
+#[test]
+fn single_file_scan_uses_the_file_name_in_findings() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("payload.js");
+    fs::write(&file, "eval(input);\n").unwrap();
+
+    let outcome = scan(&file, "root", &built_in_rules(), &EngineLimits::default()).unwrap();
+
+    assert!(
+        outcome
+            .findings
+            .iter()
+            .all(|finding| finding.file == Path::new("payload.js"))
     );
 }
 
@@ -336,6 +576,46 @@ fn numeric_require_is_not_reported_as_dynamic_loading() {
 
     assert_eq!(findings.len(), 1);
     assert_eq!(findings[0].location.start_line, 2);
+}
+
+#[test]
+fn static_template_literal_module_specifiers_are_not_reported_as_dynamic_loading() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = concat!(
+        "require(`./safe.js`);\n",
+        "import(`./safe.js`);\n",
+        "require(`./${moduleName}.js`);\n",
+        "import(`./${moduleName}.js`);\n",
+    );
+    fs::write(directory.path().join("module.js"), source).unwrap();
+    fs::write(directory.path().join("module.ts"), source).unwrap();
+
+    let outcome = scan(
+        directory.path(),
+        "root",
+        &built_in_rules(),
+        &EngineLimits::default(),
+    )
+    .unwrap();
+
+    for language in ["js", "ts"] {
+        for loader in ["require", "import"] {
+            let rule_id = format!("chainsec.{language}.detection.dynamic-{loader}");
+            let findings = outcome
+                .findings
+                .iter()
+                .filter(|finding| finding.rule_id == rule_id)
+                .collect::<Vec<_>>();
+
+            assert_eq!(
+                findings.len(),
+                1,
+                "expected one dynamic {loader} finding for {language}"
+            );
+            let expected_line = if loader == "require" { 3 } else { 4 };
+            assert_eq!(findings[0].location.start_line, expected_line);
+        }
+    }
 }
 
 #[test]

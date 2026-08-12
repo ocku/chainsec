@@ -29,6 +29,7 @@ fn positive_and_negative_language_fixtures_are_scanned() {
             .iter()
             .any(|finding| finding.file.ends_with("positive.ts"))
     );
+
     assert!(
         !outcome
             .findings

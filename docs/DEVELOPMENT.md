@@ -1,6 +1,6 @@
 # Development and releases
 
-Every push and pull request runs formatting, Clippy with warnings denied, locked tests, and a locked release build on Linux, macOS, and Windows. Ubuntu CI also runs `cargo audit` against the committed `Cargo.lock`; an audit failure blocks the workflow and must be triaged before merging.
+Every push and pull request runs formatting, Clippy with warnings denied, locked tests, and a locked release build on Linux and macOS. Ubuntu CI also runs `cargo audit` against the committed `Cargo.lock`; an audit failure blocks the workflow and must be triaged before merging.
 
 ## Local checks
 

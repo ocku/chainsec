@@ -3,6 +3,40 @@
 All notable changes are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Before `1.0.0`, minor releases may contain breaking API changes; report schema changes are explicitly versioned.
 
 
+## [0.5.0]
+
+### Breaking changes
+
+- JSON report schema is now `1.2.0`. Capability evidence records now include the same stable ID, rule metadata, risk, confidence, and suppression state as findings; consumers that validate reports must use the updated schema.
+- Replaced the flat CLI with explicit subcommands. Use `chainsec scan [PATH]` instead of `chainsec [PATH]`, `chainsec remote scan <SOURCE:PACKAGE>` instead of `chainsec --remote <SOURCE:PACKAGE>`, `chainsec init [PATH]` instead of `chainsec [PATH] --init`, and `chainsec cache purge` instead of `chainsec --cache-purge`. Scan options now follow the applicable `scan` or `remote` subcommand.
+
+### Added
+
+- `chainsec remote diff <source:package>` with exactly one version selector: `--last <N>` (minimum 2) scans the newest pullable releases, `--compare <FROM> <TO>` scans only the exact endpoints, and `--range <FROM> <TO>` scans every pullable published version in the inclusive interval and compares adjacent releases. npm, PyPI, and JSR are supported; human output uses compact counted sections with bold signed totals and indented version histories, while JSON reports structured adjacent comparisons. The convenience form `chainsec remote scan <source:package> --diff <N>` has the same behavior as `--last <N>`.
+
+### Changed
+
+- Remote version diffs now download selected roots and acquire their deduplicated dependency union before scanning each unique package source once, while preserving independent per-version reports. The number of selected roots is bounded by `--max-packages` before any root artifacts are downloaded, and aggregate unique roots/dependency acquisitions across the batch share that same bound.
+- Registry cache hits now revalidate retained artifacts and safely reconstruct source into fetcher-owned workspaces instead of trusting extracted trees or completion metadata. Retained cache publication uses per-entry locks, preserves valid winners, and atomically quarantines/replaces invalid destinations without racing cache readers. JSR and Deno graph entries are reconstructed from their integrity-bound manifests or lockfile snapshots. Full GitHub commit references have no independent archive digest, so their cache entries are no longer reused.
+
+### Security
+
+- Require PyPI metadata-based release selection to use a non-yanked, SHA-256-pinned source distribution instead of choosing an arbitrary wheel that may not match the install target. Exact lockfile-integrity-pinned wheels remain supported.
+- Reject plaintext HTTP configured npm, PyPI, and JSR repository transports by default, including redirects and registry-provided artifact URLs. A visible `--allow-insecure-http`/`allow_insecure_http` development-only opt-in is limited to localhost and loopback IPs and recorded in JSON report policy.
+- Snapshot Deno lockfiles once per prepared batch request/acquisition so deduplication, graph verification, and cache addressing cannot observe different lockfile contents.
+- Compile Tree-sitter queries before batch dependency acquisition, preventing network and cache side effects for malformed rule catalogs.
+- Reconstruct cache hits only from integrity-verified artifacts, preventing modified cache trees and metadata from substituting analyzed source.
+- Keep the lifecycle lock at `<cache>/.lock` and retain the stable cache root during purge, preventing concurrent fetchers from racing deletion without creating a sibling lock file.
+- Reject Yarn Berry lockfiles rather than treating their cache checksums as independently verifiable npm artifact integrity.
+
+### Fixed
+
+- Keep distinct Deno `npm:` requirements separate during batch acquisition even when aliases and pre-resolution package IDs collide.
+- Compare endpoint finding occurrence identities for diff exit policy, preventing equal grouped counts from hiding a removed-and-replaced threshold finding.
+- Roll back a newly created `chainsec.toml` when initialization cannot update `.gitignore`.
+- Return manifest errors for malformed npm dependency sections instead of silently omitting their declarations.
+- Discover dependencies declared in Poetry dependency groups and legacy `dev-dependencies`.
+
 ## [0.4.0]
 
 ### Breaking changes

@@ -2,9 +2,11 @@
 
 ## Reports
 
-JSON reports use schema version `1.1.0`; the schema is in [`schema/report.schema.json`](schema/report.schema.json). Findings include a stable SHA-256 ID, rule ID/version, risk, confidence, rationale, remediation, package identifier, source location, matched code, and suppression state. Resolved package provenance is recorded in separate `packages` records and linked to findings through the finding's package identifier. Operational issues and observed capabilities are structured separately from findings.
+JSON scan reports use schema version `1.2.0`; the schema is in [`schema/report.schema.json`](schema/report.schema.json). Findings include a stable SHA-256 ID, rule ID/version, risk, confidence, rationale, remediation, package identifier, source location, matched code, and suppression state. Resolved package provenance is recorded in separate `packages` records and linked to findings through the finding's package identifier. Operational issues and observed capabilities are structured separately from findings.
 
-`chainsec` scans dependency source without executing it. The `capabilities` array inventories observed behavior using stable `domain:action[-target]` names: `network:listen`, `network:connect`, `network:tls`, `network:download`, `network:resolve-dns`, `network:raw-socket`, `filesystem:read`, `filesystem:write`, `filesystem:delete`, `filesystem:enumerate`, `filesystem:archive`, `filesystem:set-permissions`, `process:spawn`, `process:schedule`, `secret:read-environment`, `secret:read-file`, `secret:read-browser-profile`, `runtime:read-clipboard`, and `code:dynamic-execution`. Each record includes the rule, package, source location, and matched code that established the capability. Capabilities are informational: they do not count as findings and do not affect `--fail-on` exit status.
+JSON version-diff reports use schema version `1.0.0` with `report_type: "version_diff"`; the schema is in [`schema/version-diff.schema.json`](schema/version-diff.schema.json). The `versions` array is newest-first, while each entry in `diffs` compares an adjacent older `from_version` to newer `to_version`. Detection changes contain counts grouped by finding group, rule ID, and risk; capability changes contain evidence counts grouped by capability name. These counts are presentation summaries. Diff finding policy compares oldest/newest occurrence identities using normalized package identity, rule/version, file, location, and matched code, so replacing one occurrence with another cannot pass merely because a grouped count stayed equal.
+
+`chainsec` scans dependency source without executing it. The `capabilities` array inventories observed behavior using stable `domain:action[-target]` names: `network:listen`, `network:connect`, `network:tls`, `network:download`, `network:resolve-dns`, `network:raw-socket`, `filesystem:read`, `filesystem:write`, `filesystem:delete`, `filesystem:enumerate`, `filesystem:archive`, `filesystem:set-permissions`, `process:spawn`, `process:schedule`, `secret:read-environment`, `secret:read-file`, `secret:read-browser-profile`, `runtime:read-clipboard`, and `code:dynamic-execution`. Each evidence record includes its stable ID; rule ID, version, type, risk, and confidence; package, source location, and matched code; plus suppression state and an optional suppression reason. Capabilities are informational: they do not count as findings and do not affect `--fail-on` exit status.
 
 `--ignore-rule` removes matching rules before reporting; ignored selectors are not recorded in the current report schema. Configured `[[suppressions]]` leave matching findings in JSON with `suppressed: true` and a `suppression.reason`, but exclude them from human and SARIF output and from `--fail-on` evaluation.
 
@@ -35,7 +37,7 @@ A JSON report is a single object with `schema_version`, `tool_version`, `root`, 
 
 ```json
 {
-  "schema_version": "1.1.0",
+  "schema_version": "1.2.0",
   "tool_version": "0.4.0",
   "root": "/path/to/project",
   "policy": { "require_lockfile": true, "offline": true, "trust_local_input": false, "allowed_hosts": [], "limits": { } },
@@ -72,7 +74,7 @@ A JSON report is a single object with `schema_version`, `tool_version`, `root`, 
   "capabilities": [
     {
       "name": "network:connect",
-      "evidence": [{ "rule_id": "chainsec.py.capability.network-connect", "package": "root", "file": "src/client.py", "location": { "start_line": 34, "start_column": 9, "end_line": 34, "end_column": 26 }, "matched_code": "requests.get(url)" }]
+      "evidence": [{ "id": "sha256:...", "rule_id": "chainsec.py.capability.network-connect", "rule_version": 1, "finding_type": "network_access", "risk": "low", "confidence": "high", "package": "root", "file": "src/client.py", "location": { "start_line": 34, "start_column": 9, "end_line": 34, "end_column": 26 }, "matched_code": "requests.get(url)", "suppressed": false }]
     }
   ],
   "issues": [],

@@ -12,7 +12,7 @@ mkdir -p "$out_dir" "$cache_dir"
 for package in $packages; do
   slug=$(printf '%s' "$package" | tr '@/ ' '___')
   cargo run -- \
-    --remote "npm:$package" \
+    remote scan "npm:$package" \
     --max-depth 3 \
     --allow-unlocked \
     --cache "$cache_dir" \

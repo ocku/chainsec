@@ -4,7 +4,8 @@
 
 Package source is parsed, never installed or executed. Acquisition and extraction are implemented in Rust; `chainsec` does not launch `python`, package managers, Git, shell commands, or archive executables.
 
-See the [AI Assistance Notice](AI_NOTICE.md).
+> [!WARNING]
+> **Pre-release software:** `chainsec` is not yet stable and may change incompatibly. It is developed with AI assistance; see the [AI Assistance Notice](AI_NOTICE.md).
 
 ![chainsec demo](docs/assets/demo.gif)
 
@@ -67,13 +68,13 @@ graph TD
 ## Safe defaults
 
 - Network access is off unless online mode is enabled with `--online` or `online = true` in configuration.
-- Every outbound host must be allowed by the merged `allowed_hosts` configuration and `--allow-host` values, unless a `--remote` selector or configured Artifactory metadata endpoint supplies its metadata host; redirects and artifact hosts are checked against the same policy.
+- Every outbound host must be allowed by the merged `allowed_hosts` configuration and `--allow-host` values. `--allow-host` adds hosts rather than replacing configured entries, so it cannot narrow a configured allowlist. A `chainsec remote` subcommand can additionally supply the selected package's metadata host, and a configured Artifactory metadata endpoint can supply its own host; redirects and artifact hosts are checked against the same policy.
 - Dependencies must have a resolved version and integrity from a supported lockfile unless `--allow-unlocked` is supplied.
-- HTTP and HTTPS are accepted for remote acquisition; other URL schemes are rejected. Prefer HTTPS because HTTP is plaintext.
+- Configured npm, PyPI, and JSR repositories must use HTTPS. A local `localhost`/loopback development registry may use HTTP only with the explicit `--allow-insecure-http`/`allow_insecure_http = true` opt-in, which is recorded in JSON report policy. Locked artifact URLs remain subject to the normal HTTP(S) and host policy.
 - Supported registry and Deno artifact/module integrity values are checked before extraction or analysis. GitHub full-commit archives use the commit as their immutable identity; their downloaded SHA-256 is recorded for provenance but is not lockfile-supplied and cannot be independently checked against a declared artifact digest.
 - Archive paths are confined beneath extraction roots; links, special files, and duplicate entries are rejected. Tar-family paths are limited to 128 components; ZIP/wheel paths are traversal-checked but do not have the same explicit component-depth limit.
 - Downloads, extraction, source files, package count, graph depth, Deno graph size, redirects, requests, and per-package scan duration are bounded.
-- Cache entries use resolved identities, are published atomically, and validate their package identity and extracted-tree digest on every hit.
+- Cache entries use resolved identities and pinned source URLs, retain valid publication winners, safely replace invalid entries under per-entry locks, and reconstruct scan-private source from integrity-bound retained artifacts on every hit.
 
 For the precise trust model and remaining limitations, see [`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md). To report a vulnerability, see [`SECURITY.md`](SECURITY.md).
 
@@ -82,13 +83,13 @@ For the precise trust model and remaining limitations, see [`docs/SECURITY_MODEL
 Local/offline scan:
 
 ```sh
-chainsec --max-depth 0
+chainsec scan --max-depth 0
 ```
 
 Locked dependency scan with an explicit network policy:
 
 ```sh
-chainsec /path/to/project \
+chainsec scan /path/to/project \
   --online \
   --allow-host pypi.org \
   --allow-host files.pythonhosted.org \
@@ -100,13 +101,28 @@ chainsec /path/to/project \
   --output report.sarif
 ```
 
+Compare detections and capability evidence across remote package releases:
+
+```sh
+# The latest three pullable published releases, with adjacent diffs
+chainsec remote diff npm:express --last 3
+
+# Exactly these two published versions; intermediate releases are not scanned
+chainsec remote diff npm:express --compare 0.1.1 0.5.4
+
+# Every pullable published version in the inclusive interval, with adjacent diffs
+chainsec remote diff npm:express --range 0.1.1 0.5.4
+```
+
+Exactly one of `--last`, `--compare`, or `--range` is required, and `--last`/the `--diff` convenience form require at least two releases so an oldest baseline exists. Remote version diffs support npm, PyPI, and JSR registry selectors and produce human output by default; use `--format json` for structured adjacent older → newer comparisons. SARIF represents a single scan and is not available for version diffs. `--max-packages` bounds both selected roots before download and the aggregate unique roots/dependency acquisitions retained by the batch. The convenience form `chainsec remote scan PACKAGE --diff N` is equivalent to `remote diff PACKAGE --last N`.
+
 Create a starter project configuration (and add the project cache to `.gitignore`):
 
 ```sh
-chainsec --init
+chainsec init
 ```
 
-Without a project `chainsec.toml`, ChainSec uses a centralized cache (`$XDG_CACHE_HOME/chainsec` or `$HOME/.cache/chainsec`) instead of creating `.chainsec-cache` in the current directory. Use `chainsec --cache-purge` to remove the resolved cache, or pass `--cache <dir>` to select one explicitly.
+Without a project `chainsec.toml`, ChainSec uses a centralized cache (`$XDG_CACHE_HOME/chainsec` or `$HOME/.cache/chainsec`) instead of creating `.chainsec-cache` in the current directory. Use `chainsec cache purge` to remove cached contents while retaining the cache directory and its internal lifecycle lock, or pass `--cache <dir>` to select one explicitly.
 
 ## Example output
 
@@ -125,7 +141,7 @@ Alerts (1)
   High       1  python:chainsec.py.detection.dynamic-code-execution:ArbitraryCodeExecution
 ```
 
-JSON reports use schema version `1.1.0` and include stable finding IDs, provenance, structured issues, informational capability evidence, and configured suppression reasons. See [`docs/RULES_AND_REPORTS.md`](docs/RULES_AND_REPORTS.md) and the [report schema](docs/schema/report.schema.json).
+JSON reports use schema version `1.2.0` and include stable finding IDs, provenance, structured issues, informational capability evidence, and configured suppression reasons. See [`docs/RULES_AND_REPORTS.md`](docs/RULES_AND_REPORTS.md) and the [report schema](docs/schema/report.schema.json).
 
 ## Documentation
 

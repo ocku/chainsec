@@ -1,5 +1,6 @@
 /target
 /.chainsec-cache
+/.chainsec-cache.locks
 /docs/benchmarks/**/*.json
 /docs/benchmarks/**/*.tsv
 .DS_Store

@@ -10,7 +10,31 @@ pub(super) fn rules() -> Vec<Rule> {
             Confidence::Medium,
             "Dynamic module loading can hide code paths from static review.",
             "Prefer static imports and fixed module specifiers.",
-            r#"(call_expression function: (identifier) @callee (#eq? @callee "require") arguments: (arguments (_) @argument) (#not-match? @argument "^(?:['\"]|-?[0-9]|\\.)")) @match"#
+            r#"
+                            ((call_expression function: (identifier) @callee
+                              arguments: (arguments (_) @argument)
+                              (#eq? @callee "require")
+                              (#not-match? @argument "^(?:['\"`]|-?[0-9]|\\.)")) @match)
+                            ((call_expression function: (identifier) @callee
+                              arguments: (arguments (template_string (template_substitution)))
+                              (#eq? @callee "require")) @match)
+                            "#
+        ),
+        rule!(
+            "chainsec.js.detection.dynamic-import",
+            Language::JavaScript,
+            FindingType::DynamicLoading,
+            Risk::High,
+            Confidence::Medium,
+            "Dynamic module loading can hide code paths from static review.",
+            "Prefer static imports and fixed module specifiers.",
+            r#"
+                            ((call_expression function: (import)
+                              arguments: (arguments (_) @argument)
+                              (#not-match? @argument "^(?:['\"`]|-?[0-9]|\\.)")) @match)
+                            ((call_expression function: (import)
+                              arguments: (arguments (template_string (template_substitution)))) @match)
+                            "#
         ),
         rule!(
             "chainsec.js.detection.write-browser-global",

@@ -6,7 +6,7 @@ use chainsec::{manifests, model::Ecosystem};
 fn npm_lockfile_enriches_resolved_artifacts() {
     let root = Path::new("tests/fixtures/manifests/npm");
     let discovery = manifests::discover(root).unwrap();
-    assert_eq!(discovery.dependencies.len(), 4);
+    assert_eq!(discovery.dependencies.len(), 5);
     let left_pad = discovery
         .dependencies
         .iter()
@@ -22,12 +22,12 @@ fn npm_lockfile_enriches_resolved_artifacts() {
             .unwrap()
             .starts_with("https://registry.npmjs.org/")
     );
-    assert!(
-        !discovery
-            .dependencies
-            .iter()
-            .any(|dependency| dependency.name == "typescript")
-    );
+    let typescript = discovery
+        .dependencies
+        .iter()
+        .find(|dependency| dependency.name == "typescript")
+        .unwrap();
+    assert!(typescript.resolved_version.is_none());
 }
 
 #[test]
@@ -79,7 +79,10 @@ fn uv_lock_enriches_resolved_artifacts() {
         .unwrap();
 
     assert_eq!(httpx.resolved_version.as_deref(), Some("0.27.2"));
-    assert_eq!(httpx.integrity.as_deref(), Some("sha256:uv-fixture"));
+    assert_eq!(
+        httpx.integrity.as_deref(),
+        Some("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+    );
     assert_eq!(
         httpx.source_url.as_deref(),
         Some("https://files.pythonhosted.org/packages/httpx-0.27.2.tar.gz")
@@ -102,7 +105,10 @@ fn pdm_lock_enriches_resolved_artifacts() {
         .unwrap();
 
     assert_eq!(httpx.resolved_version.as_deref(), Some("0.27.2"));
-    assert_eq!(httpx.integrity.as_deref(), Some("sha256:pdm-fixture"));
+    assert_eq!(
+        httpx.integrity.as_deref(),
+        Some("sha256:3333333333333333333333333333333333333333333333333333333333333333")
+    );
     assert!(
         httpx
             .lockfile
@@ -129,10 +135,7 @@ fn yarn_and_pnpm_locks_enrich_exact_artifacts() {
         .find(|dependency| dependency.name == "left-pad")
         .unwrap();
     assert_eq!(left_pad.resolved_version.as_deref(), Some("1.3.0"));
-    assert_eq!(
-        left_pad.source_url.as_deref(),
-        Some("https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz")
-    );
+    assert!(left_pad.source_url.is_none());
     let scoped = pnpm
         .dependencies
         .iter()
@@ -247,4 +250,54 @@ fn malformed_python_dependency_entry_types_are_rejected() {
             .to_string()
             .contains("Python project.dependencies entry 0 must be a string")
     );
+}
+
+#[test]
+fn malformed_npm_dependency_sections_are_rejected() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("package.json"),
+        r#"{"dependencies":["not-an-object"]}"#,
+    )
+    .unwrap();
+
+    let error = manifests::discover(root.path()).unwrap_err();
+    assert_eq!(error.code(), "manifest_error");
+    assert!(error.to_string().contains("dependencies must be an object"));
+}
+
+#[test]
+fn yarn_berry_npm_locks_pin_versions_for_registry_integrity_resolution() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("package.json"),
+        r#"{"dependencies":{"left-pad":"^1.3.0"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.path().join("yarn.lock"),
+        "__metadata:\n  version: 8\n\n\"left-pad@npm:^1.3.0\":\n  version: 1.3.0\n  resolution: \"left-pad@npm:1.3.0\"\n  checksum: 10c0/example\n",
+    )
+    .unwrap();
+
+    let discovery = manifests::discover(root.path()).unwrap();
+    let dependency = &discovery.dependencies[0];
+    assert_eq!(dependency.resolved_version.as_deref(), Some("1.3.0"));
+    assert!(dependency.integrity.is_none());
+    assert!(dependency.requires_registry_integrity());
+}
+
+#[test]
+fn poetry_dependency_groups_are_discovered() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("pyproject.toml"),
+        "[tool.poetry]\nname = \"fixture\"\n\n[tool.poetry.dependencies]\npython = \"^3.11\"\n\n[tool.poetry.group.audit.dependencies]\nbandit = \"^1.8\"\n",
+    )
+    .unwrap();
+
+    let discovery = manifests::discover(root.path()).unwrap();
+    assert_eq!(discovery.dependencies.len(), 1);
+    assert_eq!(discovery.dependencies[0].name, "bandit");
+    assert_eq!(discovery.dependencies[0].requirement, "bandit>=1.8,<2");
 }

@@ -1,13 +1,15 @@
 use std::{
     collections::HashMap,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
+
+use globset::{Glob, GlobSet, GlobSetBuilder};
 
 use serde_json::Value as JsonValue;
 
 use super::{
     NpmLockContext,
-    shared::{github_archive, manifest_error, read},
+    shared::{ManifestRoot, RootedFileType, github_archive, manifest_error, read, walk_beneath},
 };
 use crate::{
     error::Result,
@@ -18,10 +20,18 @@ mod package_lock;
 mod pnpm;
 mod yarn;
 
+const MAX_WORKSPACE_DEPTH: usize = 32;
+const MAX_WORKSPACE_ENTRIES: usize = 4096;
+const MAX_WORKSPACE_MEMBERS: usize = 256;
+const MAX_WORKSPACE_PATTERNS: usize = 4096;
+
 pub(super) fn parse(path: &Path) -> Result<(Vec<Dependency>, Option<Vec<String>>)> {
     let value: JsonValue =
         serde_json::from_str(&read(path)?).map_err(|error| manifest_error(path, error))?;
-    let install_scripts = value
+    let package = value
+        .as_object()
+        .ok_or_else(|| manifest_error(path, "package.json root must be an object"))?;
+    let install_scripts = package
         .get("scripts")
         .and_then(JsonValue::as_object)
         .map(|scripts| {
@@ -33,36 +43,65 @@ pub(super) fn parse(path: &Path) -> Result<(Vec<Dependency>, Option<Vec<String>>
         })
         .filter(|scripts| !scripts.is_empty());
     let mut by_name = HashMap::new();
-    for section in ["dependencies", "optionalDependencies", "peerDependencies"] {
-        if let Some(entries) = value.get(section).and_then(JsonValue::as_object) {
-            for (name, value) in entries {
-                let requirement = value.as_str().ok_or_else(|| {
-                    manifest_error(path, format!("{section}.{name} must be a string"))
-                })?;
-                let mut dependency = Dependency::declared(Ecosystem::Npm, name, requirement);
-                if let Some((archive, commit)) = github_archive(requirement) {
-                    dependency.resolved_version = Some(commit);
-                    dependency.source_url = Some(archive);
-                }
-                by_name.insert(name.clone(), dependency);
+    // Peer dependencies are a fallback only. Development dependencies are included
+    // by default, while normal and optional dependencies take precedence, matching
+    // npm's duplicate-section semantics.
+    for section in [
+        "peerDependencies",
+        "devDependencies",
+        "dependencies",
+        "optionalDependencies",
+    ] {
+        let Some(value) = package.get(section) else {
+            continue;
+        };
+        let entries = value
+            .as_object()
+            .ok_or_else(|| manifest_error(path, format!("{section} must be an object")))?;
+        for (name, value) in entries {
+            let requirement = value.as_str().ok_or_else(|| {
+                manifest_error(path, format!("{section}.{name} must be a string"))
+            })?;
+            let mut dependency = Dependency::declared(Ecosystem::Npm, name, requirement);
+            if let Some((archive, commit)) = github_archive(requirement) {
+                dependency.resolved_version = Some(commit);
+                dependency.source_url = Some(archive);
             }
+            by_name.insert(name.clone(), dependency);
         }
     }
     Ok((by_name.into_values().collect(), install_scripts))
 }
 
+pub(super) struct EnrichResult {
+    pub(super) contexts: HashMap<String, NpmLockContext>,
+    pub(super) package_lock_context: Option<NpmLockContext>,
+    /// True when this package directory selected any supported local npm lockfile.
+    /// Callers must use this rather than `contexts.is_empty()`: a selected lockfile
+    /// can validly produce no child contexts and must still suppress inheritance.
+    pub(super) local_lockfile_selected: bool,
+}
+
 pub(super) fn enrich(
-    root: &Path,
+    root: &ManifestRoot,
     dependencies: &mut [Dependency],
     lockfiles: &mut Vec<PathBuf>,
-) -> Result<HashMap<String, NpmLockContext>> {
-    let Some(path) = ["npm-shrinkwrap.json", "package-lock.json"]
-        .into_iter()
-        .map(|name| root.join(name))
-        .find(|path| path.is_file())
-    else {
-        enrich_alternative_lock(root, dependencies, lockfiles)?;
-        return Ok(HashMap::new());
+) -> Result<EnrichResult> {
+    let directory = root.path();
+    let mut selected = None;
+    for name in ["npm-shrinkwrap.json", "package-lock.json"] {
+        if root.is_file(Path::new(name))? {
+            selected = Some(directory.join(name));
+            break;
+        }
+    }
+    let Some(path) = selected else {
+        let local_lockfile_selected = enrich_alternative_lock(root, dependencies, lockfiles)?;
+        return Ok(EnrichResult {
+            contexts: HashMap::new(),
+            package_lock_context: None,
+            local_lockfile_selected,
+        });
     };
     let context = NpmLockContext {
         lockfile: path.clone(),
@@ -70,7 +109,11 @@ pub(super) fn enrich(
     };
     let contexts = enrich_from_context(&context, dependencies)?;
     lockfiles.push(path);
-    Ok(contexts)
+    Ok(EnrichResult {
+        contexts,
+        package_lock_context: Some(context),
+        local_lockfile_selected: true,
+    })
 }
 
 pub(super) fn enrich_from_context(
@@ -80,25 +123,212 @@ pub(super) fn enrich_from_context(
     package_lock::enrich(context, dependencies)
 }
 
+pub(super) fn workspace_members(root: &ManifestRoot, package: &Path) -> Result<Vec<PathBuf>> {
+    let value: JsonValue =
+        serde_json::from_str(&read(package)?).map_err(|error| manifest_error(package, error))?;
+    let package_json = value
+        .as_object()
+        .ok_or_else(|| manifest_error(package, "package.json root must be an object"))?;
+    let Some(workspaces) = package_json.get("workspaces") else {
+        return Ok(Vec::new());
+    };
+    let patterns = if let Some(patterns) = workspaces.as_array() {
+        patterns
+    } else {
+        workspaces
+            .as_object()
+            .and_then(|workspaces| workspaces.get("packages"))
+            .and_then(JsonValue::as_array)
+            .ok_or_else(|| {
+                manifest_error(
+                    package,
+                    "npm workspaces must be an array or an object with a packages array",
+                )
+            })?
+    };
+    if patterns.len() > MAX_WORKSPACE_PATTERNS {
+        return Err(manifest_error(
+            package,
+            format!("npm workspace patterns exceed the {MAX_WORKSPACE_PATTERNS}-entry limit"),
+        ));
+    }
+    let patterns = patterns
+        .iter()
+        .map(|pattern| {
+            pattern
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| manifest_error(package, "npm workspace patterns must be strings"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let (includes, excludes) = workspace_globs(package, &patterns)?;
+    let mut members = Vec::new();
+    let mut entries = 1usize;
+    walk_beneath(
+        root.path(),
+        MAX_WORKSPACE_DEPTH,
+        &mut |entry, _depth, kind| {
+            entries += 1;
+            if entries > MAX_WORKSPACE_ENTRIES {
+                return Err(manifest_error(
+                    package,
+                    format!(
+                        "npm workspace expansion exceeds the {MAX_WORKSPACE_ENTRIES}-entry limit"
+                    ),
+                ));
+            }
+            if kind == RootedFileType::Symlink {
+                if includes.is_match(entry) && !excludes.is_match(entry) {
+                    return Err(manifest_error(
+                        package,
+                        format!(
+                            "npm workspace member {} must not be a symbolic link",
+                            entry.display()
+                        ),
+                    ));
+                }
+                return Ok(());
+            }
+            if kind != RootedFileType::File
+                || entry.file_name().and_then(|name| name.to_str()) != Some("package.json")
+            {
+                return Ok(());
+            }
+            let member = entry
+                .parent()
+                .ok_or_else(|| manifest_error(package, "workspace member escaped its root"))?;
+            if includes.is_match(member) && !excludes.is_match(member) {
+                members.push(member.to_path_buf());
+                if members.len() > MAX_WORKSPACE_MEMBERS {
+                    return Err(manifest_error(
+                        package,
+                        format!(
+                            "npm workspace expansion exceeds the {MAX_WORKSPACE_MEMBERS}-member limit"
+                        ),
+                    ));
+                }
+            }
+            Ok(())
+        },
+    )?;
+    members.sort();
+    members.dedup();
+    Ok(members)
+}
+
+fn workspace_globs(manifest: &Path, patterns: &[String]) -> Result<(GlobSet, GlobSet)> {
+    let mut includes = GlobSetBuilder::new();
+    let mut excludes = GlobSetBuilder::new();
+    let mut include_count = 0usize;
+    for raw in patterns {
+        let (exclude, pattern) = raw
+            .strip_prefix('!')
+            .map_or((false, raw.as_str()), |pattern| (true, pattern));
+        let pattern = pattern.strip_prefix("./").unwrap_or(pattern);
+        let path = Path::new(pattern);
+        if pattern.is_empty()
+            || path.is_absolute()
+            || path.components().any(|component| {
+                matches!(
+                    component,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )
+            })
+        {
+            return Err(manifest_error(
+                manifest,
+                "npm workspace patterns must remain within the workspace root",
+            ));
+        }
+        let glob = Glob::new(pattern).map_err(|error| {
+            manifest_error(manifest, format!("invalid workspace pattern: {error}"))
+        })?;
+        if exclude {
+            excludes.add(glob);
+        } else {
+            includes.add(glob);
+            include_count += 1;
+        }
+    }
+    if include_count == 0 {
+        return Err(manifest_error(
+            manifest,
+            "npm workspaces must contain at least one inclusion pattern",
+        ));
+    }
+    Ok((
+        includes
+            .build()
+            .map_err(|error| manifest_error(manifest, error))?,
+        excludes
+            .build()
+            .map_err(|error| manifest_error(manifest, error))?,
+    ))
+}
+
+/// Returns whether a lockfile reference can enrich a pinned GitHub archive declaration.
+/// Non-GitHub declarations retain their existing lockfile behavior.
+pub(super) fn matching_github_archive(
+    dependency: &Dependency,
+    reference: Option<&str>,
+) -> Option<(String, String)> {
+    let expected = github_archive(&dependency.requirement)?;
+    let reference = reference?;
+    (github_archive(reference).is_some_and(|archive| archive == expected)
+        || reference.split('#').next() == Some(expected.0.as_str()))
+    .then_some(expected)
+}
+
+pub(super) fn github_archive_matches(dependency: &Dependency, reference: Option<&str>) -> bool {
+    github_archive(&dependency.requirement).is_none()
+        || matching_github_archive(dependency, reference).is_some()
+}
+
+fn local_source_url(lockfile: &Path, reference: &str) -> Option<String> {
+    let path = ["file:", "link:", "portal:", "workspace:"]
+        .into_iter()
+        .find_map(|prefix| reference.strip_prefix(prefix))?;
+    if path.is_empty() || matches!(path, "*" | "^" | "~") {
+        return None;
+    }
+
+    let path = Path::new(path);
+    let path = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        lockfile.parent()?.join(path)
+    };
+    url::Url::from_file_path(path).ok().map(String::from)
+}
+
 fn enrich_alternative_lock(
-    root: &Path,
+    root: &ManifestRoot,
     dependencies: &mut [Dependency],
     lockfiles: &mut Vec<PathBuf>,
-) -> Result<()> {
-    let yarn_path = root.join("yarn.lock");
-    let pnpm_path = root.join("pnpm-lock.yaml");
-    if yarn_path.is_file() && pnpm_path.is_file() {
+) -> Result<bool> {
+    let directory = root.path();
+    let yarn_path = directory.join("yarn.lock");
+    let pnpm_path = directory.join("pnpm-lock.yaml");
+    let has_yarn = root.is_file(Path::new("yarn.lock"))?;
+    let has_pnpm = root.is_file(Path::new("pnpm-lock.yaml"))?;
+    if has_yarn && has_pnpm {
         return Err(manifest_error(
             &yarn_path,
             "both yarn.lock and pnpm-lock.yaml are present; lockfile selection is ambiguous",
         ));
     }
-    if pnpm_path.is_file() {
+    if has_pnpm {
         pnpm::enrich(&pnpm_path, dependencies)?;
         lockfiles.push(pnpm_path);
-    } else if yarn_path.is_file() {
+        Ok(true)
+    } else if has_yarn {
         yarn::enrich(&yarn_path, dependencies)?;
         lockfiles.push(yarn_path);
+        Ok(true)
+    } else {
+        Ok(false)
     }
-    Ok(())
 }
+
+#[cfg(test)]
+mod tests;

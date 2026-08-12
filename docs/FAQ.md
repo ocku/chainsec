@@ -6,7 +6,19 @@ No. Package source is parsed, never installed or executed. Acquisition and extra
 
 ## Why is network access off by default?
 
-Scanning untrusted dependency source should not require trusting the network. Network access is disabled unless you pass `--online` or select a remote root with `--remote`, and each requested host must be explicitly allowed through `allowed_hosts`, `--allow-host`, a `--remote` selector, or a configured Artifactory metadata endpoint. Artifact hosts returned by registry metadata and redirects are checked against the same allowlist. This keeps the default local-scan path fully offline and auditable.
+Scanning untrusted dependency source should not require trusting the network. Network access is disabled unless you pass `--online` or run a `chainsec remote` command, and each requested host must be explicitly allowed through `allowed_hosts`, `--allow-host`, the selected remote package's configured metadata or PyPI artifact host, or a configured Artifactory endpoint. Artifact hosts returned by registry metadata and redirects are checked against the same allowlist; metadata cannot add a host by itself. This keeps the default local-scan path fully offline and auditable.
+
+## How do I configure a PyPI mirror with separate metadata and download hosts?
+
+Configure both endpoints in `chainsec.toml`; ChainSec automatically allows these two configured hosts while online, but does not trust a third host merely because metadata names it.
+
+```toml
+[artifactories.pypi]
+metadata_base_url = "https://metadata.packages.example/pypi"
+artifact_base_url = "https://artifacts.packages.example/packages"
+```
+
+Omit `artifact_base_url` when one repository-manager endpoint serves both. The public defaults remain `pypi.org` for metadata and `files.pythonhosted.org` for artifacts.
 
 ## What does `--allow-unlocked` do?
 
@@ -14,14 +26,14 @@ By default, a dependency must be fully identified by a supported lockfile (exact
 
 ## Can I scan only my own project without dependencies?
 
-Yes. `chainsec --max-depth 0` scans only the root project and does not traverse dependencies. This is also the recommended way to verify an installation.
+Yes. `chainsec scan --max-depth 0` scans only the root project and does not traverse dependencies. This is also the recommended way to verify an installation.
 
 ## How do I scan dependencies safely?
 
 Use a locked project and an explicit network policy:
 
 ```sh
-chainsec /path/to/project \
+chainsec scan /path/to/project \
   --online \
   --allow-host pypi.org \
   --allow-host files.pythonhosted.org \
@@ -56,7 +68,11 @@ Write a JSON or YAML rule pack with a non-empty `rules` array, each rule supplyi
 
 ## Where is the cache, and can I move or purge it?
 
-When the current directory contains `chainsec.toml`, the default cache is `.chainsec-cache` there. Otherwise, ChainSec uses `$XDG_CACHE_HOME/chainsec`, then `$HOME/.cache/chainsec`, and finally the system temporary directory. Set `--cache <dir>` or `cache` in `chainsec.toml` to choose a different location. Run `chainsec --cache-purge` to delete the resolved cache without scanning, or combine it with `--cache <dir>` to purge a specific cache. Cache entries are content-identified, published atomically, and validated on every hit. The Docker image uses `/cache`.
+When the current directory contains `chainsec.toml`, the default cache is `.chainsec-cache` there. Otherwise, ChainSec uses `$XDG_CACHE_HOME/chainsec`, then `$HOME/.cache/chainsec`, and finally the system temporary directory. Set `--cache <dir>` or `cache` in `chainsec.toml` to choose a different location. Run `chainsec cache purge` to delete cached contents without scanning, or combine it with `--cache <dir>` to purge a specific cache. Purge removes everything except the cache directory and its internal `.lock`, so fetchers and purge operations continue to coordinate on one stable lock without creating a sibling file. On Unix, a running fetcher or purge rechecks the cache directory identity before cache acquisition, staging, and purge mutations; a detected rename or symlink replacement fails closed rather than continuing against the replacement. Cache entries are content-identified and published under per-entry locks: valid winners are retained, while invalid entries are atomically quarantined and replaced. Registry artifacts are integrity-checked and safely reconstructed into unique owner-only workspaces under the platform temporary directory, outside the configured cache, on every hit rather than trusting cached extracted source. These workspaces are removed when the owning fetcher is dropped. Full GitHub commit references do not provide an independent archive digest, so their cache entries are not reused. The Docker image uses `/cache`.
+
+### How should I secure the cache?
+
+Put the cache in a directory owned by the account running ChainSec and not writable by other users or services. Do not share a cache directory across trust boundaries. Cache locks only coordinate cooperating ChainSec processes; they are not an access-control mechanism. ChainSec uses Unix descriptor-relative no-follow operations for cache, extraction, and JSR workspaces, which prevents a directory replacement after the workspace root is opened from redirecting those operations. ChainSec compiles only for Unix targets.
 
 ## Does `chainsec` guarantee a package is safe?
 
@@ -64,4 +80,4 @@ No. Static analysis reduces risk but is not a malware-containment boundary and d
 
 ## Which ecosystems and lockfiles are supported?
 
-Python (PEP 621 and Poetry declarations; `poetry.lock`, `Pipfile.lock`, `uv.lock`, `pdm.lock`), npm (lock/shrinkwrap 1–3, Yarn Classic, Yarn Berry 4–8, pnpm 5.3/5.4/6/9), Deno (`deno.lock` versions 1–5), and public GitHub full-commit references. See [Dependency resolution and acquisition](RESOLUTION.md) for details and limitations.
+Python (PEP 621 and Poetry declarations; `poetry.lock`, `Pipfile.lock`, `uv.lock`, `pdm.lock`), npm (lock/shrinkwrap 1–3, Yarn Classic, pnpm 5.3/5.4/6/9), Deno (`deno.lock` versions 1–5), and public GitHub full-commit references. GitHub commit archives are origin-pinned to `codeload.github.com` but do not have an independently verified archive/tree digest. See [Dependency resolution and acquisition](RESOLUTION.md) and the [security model](SECURITY_MODEL.md) for details and limitations.

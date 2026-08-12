@@ -12,6 +12,18 @@ pub(super) fn rules() -> Vec<Rule> {
             super::super::EXECUTION_REMEDIATION,
             r#"
                     (call_expression function: (identifier) @callee (#match? @callee "^(exec|execFile|spawn|fork)$")) @match
+                    (call_expression function: (member_expression object: (identifier) @module property: (property_identifier) @callee)
+                      (#match? @module "^(child_process|cp)$")
+                      (#match? @callee "^(exec|execSync|execFile|execFileSync|spawn|spawnSync|fork)$")) @match
+                    ((import_statement source: (string) @module) @match
+                      (#match? @module "child_process"))
+                    ((variable_declarator
+                      name: (identifier) @alias
+                      value: (call_expression
+                        function: (identifier) @require
+                        arguments: (arguments (string) @module))) @match
+                      (#eq? @require "require")
+                      (#match? @module "child_process"))
                     (call_expression function: (member_expression object: (new_expression constructor: (member_expression object: (identifier) @deno property: (property_identifier) @command)) property: (property_identifier) @method)
                       (#eq? @deno "Deno") (#eq? @command "Command")
                       (#match? @method "^(spawn|output|outputSync)$")) @match

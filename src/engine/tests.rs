@@ -54,6 +54,11 @@ struct CountingFixtureFetcher {
     fetches: Arc<Mutex<HashMap<String, usize>>>,
 }
 
+struct ContextFixtureFetcher {
+    packages: PathBuf,
+    fetches: Arc<Mutex<HashMap<String, usize>>>,
+}
+
 #[async_trait]
 impl Fetcher for CountingFixtureFetcher {
     async fn fetch(
@@ -80,477 +85,178 @@ impl Fetcher for CountingFixtureFetcher {
     }
 }
 
-#[tokio::test]
-async fn capability_rules_are_reported_separately_from_findings() {
-    let root = tempfile::tempdir().unwrap();
-    fs::write(root.path().join("server.py"), "server.listen()\n").unwrap();
-    let rules = crate::rules::capability_rules()
-        .into_iter()
-        .filter(|rule| rule.id == "chainsec.py.capability.network-listen")
-        .collect::<Vec<_>>();
-    let report = Engine::new(
-        &rules,
-        &NeverFetch,
-        EngineLimits::default(),
-        false,
-        false,
-        vec![],
-        false,
-    )
-    .analyze(root.path())
-    .await
-    .unwrap();
-
-    assert!(report.findings.is_empty());
-    assert_eq!(report.statistics.findings, 0);
-    assert_eq!(report.capabilities.len(), 1);
-    assert_eq!(report.capabilities[0].name, "network:listen");
-    assert_eq!(report.capabilities[0].evidence.len(), 1);
-    assert_eq!(
-        report.capabilities[0].evidence[0].rule_id,
-        "chainsec.py.capability.network-listen"
-    );
-}
-
-#[test]
-fn capability_rules_declare_a_capability() {
-    let rules = crate::rules::capability_rules();
-
-    assert!(!rules.is_empty());
-    for rule in rules {
-        assert!(rule.capability.is_some(), "{}", rule.id);
-    }
-}
-
-#[tokio::test]
-async fn unlocked_dependencies_are_policy_issues() {
-    let root = tempfile::tempdir().unwrap();
-    fs::write(
-        root.path().join("package.json"),
-        r#"{"dependencies":{"left-pad":"^1"}}"#,
-    )
-    .unwrap();
-    let rules = crate::rules::built_in_rules();
-    let report = Engine::new(
-        &rules,
-        &NeverFetch,
-        EngineLimits::default(),
-        true,
-        true,
-        vec![],
-        false,
-    )
-    .analyze(root.path())
-    .await
-    .unwrap();
-    assert_eq!(report.packages.len(), 1);
-    assert!(
-        report
-            .issues
-            .iter()
-            .any(|issue| issue.code == "policy_error")
-    );
-}
-
-#[tokio::test]
-async fn fetched_root_bypasses_lockfile_policy_but_dependencies_do_not() {
-    let source = tempfile::tempdir().unwrap();
-    fs::write(
-        source.path().join("package.json"),
-        r#"{"dependencies":{"left-pad":"^1"}}"#,
-    )
-    .unwrap();
-    let rules = crate::rules::built_in_rules();
-    let report = Engine::new(
-        &rules,
-        &NeverFetch,
-        EngineLimits::default(),
-        true,
-        true,
-        vec![],
-        false,
-    )
-    .analyze_fetched_root(FetchMetadata {
-        source: source.path().to_owned(),
-        package_id: "npm:remote@1.0.0#sha512-remote".to_owned(),
-        resolved_version: "1.0.0".to_owned(),
-        digest: "sha512-remote".to_owned(),
-        source_url: "https://registry.example.test/remote-1.0.0.tgz".to_owned(),
-        cache_hit: false,
-    })
-    .await
-    .unwrap();
-
-    assert_eq!(report.packages[0].package_id, "root");
-    assert_eq!(
-        report.packages[0].source_url.as_deref(),
-        Some("https://registry.example.test/remote-1.0.0.tgz")
-    );
-    assert!(
-        report
-            .issues
-            .iter()
-            .any(|issue| issue.code == "policy_error")
-    );
-}
-
-#[tokio::test]
-async fn root_python_lock_resolves_transitive_dependencies() {
-    let root = tempfile::tempdir().unwrap();
-    let packages = tempfile::tempdir().unwrap();
-    fs::write(
-        root.path().join("pyproject.toml"),
-        r#"[tool.poetry.dependencies]
-python = "^3.11"
-pandas = "^2.3.3"
-"#,
-    )
-    .unwrap();
-    fs::write(
-        root.path().join("poetry.lock"),
-        r#"[[package]]
-name = "pandas"
-version = "2.3.3"
-files = [{file = "pandas.whl", hash = "sha256:pandas"}]
-
-[[package]]
-name = "numpy"
-version = "2.3.3"
-files = [{file = "numpy.whl", hash = "sha256:numpy"}]
-
-[[package]]
-name = "python-dateutil"
-version = "2.9.0"
-files = [{file = "dateutil.whl", hash = "sha256:dateutil"}]
-
-[[package]]
-name = "tzdata"
-version = "2025.2"
-files = [{file = "tzdata.whl", hash = "sha256:tzdata"}]
-"#,
-    )
-    .unwrap();
-    fs::create_dir(packages.path().join("pandas")).unwrap();
-    fs::write(
-        packages.path().join("pandas/pyproject.toml"),
-        r#"[project]
-dependencies = [
-  "numpy>=1.26.0; python_version < '3.14'",
-  "numpy>=2.3.3; python_version >= '3.14'",
-  "python-dateutil>=2.8.2",
-  "tzdata; sys_platform == 'emscripten'",
-  "tzdata; sys_platform == 'win32'",
-]
-"#,
-    )
-    .unwrap();
-    for package in ["numpy", "python-dateutil", "tzdata"] {
-        fs::create_dir(packages.path().join(package)).unwrap();
-    }
-
-    let fetcher = FixtureFetcher {
-        packages: packages.path().to_owned(),
-    };
-    let report = Engine::new(
-        &[],
-        &fetcher,
-        EngineLimits::default(),
-        true,
-        true,
-        vec![],
-        false,
-    )
-    .analyze(root.path())
-    .await
-    .unwrap();
-
-    assert!(report.issues.is_empty(), "{:?}", report.issues);
-    assert!(
-        report
-            .packages
-            .iter()
-            .any(|package| package.package_id.starts_with("python:numpy@2.3.3#"))
-    );
-}
-
-#[tokio::test]
-async fn root_npm_lock_resolves_hoisted_transitive_dependencies() {
-    let root = tempfile::tempdir().unwrap();
-    let packages = tempfile::tempdir().unwrap();
-    fs::write(
-        root.path().join("package.json"),
-        r#"{"dependencies":{"ip-address":"^9.0.5"}}"#,
-    )
-    .unwrap();
-    fs::write(
-            root.path().join("package-lock.json"),
-            r#"{
-                "lockfileVersion": 3,
-                "packages": {
-                    "": {"dependencies":{"ip-address":"^9.0.5"}},
-                    "node_modules/ip-address": {
-                        "version":"9.0.5",
-                        "resolved":"https://registry.npmjs.org/ip-address/-/ip-address-9.0.5.tgz",
-                        "integrity":"sha512-ip-address"
-                    },
-                    "node_modules/smart-buffer": {
-                        "version":"4.2.0",
-                        "resolved":"https://registry.npmjs.org/smart-buffer/-/smart-buffer-4.2.0.tgz",
-                        "integrity":"sha512-smart-buffer"
-                    }
-                }
-            }"#,
-        )
-        .unwrap();
-    fs::create_dir(packages.path().join("ip-address")).unwrap();
-    fs::write(
-        packages.path().join("ip-address/package.json"),
-        r#"{"dependencies":{"smart-buffer":"^4.2.0"}}"#,
-    )
-    .unwrap();
-    fs::create_dir(packages.path().join("smart-buffer")).unwrap();
-    fs::write(
-        packages.path().join("smart-buffer/package.json"),
-        r#"{"name":"smart-buffer","version":"4.2.0"}"#,
-    )
-    .unwrap();
-
-    let fetcher = FixtureFetcher {
-        packages: packages.path().to_owned(),
-    };
-    let report = Engine::new(
-        &[],
-        &fetcher,
-        EngineLimits::default(),
-        true,
-        true,
-        vec![],
-        false,
-    )
-    .analyze(root.path())
-    .await
-    .unwrap();
-
-    assert_eq!(report.packages.len(), 3);
-    assert!(report.issues.is_empty(), "{:?}", report.issues);
-    assert!(
-        report
-            .packages
-            .iter()
-            .any(|package| package.package_id.starts_with("npm:smart-buffer@4.2.0#"))
-    );
-}
-
-#[tokio::test]
-async fn root_npm_lock_dependency_cycle_terminates_and_analyzes_each_package_once() {
-    let root = tempfile::tempdir().unwrap();
-    let packages = tempfile::tempdir().unwrap();
-    fs::write(
-        root.path().join("package.json"),
-        r#"{"dependencies":{"a":"1.0.0"}}"#,
-    )
-    .unwrap();
-    fs::write(
-        root.path().join("package-lock.json"),
-        r#"{
-            "lockfileVersion": 3,
-            "packages": {
-                "": {"dependencies":{"a":"1.0.0"}},
-                "node_modules/a": {
-                    "version":"1.0.0",
-                    "resolved":"https://registry.npmjs.org/a/-/a-1.0.0.tgz",
-                    "integrity":"sha512-a"
-                },
-                "node_modules/b": {
-                    "version":"1.0.0",
-                    "resolved":"https://registry.npmjs.org/b/-/b-1.0.0.tgz",
-                    "integrity":"sha512-b"
-                }
-            }
-        }"#,
-    )
-    .unwrap();
-    fs::create_dir(packages.path().join("a")).unwrap();
-    fs::write(
-        packages.path().join("a/package.json"),
-        r#"{"dependencies":{"b":"1.0.0"}}"#,
-    )
-    .unwrap();
-    fs::create_dir(packages.path().join("b")).unwrap();
-    fs::write(
-        packages.path().join("b/package.json"),
-        r#"{"dependencies":{"a":"1.0.0"}}"#,
-    )
-    .unwrap();
-
-    let fetcher = FixtureFetcher {
-        packages: packages.path().to_owned(),
-    };
-    let report = Engine::new(
-        &[],
-        &fetcher,
-        EngineLimits::default(),
-        true,
-        true,
-        vec![],
-        false,
-    )
-    .analyze(root.path())
-    .await
-    .unwrap();
-
-    assert!(report.issues.is_empty(), "{:?}", report.issues);
-    assert_eq!(report.packages.len(), 3);
-    for package_id in ["root", "npm:a@1.0.0#sha512-a", "npm:b@1.0.0#sha512-b"] {
-        assert_eq!(
-            report
-                .packages
-                .iter()
-                .filter(|package| package.package_id == package_id)
-                .count(),
-            1,
-            "expected {package_id} to be analyzed exactly once"
-        );
-    }
-}
-
-#[tokio::test]
-async fn fetched_root_reached_through_cycle_is_not_analyzed_twice() {
-    let packages = tempfile::tempdir().unwrap();
-    let webpack = packages.path().join("webpack");
-    let cycle_a = packages.path().join("cycle-a");
-    fs::create_dir(&webpack).unwrap();
-    fs::create_dir(&cycle_a).unwrap();
-    fs::write(
-        webpack.join("package.json"),
-        r#"{"name":"webpack","version":"1.0.0","dependencies":{"cycle-a":"1.0.0"}}"#,
-    )
-    .unwrap();
-    fs::write(
-        webpack.join("package-lock.json"),
-        r#"{
-            "lockfileVersion": 3,
-            "packages": {
-                "": {"name":"webpack","version":"1.0.0","dependencies":{"cycle-a":"1.0.0"}},
-                "node_modules/cycle-a": {"version":"1.0.0","resolved":"https://registry.example.test/cycle-a.tgz","integrity":"sha512-cycle-a"},
-                "node_modules/webpack": {"version":"1.0.0","resolved":"https://registry.example.test/webpack.tgz","integrity":"sha512-webpack"}
-            }
-        }"#,
-    )
-    .unwrap();
-    fs::write(webpack.join("index.js"), "module.exports = {};\n").unwrap();
-    fs::write(
-        cycle_a.join("package.json"),
-        r#"{"name":"cycle-a","version":"1.0.0","dependencies":{"webpack":"1.0.0"}}"#,
-    )
-    .unwrap();
-    fs::write(cycle_a.join("index.js"), "module.exports = {};\n").unwrap();
-
-    let fetcher = FixtureFetcher {
-        packages: packages.path().to_owned(),
-    };
-    let report = Engine::new(
-        &[],
-        &fetcher,
-        EngineLimits::default(),
-        false,
-        true,
-        vec![],
-        false,
-    )
-    .analyze_fetched_root(FetchMetadata {
-        source: webpack,
-        package_id: "npm:webpack@1.0.0#sha512-webpack".to_owned(),
-        resolved_version: "1.0.0".to_owned(),
-        digest: "sha512-webpack".to_owned(),
-        source_url: "https://registry.example.test/webpack.tgz".to_owned(),
-        cache_hit: false,
-    })
-    .await
-    .unwrap();
-
-    assert!(report.issues.is_empty(), "{:?}", report.issues);
-    assert_eq!(report.packages.len(), 2);
-    assert_eq!(report.statistics.source_files, 2);
-    assert_eq!(
-        report
-            .packages
-            .iter()
-            .filter(|package| package.package_id == "root")
-            .count(),
-        1
-    );
-    assert!(
-        !report
-            .packages
-            .iter()
-            .any(|package| package.package_id == "npm:webpack@1.0.0#sha512-webpack")
-    );
-}
-
-#[tokio::test]
-async fn shared_frontier_dependency_is_fetched_once() {
-    let root = tempfile::tempdir().unwrap();
-    let packages = tempfile::tempdir().unwrap();
-    fs::write(
-        root.path().join("package.json"),
-        r#"{"dependencies":{"scan-overlap-a":"1.0.0","scan-overlap-b":"1.0.0"}}"#,
-    )
-    .unwrap();
-    fs::write(
-        root.path().join("package-lock.json"),
-        r#"{
-            "lockfileVersion": 3,
-            "packages": {
-                "": {"dependencies":{"scan-overlap-a":"1.0.0","scan-overlap-b":"1.0.0"}},
-                "node_modules/scan-overlap-a": {"version":"1.0.0","resolved":"https://registry.example.test/a.tgz","integrity":"sha512-a"},
-                "node_modules/scan-overlap-b": {"version":"1.0.0","resolved":"https://registry.example.test/b.tgz","integrity":"sha512-b"},
-                "node_modules/shared": {"version":"1.0.0","resolved":"https://registry.example.test/shared.tgz","integrity":"sha512-shared"}
-            }
-        }"#,
-    )
-    .unwrap();
-    for package in ["scan-overlap-a", "scan-overlap-b", "shared"] {
-        fs::create_dir(packages.path().join(package)).unwrap();
-    }
-    for package in ["scan-overlap-a", "scan-overlap-b"] {
-        fs::write(
-            packages.path().join(package).join("package.json"),
-            r#"{"dependencies":{"shared":"1.0.0"}}"#,
-        )
-        .unwrap();
-    }
-    fs::write(
-        packages.path().join("shared/package.json"),
-        r#"{"name":"shared","version":"1.0.0"}"#,
-    )
-    .unwrap();
-
-    let fetches = Arc::new(Mutex::new(HashMap::new()));
-    let fetcher = CountingFixtureFetcher {
-        packages: packages.path().to_owned(),
-        fetches: Arc::clone(&fetches),
-    };
-    let report = Engine::new(
-        &[],
-        &fetcher,
-        EngineLimits::default(),
-        true,
-        true,
-        vec![],
-        false,
-    )
-    .analyze(root.path())
-    .await
-    .unwrap();
-
-    assert!(report.issues.is_empty(), "{:?}", report.issues);
-    assert_eq!(
-        fetches
+#[async_trait]
+impl Fetcher for ContextFixtureFetcher {
+    async fn fetch(
+        &self,
+        dependency: Dependency,
+        _declared_from: PathBuf,
+    ) -> Result<FetchMetadata> {
+        let package_id = dependency.id();
+        *self
+            .fetches
             .lock()
             .unwrap()
-            .get("npm:shared@1.0.0#sha512-shared"),
-        Some(&1),
-        "shared dependency should be fetched once for its frontier"
-    );
+            .entry(package_id.clone())
+            .or_default() += 1;
+        let source = if dependency.name == "child" {
+            self.packages.join(format!(
+                "child-{}",
+                dependency.resolved_version.as_deref().unwrap()
+            ))
+        } else {
+            self.packages.join(&dependency.name)
+        };
+        Ok(FetchMetadata {
+            source,
+            package_id,
+            resolved_version: dependency.resolved_version.clone().unwrap(),
+            digest: dependency.integrity.clone().unwrap(),
+            source_url: dependency.source_url.unwrap(),
+            cache_hit: false,
+        })
+    }
+}
+
+struct SourceUrlPolicyFetcher {
+    package: PathBuf,
+    denied_url: String,
+    fetches: Arc<Mutex<Vec<String>>>,
+}
+
+struct DenoLockfilePolicyFetcher {
+    package: PathBuf,
+    fetches: Arc<Mutex<Vec<PathBuf>>>,
+}
+
+struct DenoNpmRequirementFetcher {
+    packages: PathBuf,
+    fetches: Arc<Mutex<Vec<String>>>,
+}
+
+fn fetched_fixture_root(source: PathBuf, package_id: &str) -> FetchMetadata {
+    FetchMetadata {
+        source,
+        package_id: package_id.to_owned(),
+        resolved_version: "1.0.0".to_owned(),
+        digest: format!("sha512-{package_id}"),
+        source_url: format!("https://roots.example.test/{package_id}.tgz"),
+        cache_hit: false,
+    }
+}
+
+#[async_trait]
+impl Fetcher for SourceUrlPolicyFetcher {
+    async fn fetch(
+        &self,
+        dependency: Dependency,
+        _declared_from: PathBuf,
+    ) -> Result<FetchMetadata> {
+        let source_url = dependency.source_url.clone().unwrap();
+        self.fetches.lock().unwrap().push(source_url.clone());
+        if source_url == self.denied_url {
+            return Err(crate::error::Error::Policy {
+                operation: "test dependency fetch".to_owned(),
+                message: source_url,
+            });
+        }
+
+        Ok(FetchMetadata {
+            source: self.package.clone(),
+            package_id: dependency.id(),
+            resolved_version: dependency.resolved_version.unwrap(),
+            digest: dependency.integrity.unwrap(),
+            source_url,
+            cache_hit: false,
+        })
+    }
+}
+
+#[async_trait]
+impl Fetcher for DenoLockfilePolicyFetcher {
+    async fn fetch(
+        &self,
+        dependency: Dependency,
+        _declared_from: PathBuf,
+    ) -> Result<FetchMetadata> {
+        let lockfile = dependency.lockfile.clone().unwrap();
+        self.fetches.lock().unwrap().push(lockfile.clone());
+        let lockfile_contents = fs::read_to_string(&lockfile).unwrap();
+        if lockfile_contents.contains(r#""decision":"deny""#) {
+            return Err(crate::error::Error::Policy {
+                operation: "test Deno lockfile verification".to_owned(),
+                message: lockfile.display().to_string(),
+            });
+        }
+
+        Ok(FetchMetadata {
+            source: self.package.clone(),
+            package_id: dependency.id(),
+            resolved_version: dependency.resolved_version.unwrap(),
+            digest: dependency.integrity.unwrap(),
+            source_url: dependency.source_url.unwrap(),
+            cache_hit: false,
+        })
+    }
+}
+
+#[async_trait]
+impl Fetcher for DenoNpmRequirementFetcher {
+    async fn fetch(
+        &self,
+        dependency: Dependency,
+        _declared_from: PathBuf,
+    ) -> Result<FetchMetadata> {
+        self.fetches
+            .lock()
+            .unwrap()
+            .push(dependency.requirement.clone());
+        assert_eq!(dependency.resolved_version.as_deref(), Some("1.0.0"));
+        assert!(dependency.integrity.is_none());
+
+        let package = dependency
+            .requirement
+            .strip_prefix("npm:")
+            .and_then(|specifier| specifier.rsplit_once('@'))
+            .map(|(package, _)| package)
+            .unwrap()
+            .to_owned();
+        Ok(FetchMetadata {
+            source: self.packages.join(&package),
+            package_id: format!("npm:{package}@1.0.0#sha512-{package}"),
+            resolved_version: "1.0.0".to_owned(),
+            digest: format!("sha512-{package}"),
+            source_url: format!("https://registry.example.test/{package}.tgz"),
+            cache_hit: false,
+        })
+    }
+}
+
+mod batch_core;
+mod cycles;
+mod deno_sharing;
+mod frontier;
+mod limits;
+mod lock_resolution;
+mod policy;
+mod source_identity;
+
+#[test]
+fn analysis_thread_count_is_clamped_to_safe_bounds() {
+    let rules = [];
+    let fetcher = NeverFetch;
+    let engine = Engine::new(
+        &rules,
+        &fetcher,
+        crate::model::EngineLimits::default(),
+        true,
+        true,
+        Vec::new(),
+        false,
+    )
+    .with_max_analysis_threads(usize::MAX);
+    assert_eq!(engine.max_analysis_threads, 64);
+
+    let engine = engine.with_max_analysis_threads(0);
+    assert_eq!(engine.max_analysis_threads, 1);
 }

@@ -3,6 +3,7 @@ mod finding;
 mod limits;
 mod report;
 
+pub(crate) use dependency::{DenoLockfileSnapshot, canonical_deno_remote_url};
 pub use dependency::{Dependency, Ecosystem, FetchMetadata};
 pub use finding::{
     AnalysisPoint, Capability, Confidence, EntropyMatcher, FindingType, Language, Location, Risk,
@@ -14,4 +15,4 @@ pub use report::{
     ScanStatistics,
 };
 
-pub const REPORT_SCHEMA_VERSION: &str = "1.1.0";
+pub const REPORT_SCHEMA_VERSION: &str = "1.2.0";

@@ -1,11 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://chainsec.dev/schema/report-1.1.0.json",
+  "$id": "https://chainsec.dev/schema/report-1.2.0.json",
   "title": "chainsec report",
   "type": "object",
   "required": ["schema_version", "tool_version", "root", "policy", "packages", "findings", "capabilities", "issues", "statistics"],
   "properties": {
-    "schema_version": { "const": "1.1.0" },
+    "schema_version": { "const": "1.2.0" },
     "tool_version": { "type": "string" },
     "root": { "type": "string" },
     "policy": { "$ref": "#/$defs/policy" },
@@ -19,11 +19,12 @@
   "$defs": {
     "policy": {
       "type": "object",
-      "required": ["require_lockfile", "offline", "trust_local_input", "allowed_hosts", "limits"],
+      "required": ["require_lockfile", "offline", "trust_local_input", "allow_insecure_http", "allowed_hosts", "limits"],
       "properties": {
         "require_lockfile": { "type": "boolean" },
         "offline": { "type": "boolean" },
         "trust_local_input": { "type": "boolean" },
+        "allow_insecure_http": { "type": "boolean", "description": "Whether plaintext HTTP loopback artifact repositories were explicitly enabled." },
         "allowed_hosts": { "type": "array", "items": { "type": "string" } },
         "limits": { "$ref": "#/$defs/limits" }
       },
@@ -31,16 +32,20 @@
     },
     "limits": {
       "type": "object",
-      "required": ["max_depth", "max_packages", "max_archive_bytes", "max_extracted_bytes", "max_extracted_files", "max_source_file_bytes", "max_source_files", "max_scan_seconds"],
+      "required": ["max_depth", "max_packages", "max_network_requests", "max_acquisition_seconds", "max_archive_bytes", "max_extracted_bytes", "max_extracted_files", "max_source_file_bytes", "max_source_files", "max_findings", "max_scan_seconds", "fail_on_parse_error"],
       "properties": {
         "max_depth": { "type": "integer", "minimum": 0 },
         "max_packages": { "type": "integer", "minimum": 0 },
+        "max_network_requests": { "type": "integer", "minimum": 1 },
+        "max_acquisition_seconds": { "type": "integer", "minimum": 0 },
         "max_archive_bytes": { "type": "integer", "minimum": 0 },
         "max_extracted_bytes": { "type": "integer", "minimum": 0 },
         "max_extracted_files": { "type": "integer", "minimum": 0 },
         "max_source_file_bytes": { "type": "integer", "minimum": 0 },
         "max_source_files": { "type": "integer", "minimum": 0 },
-        "max_scan_seconds": { "type": "integer", "minimum": 0 }
+        "max_findings": { "type": "integer", "minimum": 0 },
+        "max_scan_seconds": { "type": "integer", "minimum": 0 },
+        "fail_on_parse_error": { "type": "boolean" }
       },
       "additionalProperties": false
     },
@@ -111,13 +116,20 @@
     },
     "capability_evidence": {
       "type": "object",
-      "required": ["rule_id", "package", "file", "location", "matched_code"],
+      "required": ["id", "rule_id", "rule_version", "finding_type", "risk", "confidence", "package", "file", "location", "matched_code", "suppressed"],
       "properties": {
+        "id": { "type": "string" },
         "rule_id": { "type": "string" },
+        "rule_version": { "type": "integer", "minimum": 0 },
+        "finding_type": { "enum": ["arbitrary_code_execution", "code_obfuscation", "process_execution", "network_access", "filesystem_access", "secret_access", "dynamic_loading", "deserialization", "install_script", "file_analysis"] },
+        "risk": { "enum": ["low", "medium", "high", "critical"] },
+        "confidence": { "enum": ["low", "medium", "high"] },
         "package": { "type": "string" },
         "file": { "type": "string" },
         "location": { "$ref": "#/$defs/location" },
-        "matched_code": { "type": "string" }
+        "matched_code": { "type": "string" },
+        "suppressed": { "type": "boolean" },
+        "suppression": { "$ref": "#/$defs/suppression" }
       },
       "additionalProperties": false
     },

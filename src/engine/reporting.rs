@@ -13,9 +13,23 @@ use crate::{
 use super::traversal::PendingPackage;
 
 pub(super) fn record_scan(report: &mut Report, scan: scanner::ScanOutcome) -> (u64, u64) {
+    let counts = (scan.scanned_files, scan.scanned_bytes);
     report.statistics.source_files += scan.scanned_files;
     report.statistics.source_bytes += scan.scanned_bytes;
-    report.findings.extend(scan.findings);
+    report.issues.extend(scan.issues);
+    for finding in scan.findings {
+        push_finding(report, finding);
+    }
+    counts
+}
+
+pub(super) fn record_shared_scan(report: &mut Report, scan: &scanner::ScanOutcome) -> (u64, u64) {
+    report.statistics.source_files += scan.scanned_files;
+    report.statistics.source_bytes += scan.scanned_bytes;
+    report.issues.extend(scan.issues.iter().cloned());
+    for finding in &scan.findings {
+        push_finding(report, finding.clone());
+    }
 
     (scan.scanned_files, scan.scanned_bytes)
 }
@@ -31,11 +45,18 @@ pub(super) fn record_capabilities(report: &mut Report) {
             .entry(capability.name().to_owned())
             .or_default()
             .push(CapabilityEvidence {
+                id: finding.id.clone(),
                 rule_id: finding.rule_id.clone(),
+                rule_version: finding.rule_version,
+                finding_type: finding.finding_type,
+                risk: finding.risk,
+                confidence: finding.confidence,
                 package: finding.package.clone(),
                 file: finding.file.clone(),
                 location: finding.location.clone(),
                 matched_code: finding.matched_code.clone(),
+                suppressed: finding.suppressed,
+                suppression: finding.suppression.clone(),
             });
         false
     });
@@ -71,31 +92,51 @@ pub(super) fn record_install_scripts(
         let location = first_line_location();
         let (rule_id, risk, rationale, remediation) = install_script_details(warning.language);
 
-        report.findings.push(AnalysisPoint {
-            id: AnalysisPoint::stable_id(
-                rule_id,
-                1,
-                &pending.package_id,
-                &file,
-                &location,
-                &matched_code,
-            ),
-            rule_id: rule_id.to_owned(),
-            rule_version: 1,
-            finding_type: FindingType::InstallScript,
-            risk,
-            confidence: Confidence::High,
-            rationale: rationale.to_owned(),
-            remediation: remediation.to_owned(),
-            capability: None,
-            package: pending.package_id.clone(),
-            file: relative_manifest.to_owned(),
-            location,
-            matched_code,
-            suppressed: false,
-            suppression: None,
-        });
+        push_finding(
+            report,
+            AnalysisPoint {
+                id: AnalysisPoint::stable_id(
+                    rule_id,
+                    1,
+                    &pending.package_id,
+                    &file,
+                    &location,
+                    &matched_code,
+                ),
+                rule_id: rule_id.to_owned(),
+                rule_version: 1,
+                finding_type: FindingType::InstallScript,
+                risk,
+                confidence: Confidence::High,
+                rationale: rationale.to_owned(),
+                remediation: remediation.to_owned(),
+                capability: None,
+                package: pending.package_id.clone(),
+                file: relative_manifest.to_owned(),
+                location,
+                matched_code,
+                suppressed: false,
+                suppression: None,
+            },
+        );
     }
+}
+
+fn push_finding(report: &mut Report, finding: AnalysisPoint) {
+    let package_findings = report
+        .findings
+        .iter()
+        .filter(|existing| existing.package == finding.package)
+        .count() as u64;
+    if package_findings >= report.policy.limits.max_findings
+        || report
+            .findings
+            .iter()
+            .any(|existing| existing.id == finding.id)
+    {
+        return;
+    }
+    report.findings.push(finding);
 }
 
 fn first_line_location() -> Location {

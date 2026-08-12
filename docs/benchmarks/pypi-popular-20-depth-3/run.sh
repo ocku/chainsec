@@ -13,7 +13,7 @@ mkdir -p "$out_dir" "$cache_dir"
 for package in $packages; do
   slug=$(printf '%s' "$package" | tr '@/ ' '___')
   cargo run -- \
-    --remote "pypi:$package" \
+    remote scan "pypi:$package" \
     --max-depth 3 \
     --allow-unlocked \
     --allow-host files.pythonhosted.org \

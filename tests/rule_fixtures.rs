@@ -71,6 +71,11 @@ const CASES: &[Case] = &[
     Case {
         rule_id: "chainsec.js.detection.network-request",
         file: "case.js",
+        source: "fetch(\"https://example.com\");\n",
+    },
+    Case {
+        rule_id: "chainsec.js.detection.network-listen",
+        file: "case.js",
         source: "Deno.listen({ port: 8080 });\n",
     },
     Case {
@@ -83,11 +88,21 @@ const CASES: &[Case] = &[
         file: "case.js",
         source: "require(moduleName);\n",
     },
+    Case {
+        rule_id: "chainsec.js.detection.dynamic-import",
+        file: "case.js",
+        source: "import(moduleName);\n",
+    },
     // Built-in TypeScript rules.
     Case {
         rule_id: "chainsec.ts.detection.dynamic-code-execution",
         file: "case.ts",
         source: "eval(input);\n",
+    },
+    Case {
+        rule_id: "chainsec.ts.detection.dynamic-import",
+        file: "case.ts",
+        source: "import(moduleName);\n",
     },
     Case {
         rule_id: "chainsec.ts.detection.decoded-payload",
@@ -102,7 +117,12 @@ const CASES: &[Case] = &[
     Case {
         rule_id: "chainsec.ts.detection.network-request",
         file: "case.ts",
-        source: "Deno.serveHttp(connection);\n",
+        source: "fetch(\"https://example.com\");\n",
+    },
+    Case {
+        rule_id: "chainsec.ts.detection.network-listen",
+        file: "case.ts",
+        source: "Deno.listen({ port: 8080 });\n",
     },
     Case {
         rule_id: "chainsec.ts.detection.read-environment",
@@ -507,12 +527,12 @@ const CASES: &[Case] = &[
     Case {
         rule_id: "chainsec.js.capability.process-spawn",
         file: "case.js",
-        source: "child_process.execSync(\"ls\");\n",
+        source: "const { exec } = require(\"child_process\");\nexec(\"ls\");\n",
     },
     Case {
         rule_id: "chainsec.ts.capability.process-spawn",
         file: "case.ts",
-        source: "new Deno.Command(\"ls\").output();\n",
+        source: "const { spawn } = require(\"child_process\");\nspawn(\"ls\");\n",
     },
     Case {
         rule_id: "chainsec.js.capability.dynamic-code-execution",
@@ -826,7 +846,9 @@ fn unverifiable_dynamic_imports_are_high_risk() {
     for rule_id in [
         "chainsec.py.detection.dynamic-import",
         "chainsec.js.detection.dynamic-require",
+        "chainsec.js.detection.dynamic-import",
         "chainsec.ts.detection.dynamic-require",
+        "chainsec.ts.detection.dynamic-import",
     ] {
         let rule = all_rules
             .iter()
@@ -901,6 +923,16 @@ fn assert_language_extension(rule: &Rule, case: &Case) {
 
 #[test]
 fn benchmark_false_positive_shapes_do_not_match() {
+    assert_no_match(
+        "chainsec.js.detection.dynamic-import",
+        "case.js",
+        "import(\"fixed-module\");\n",
+    );
+    assert_no_match(
+        "chainsec.ts.detection.dynamic-import",
+        "case.ts",
+        "import(\"fixed-module\");\n",
+    );
     assert_no_match(
         "chainsec.js.capability.secret-read-file",
         "case.js",

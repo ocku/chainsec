@@ -1,7 +1,7 @@
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, atomic::AtomicU64},
     time::Instant,
 };
 
@@ -18,9 +18,11 @@ use entropy::is_structured_literal;
 #[cfg(test)]
 use filesystem::MAX_NON_SOURCE_ANALYSIS_BYTES;
 use filesystem::{
-    compile_ignored_paths, included, is_test_fixture, language_for, read_entry_contents,
+    compile_ignored_paths, included, is_test_fixture, language_for_entry, read_entry_contents,
 };
-use source_analyzer::{CompiledRuleSet, compile_rules, scan_file};
+use source_analyzer::{
+    CompiledRuleSet, SourceScanInput, compile_rules, reserve_finding, scan_file,
+};
 
 pub use source_analyzer::validate_rules;
 
@@ -45,12 +47,13 @@ impl AnalysisResources {
 
 use crate::{
     error::{Error, Result},
-    model::{AnalysisPoint, EngineLimits, Language, Rule},
+    model::{AnalysisPoint, EngineLimits, Language, OperationalIssue, Rule},
 };
 
 #[derive(Debug, Default)]
 pub struct ScanOutcome {
     pub findings: Vec<AnalysisPoint>,
+    pub issues: Vec<OperationalIssue>,
     pub scanned_files: u64,
     pub scanned_bytes: u64,
 }
@@ -58,8 +61,17 @@ pub struct ScanOutcome {
 struct PendingSourceFile {
     path: PathBuf,
     language: Language,
+    is_tsx: bool,
     source: Vec<u8>,
     size: u64,
+}
+
+struct SourceBatch<'a> {
+    resources: &'a AnalysisResources,
+    package: &'a str,
+    limits: &'a EngineLimits,
+    started: Instant,
+    finding_budget: &'a AtomicU64,
 }
 
 /// Runs the blocking filesystem and parser scan on Tokio's blocking worker pool.
@@ -72,10 +84,18 @@ pub(crate) async fn scan_async(
     resources: Arc<AnalysisResources>,
     limits: EngineLimits,
     ignored_paths: Vec<String>,
+    exclude_node_modules: bool,
 ) -> Result<ScanOutcome> {
     let scan_root = root.clone();
     tokio::task::spawn_blocking(move || {
-        scan_with_resources(&scan_root, &package, &limits, &ignored_paths, &resources)
+        scan_with_resources(
+            &scan_root,
+            &package,
+            &limits,
+            &ignored_paths,
+            exclude_node_modules,
+            &resources,
+        )
     })
     .await
     .map_err(|error| Error::Scan {
@@ -115,7 +135,7 @@ fn scan_with_ignored_paths_with_threads(
     max_threads: usize,
 ) -> Result<ScanOutcome> {
     let resources = AnalysisResources::new(rules, max_threads)?;
-    scan_with_resources(root, package, limits, ignored_paths, &resources)
+    scan_with_resources(root, package, limits, ignored_paths, true, &resources)
 }
 
 fn scan_with_resources(
@@ -123,18 +143,31 @@ fn scan_with_resources(
     package: &str,
     limits: &EngineLimits,
     ignored_paths: &[String],
+    exclude_node_modules: bool,
     resources: &AnalysisResources,
 ) -> Result<ScanOutcome> {
     let ignored_paths = compile_ignored_paths(ignored_paths)?;
     let started = Instant::now();
     let mut outcome = ScanOutcome::default();
     let mut deduplicated = HashSet::new();
-    let batch_size = resources.pool.current_num_threads().max(1) * 2;
+    let finding_budget = Arc::new(AtomicU64::new(0));
+    let batch_size = resources
+        .pool
+        .current_num_threads()
+        .max(1)
+        .saturating_mul(2);
+    let batch = SourceBatch {
+        resources,
+        package,
+        limits,
+        started,
+        finding_budget: &finding_budget,
+    };
     let mut pending_sources = Vec::with_capacity(batch_size);
     let walker = WalkDir::new(root)
         .follow_links(false)
         .into_iter()
-        .filter_entry(|entry| included(entry, root, ignored_paths.as_ref()));
+        .filter_entry(|entry| included(entry, root, ignored_paths.as_ref(), exclude_node_modules));
 
     for item in walker {
         ensure_within_duration(started, limits)?;
@@ -146,7 +179,7 @@ fn scan_with_resources(
             continue;
         }
 
-        let language = language_for(entry.path());
+        let language = language_for_entry(&entry, root)?;
         if language.is_some()
             && outcome
                 .scanned_files
@@ -158,52 +191,50 @@ fn scan_with_resources(
                 limit: limits.max_source_files,
             });
         }
-        let (source, file_size) = read_entry_contents(&entry, language, limits)?;
+        let (source, file_size) = read_entry_contents(&entry, root, language, limits)?;
         ensure_within_duration(started, limits)?;
-        let relative = entry.path().strip_prefix(root).unwrap_or(entry.path());
+        let relative = relative_path(entry.path(), root);
         record_file_analysis(
             &mut outcome,
             &mut deduplicated,
-            relative,
+            &relative,
             package,
             &source,
             file_size,
-        );
+            &finding_budget,
+            limits.max_findings,
+        )?;
         ensure_within_duration(started, limits)?;
 
         if let Some(language) = language {
             pending_sources.push(PendingSourceFile {
                 path: relative.to_owned(),
+                is_tsx: entry
+                    .path()
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("tsx")),
                 language,
                 source,
                 size: file_size,
             });
             if pending_sources.len() >= batch_size {
-                record_source_batch(
-                    resources,
-                    &mut outcome,
-                    &mut deduplicated,
-                    &pending_sources,
-                    package,
-                    limits,
-                    started,
-                )?;
+                record_source_batch(&batch, &mut outcome, &mut deduplicated, &pending_sources)?;
                 pending_sources.clear();
             }
         }
     }
 
-    record_source_batch(
-        resources,
-        &mut outcome,
-        &mut deduplicated,
-        &pending_sources,
-        package,
-        limits,
-        started,
-    )?;
+    record_source_batch(&batch, &mut outcome, &mut deduplicated, &pending_sources)?;
     outcome.findings.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(outcome)
+}
+
+fn relative_path(path: &Path, root: &Path) -> PathBuf {
+    if root.is_file() {
+        return PathBuf::from(path.file_name().unwrap_or(root.as_os_str()));
+    }
+    path.strip_prefix(root).unwrap_or(path).to_owned()
 }
 
 fn ensure_within_duration(started: Instant, limits: &EngineLimits) -> Result<()> {
@@ -217,6 +248,7 @@ fn ensure_within_duration(started: Instant, limits: &EngineLimits) -> Result<()>
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn record_file_analysis(
     outcome: &mut ScanOutcome,
     deduplicated: &mut HashSet<String>,
@@ -224,65 +256,69 @@ fn record_file_analysis(
     package: &str,
     source: &[u8],
     file_size: u64,
-) {
-    let Some(finding) = file_analyzer::analyze_with_size(path, package, source, file_size) else {
-        return;
+    finding_budget: &AtomicU64,
+    max_findings: u64,
+) -> Result<()> {
+    let Some(analysis) = file_analyzer::analyze_with_size(path, package, source, file_size) else {
+        return Ok(());
     };
 
-    let is_exempt_fixture = is_test_fixture(path)
-        && matches!(
-            finding.rule_id.as_str(),
-            "chainsec.detection.file.binary" | "chainsec.detection.file.compressed"
-        );
-    if !is_exempt_fixture && deduplicated.insert(finding.id.clone()) {
-        outcome.findings.push(finding);
+    if !(is_test_fixture(path) && analysis.is_exempt_in_test_fixture)
+        && deduplicated.insert(analysis.finding.id.clone())
+    {
+        reserve_finding(finding_budget, max_findings)?;
+        outcome.findings.push(analysis.finding);
     }
+    Ok(())
 }
 
 fn record_source_batch(
-    resources: &AnalysisResources,
+    batch: &SourceBatch,
     outcome: &mut ScanOutcome,
     deduplicated: &mut HashSet<String>,
     files: &[PendingSourceFile],
-    package: &str,
-    limits: &EngineLimits,
-    started: Instant,
 ) -> Result<()> {
     if files.is_empty() {
         return Ok(());
     }
-    let analyses = resources.pool.install(|| {
+    let analyses = batch.resources.pool.install(|| {
         files
             .par_iter()
             .map(|file| {
-                ensure_within_duration(started, limits)?;
-                scan_file(
-                    &file.path,
-                    package,
-                    file.language,
-                    &file.source,
-                    &resources.rules,
-                )
+                ensure_within_duration(batch.started, batch.limits)?;
+                scan_file(SourceScanInput {
+                    path: &file.path,
+                    package: batch.package,
+                    language: file.language,
+                    is_tsx: file.is_tsx,
+                    source: &file.source,
+                    rule_sets: &batch.resources.rules,
+                    fail_on_parse_error: batch.limits.fail_on_parse_error,
+                    started: batch.started,
+                    max_scan_duration: batch.limits.max_scan_duration,
+                })
             })
             .collect::<Result<Vec<_>>>()
     })?;
 
     for (file, findings) in files.iter().zip(analyses) {
         outcome.scanned_files += 1;
-        if outcome.scanned_files > limits.max_source_files {
+        if outcome.scanned_files > batch.limits.max_source_files {
             return Err(Error::LimitExceeded {
                 resource: "source files".to_owned(),
-                limit: limits.max_source_files,
+                limit: batch.limits.max_source_files,
             });
         }
         outcome.scanned_bytes = outcome.scanned_bytes.saturating_add(file.size);
-        for finding in findings {
+        outcome.issues.extend(findings.issues);
+        for finding in findings.findings {
             if deduplicated.insert(finding.id.clone()) {
+                reserve_finding(batch.finding_budget, batch.limits.max_findings)?;
                 outcome.findings.push(finding);
             }
         }
     }
-    ensure_within_duration(started, limits)
+    ensure_within_duration(batch.started, batch.limits)
 }
 
 #[cfg(test)]
