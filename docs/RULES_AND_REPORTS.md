@@ -10,7 +10,7 @@ JSON version-diff reports use schema version `1.0.0` with `report_type: "version
 
 `--ignore-rule` removes matching rules before reporting; ignored selectors are not recorded in the current report schema. Configured `[[suppressions]]` leave matching findings in JSON with `suppressed: true` and a `suppression.reason`, but exclude them from human and SARIF output and from `--fail-on` evaluation.
 
-A report may be partial. Manifest, resolution, fetch, extraction, and scan failures are normally recorded in the `issues` array and traversal continues for other packages. A package with an acquisition or scan issue may therefore be absent from `packages`, or may be present without all transitive dependencies analyzed.
+A report may be partial. Manifest, resolution, fetch, extraction, and scan failures are normally recorded in the `issues` array and traversal continues for other packages. A package with an acquisition or scan issue may therefore be absent from `packages`, or may be present without all transitive dependencies analyzed. Recovered Tree-sitter syntax errors are different: ChainSec records a `parse_error` issue, continues evaluating rules against the recovered syntax tree, and retains resulting findings. `--fail-on-parse-error` (or `fail_on_parse_error = true`) marks that issue as fatal but does not skip the file, package, or remaining analysis.
 
 When `--output` is supplied, `chainsec` writes the analysis directly to the specified path instead of stdout; parent directories must already exist, and report publication is not atomic. A report-write failure is reported on stderr and exits with code `3`.
 
@@ -111,7 +111,7 @@ Custom rule packs are JSON or YAML objects with a non-empty `rules` array. Each 
 
 ## Exit codes
 
-`chainsec` is intended to be driven from CI. The exit code reflects whether findings met the `--fail-on` threshold and whether any operational or policy issues occurred.
+`chainsec` is intended to be driven from CI. The exit code reflects whether findings met the `--fail-on` threshold and whether any operational or policy issues occurred. A recovered syntax error is an operational issue and therefore produces exit code `3` under this policy whether its `fatal` field is false or true; `--fail-on-parse-error` changes the issue severity recorded in reports, not whether analysis continues.
 
 | Code | Meaning |
 | --- | --- |

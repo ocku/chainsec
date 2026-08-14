@@ -136,7 +136,7 @@ const INITIAL_CONFIG: &str = r#"# chainsec project configuration
 
 # Keep dependency traversal bounded. Set to 0 to scan only this project.
 max_package_depth = 3
-max_packages = 500
+max_packages = 16384
 
 # Network access remains disabled unless both options below are configured.
 # online = true

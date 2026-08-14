@@ -208,18 +208,12 @@ pub(super) fn scan_file(
     let mut issues = Vec::new();
     if tree.root_node().has_error() {
         let message = format!("source contains syntax errors: {}", path.display());
-        if fail_on_parse_error {
-            return Err(Error::Scan {
-                path: path.to_owned(),
-                message,
-            });
-        }
         issues.push(OperationalIssue {
             code: "parse_error".to_owned(),
             message,
             package: Some(package.to_owned()),
             operation: "source parsing".to_owned(),
-            fatal: false,
+            fatal: fail_on_parse_error,
         });
     }
 

@@ -72,7 +72,7 @@ impl Default for EngineLimits {
     fn default() -> Self {
         Self {
             max_package_depth: 3,
-            max_packages: 500,
+            max_packages: 16_384,
             max_network_requests: 1_000,
             max_redirect_hops: default_max_redirect_hops(),
             request_timeout: Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECONDS),
@@ -82,7 +82,7 @@ impl Default for EngineLimits {
             max_extracted_files: 50_000,
             max_file_depth: DEFAULT_MAX_FILE_DEPTH,
             max_manifest_file_size: DEFAULT_MAX_MANIFEST_FILE_SIZE,
-            max_source_file_size: 2 * 1024 * 1024,
+            max_source_file_size: 512 * 1024 * 1024,
             max_source_files: 100_000,
             max_findings: 100_000,
             max_scan_duration: Duration::from_secs(300),

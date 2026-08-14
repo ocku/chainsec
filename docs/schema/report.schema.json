@@ -47,7 +47,10 @@
         "max_source_files": { "type": "integer", "minimum": 0 },
         "max_findings": { "type": "integer", "minimum": 0 },
         "max_scan_seconds": { "type": "integer", "minimum": 0 },
-        "fail_on_parse_error": { "type": "boolean" }
+        "fail_on_parse_error": {
+          "type": "boolean",
+          "description": "Whether recovered source syntax errors are marked fatal; analysis continues against the recovered syntax tree in either mode."
+        }
       },
       "additionalProperties": false
     },

@@ -234,7 +234,7 @@ fn scanner_reports_recovered_parse_errors_without_skipping_analysis() {
 }
 
 #[test]
-fn scanner_can_fail_closed_on_recovered_parse_errors() {
+fn scanner_marks_recovered_parse_errors_fatal_without_skipping_analysis() {
     let directory = tempfile::tempdir().unwrap();
     fs::write(directory.path().join("malformed.js"), "eval(input); {\n").unwrap();
     let limits = EngineLimits {
@@ -242,8 +242,20 @@ fn scanner_can_fail_closed_on_recovered_parse_errors() {
         ..EngineLimits::default()
     };
 
-    let error = scan(directory.path(), "root", &built_in_rules(), &limits).unwrap_err();
-    assert!(matches!(error, Error::Scan { .. }));
+    let outcome = scan(directory.path(), "root", &built_in_rules(), &limits).unwrap();
+
+    assert!(
+        outcome
+            .issues
+            .iter()
+            .any(|issue| issue.code == "parse_error" && issue.fatal)
+    );
+    assert!(
+        outcome
+            .findings
+            .iter()
+            .any(|finding| finding.rule_id == "chainsec.js.detection.dynamic-code-execution")
+    );
 }
 
 #[test]

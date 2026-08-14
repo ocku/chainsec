@@ -206,7 +206,7 @@ pub(crate) struct AnalysisOptions {
     #[arg(long, default_value_t = 3)]
     pub(crate) max_package_depth: usize,
     /// Maximum packages per traversal and aggregate unique work in a remote diff batch.
-    #[arg(long, default_value_t = 500)]
+    #[arg(long, default_value_t = 16_384)]
     pub(crate) max_packages: usize,
     /// Maximum HTTP requests during one package acquisition, including redirects.
     #[arg(long, default_value_t = 1_000, value_parser = parse_positive_usize)]
@@ -234,8 +234,8 @@ pub(crate) struct AnalysisOptions {
     /// Maximum individual manifest or lockfile size.
     #[arg(long = "max-manifest-file-size", default_value_t = DEFAULT_MAX_MANIFEST_FILE_SIZE, value_parser = parse_human_size)]
     pub(crate) max_manifest_file_size: u64,
-    /// Maximum individual source file size (for example, `2MiB`, `2M`, or `2m`).
-    #[arg(long = "max-source-file-size", default_value = "2MiB", value_parser = parse_human_size)]
+    /// Maximum individual source file size (for example, `512MiB`, `512M`, or `512m`).
+    #[arg(long = "max-source-file-size", default_value = "512MiB", value_parser = parse_human_size)]
     pub(crate) max_source_file_size: u64,
     /// Maximum source files scanned during one package scan.
     #[arg(long, default_value_t = 100_000)]
@@ -245,7 +245,7 @@ pub(crate) struct AnalysisOptions {
     pub(crate) max_findings: u64,
     #[arg(long, default_value_t = 300)]
     pub(crate) max_scan_seconds: u64,
-    /// Stop scanning a package when Tree-sitter recovers from malformed source.
+    /// Treat Tree-sitter-recovered syntax errors as fatal without skipping analysis.
     #[arg(long)]
     pub(crate) fail_on_parse_error: bool,
     /// Maximum concurrent package downloads and analyses (1-64).
