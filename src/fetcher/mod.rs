@@ -1,5 +1,6 @@
 mod acquisition;
 mod archive;
+mod budget;
 mod cache;
 mod credentials;
 mod filesystem;
@@ -16,7 +17,7 @@ use std::path::Path;
 
 use crate::error::Result;
 
-pub(super) use acquisition::{Acquisition, CacheStaging};
+pub(super) use acquisition::{Acquisition, CacheStaging, FetchRequest};
 pub use policy::FetchPolicy;
 pub use repository::ArtifactRepositories;
 pub use types::{Fetcher, PreparedFetch, RemoteVersionSelection, SourceFetcher};

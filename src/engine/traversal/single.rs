@@ -1,6 +1,7 @@
-use std::{path::Path, sync::Arc};
+use std::{collections::HashMap, path::Path, sync::Arc, time::Instant};
 
 use futures::{StreamExt, stream};
+use tracing::debug;
 
 use crate::{
     error::Result,
@@ -37,13 +38,33 @@ impl Engine<'_> {
         let mut traversal = Traversal::new(root, fetched);
 
         while let Some(frontier) = traversal.next_frontier(&mut report, self.limits.max_packages) {
+            let frontier_packages = frontier.len();
+            let started = Instant::now();
             let fetch_requests = self
                 .analyze_frontier(frontier, &mut report, Arc::clone(&resources))
                 .await;
-            traversal.enqueue(
-                self.fetch_dependencies(fetch_requests, &mut report, traversal.visited_count())
-                    .await,
+            debug!(
+                packages = frontier_packages,
+                fetch_requests = fetch_requests.len(),
+                elapsed_ms = started.elapsed().as_millis(),
+                "analyzed dependency frontier"
             );
+            let started = Instant::now();
+            let (packages, fetch_attempts) = self
+                .fetch_dependencies(
+                    fetch_requests,
+                    &mut report,
+                    traversal.remaining_fetch_attempts(self.limits.max_packages),
+                )
+                .await;
+            debug!(
+                fetch_attempts,
+                packages = packages.len(),
+                elapsed_ms = started.elapsed().as_millis(),
+                "fetched dependency frontier"
+            );
+            traversal.record_fetch_attempts(fetch_attempts);
+            traversal.enqueue(packages);
         }
 
         self.finalize(&mut report);
@@ -85,7 +106,7 @@ impl Engine<'_> {
                 record_package(report, &pending, &analysis.discovery, scan_counts);
             }
 
-            if pending.depth < self.limits.max_depth {
+            if pending.depth < self.limits.max_package_depth {
                 fetch_requests.extend(self.fetch_requests_for(
                     &pending,
                     &analysis.discovery,
@@ -102,9 +123,10 @@ impl Engine<'_> {
         &self,
         requests: Vec<FetchRequest>,
         report: &mut Report,
-        visited_packages: usize,
-    ) -> Vec<PendingPackage> {
+        remaining_fetch_attempts: usize,
+    ) -> (Vec<PendingPackage>, usize) {
         let mut grouped = Vec::<(FetchKey, FetchRequest, crate::fetcher::PreparedFetch)>::new();
+        let mut group_indices = HashMap::<FetchKey, usize>::new();
         for request in requests {
             let prepared = match self
                 .fetcher
@@ -123,25 +145,27 @@ impl Engine<'_> {
                 }
             };
             let key = FetchKey::new(&request, &prepared);
-            if let Some((_, existing, _)) = grouped
-                .iter_mut()
-                .find(|(existing_key, _, _)| *existing_key == key)
-            {
-                existing.contexts.extend(request.contexts);
+            if let Some(index) = group_indices.get(&key).copied() {
+                grouped[index].1.contexts.extend(request.contexts);
             } else {
+                let index = grouped.len();
+                group_indices.insert(key.clone(), index);
                 grouped.push((key, request, prepared));
             }
         }
 
-        let remaining_packages = self.limits.max_packages.saturating_sub(visited_packages);
-        if grouped.len() > remaining_packages {
+        if grouped.len() > remaining_fetch_attempts {
             push_package_limit_issue(
                 report,
-                grouped[remaining_packages].1.declared_package_id.clone(),
+                grouped[remaining_fetch_attempts]
+                    .1
+                    .declared_package_id
+                    .clone(),
                 self.limits.max_packages as u64,
             );
-            grouped.truncate(remaining_packages);
+            grouped.truncate(remaining_fetch_attempts);
         }
+        let fetch_attempts = grouped.len();
 
         let fetches = stream::iter(grouped).map(|(_, request, prepared)| async move {
             let dependency_id = request.dependency.id();
@@ -165,6 +189,6 @@ impl Engine<'_> {
             }
         }
 
-        packages
+        (packages, fetch_attempts)
     }
 }

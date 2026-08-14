@@ -6,20 +6,48 @@ use crate::app::cli::{Cli, Command, RemoteSubcommand};
 #[test]
 fn network_acquisition_limits_load_from_toml_unless_cli_overrides_them() {
     let matches = Cli::command()
-        .try_get_matches_from(["chainsec", "scan", "--max-network-requests", "7"])
+        .try_get_matches_from([
+            "chainsec",
+            "scan",
+            "--max-network-requests",
+            "7",
+            "--max-redirect-hops",
+            "9",
+        ])
         .unwrap();
     let cli = Cli::from_arg_matches(&matches).unwrap();
     let Command::Scan(mut scan) = cli.command else {
         panic!("expected scan command")
     };
-    let config: FileConfig =
-        toml::from_str("max_network_requests = 11\nmax_acquisition_seconds = 19").unwrap();
+    let config: FileConfig = toml::from_str(
+        "max_network_requests = 11\nmax_redirect_hops = 13\nrequest_timeout_seconds = 17\nmax_acquisition_seconds = 19",
+    )
+    .unwrap();
     let command_matches = matches.subcommand_matches("scan").unwrap();
 
     apply(&mut scan.options, config, None, command_matches, false).unwrap();
 
     assert_eq!(scan.options.max_network_requests, 7);
+    assert_eq!(scan.options.max_redirect_hops, 9);
+    assert_eq!(scan.options.request_timeout_seconds, 17);
     assert_eq!(scan.options.max_acquisition_seconds, 19);
+}
+
+#[test]
+fn source_file_limit_loads_from_toml_unless_cli_overrides_it() {
+    let matches = Cli::command()
+        .try_get_matches_from(["chainsec", "scan", "--max-source-files", "7"])
+        .unwrap();
+    let cli = Cli::from_arg_matches(&matches).unwrap();
+    let Command::Scan(mut scan) = cli.command else {
+        panic!("expected scan command")
+    };
+    let config: FileConfig = toml::from_str("max_source_files = 11").unwrap();
+    let command_matches = matches.subcommand_matches("scan").unwrap();
+
+    apply(&mut scan.options, config, None, command_matches, false).unwrap();
+
+    assert_eq!(scan.options.max_source_files, 7);
 }
 
 #[test]

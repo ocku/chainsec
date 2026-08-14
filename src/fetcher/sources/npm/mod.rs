@@ -1,4 +1,4 @@
-use std::str::FromStr;
+use std::{str::FromStr, sync::Arc};
 
 use node_semver::{Range as NpmRange, Version as NpmVersion};
 use serde_json::Value as JsonValue;
@@ -11,23 +11,16 @@ use crate::{
 
 use crate::fetcher::{RemoteVersionSelection, SourceFetcher, integrity::supported_npm_integrity};
 
-impl SourceFetcher {
-    #[allow(dead_code)]
-    pub(in crate::fetcher) async fn resolve_unlocked_npm(
-        &self,
-        dependency: &mut Dependency,
-    ) -> Result<()> {
-        let mut budget = self.network_budget();
-        self.resolve_unlocked_npm_with_budget(dependency, &mut budget)
-            .await
-    }
+const MAX_CACHED_NPM_METADATA_BYTES: usize = 32 * 1024 * 1024;
 
+impl SourceFetcher {
     pub(in crate::fetcher) async fn resolve_unlocked_npm_with_budget(
         &self,
         dependency: &mut Dependency,
         budget: &mut crate::fetcher::network::NetworkBudget,
     ) -> Result<()> {
         let (package, requirement) = npm_package_and_requirement(dependency);
+        validate_npm_registry_requirement(dependency, &requirement)?;
         let metadata = self
             .npm_metadata_with_budget(dependency, &package, budget)
             .await?;
@@ -44,17 +37,6 @@ impl SourceFetcher {
         } else {
             resolve_npm_release(dependency, requirement, &metadata)
         }
-    }
-
-    #[allow(dead_code)]
-    pub(in crate::fetcher) async fn resolve_npm_version_selection(
-        &self,
-        dependency: Dependency,
-        selection: RemoteVersionSelection,
-    ) -> Result<Vec<Dependency>> {
-        let mut budget = self.network_budget();
-        self.resolve_npm_version_selection_with_budget(dependency, selection, &mut budget)
-            .await
     }
 
     pub(in crate::fetcher) async fn resolve_npm_version_selection_with_budget(
@@ -81,28 +63,21 @@ impl SourceFetcher {
         }
     }
 
-    #[allow(dead_code)]
-    pub(in crate::fetcher) async fn npm_artifact_url(
-        &self,
-        dependency: &Dependency,
-    ) -> Result<Url> {
-        let mut budget = self.network_budget();
-        self.npm_artifact_url_with_budget(dependency, &mut budget)
-            .await
-    }
-
-    pub(in crate::fetcher) async fn npm_artifact_url_with_budget(
+    pub(in crate::fetcher) async fn npm_artifact_request_with_budget(
         &self,
         dependency: &Dependency,
         budget: &mut crate::fetcher::network::NetworkBudget,
-    ) -> Result<Url> {
+    ) -> Result<(Url, Url)> {
         // Standard npm lockfiles pin the artifact URL. Honor that binding instead
         // of re-resolving it through registry metadata. Deno `npm:` entries use
         // their configured registry metadata endpoint by design.
         if dependency.ecosystem == Ecosystem::Npm
             && let Some(url) = locked_npm_artifact_url(dependency)?
         {
-            return Ok(url);
+            return Ok((
+                url,
+                self.policy.repositories.npm_metadata_base_url().clone(),
+            ));
         }
 
         let version = dependency
@@ -116,14 +91,10 @@ impl SourceFetcher {
         let metadata = self
             .npm_metadata_with_budget(dependency, &package, budget)
             .await?;
-        npm_tarball_url(dependency, version, &metadata)
-    }
-
-    #[allow(dead_code)]
-    async fn npm_metadata(&self, dependency: &Dependency, package: &str) -> Result<JsonValue> {
-        let mut budget = self.network_budget();
-        self.npm_metadata_with_budget(dependency, package, &mut budget)
-            .await
+        Ok((
+            npm_tarball_url(dependency, version, &metadata)?,
+            self.policy.repositories.npm_metadata_base_url().clone(),
+        ))
     }
 
     async fn npm_metadata_with_budget(
@@ -131,14 +102,55 @@ impl SourceFetcher {
         dependency: &Dependency,
         package: &str,
         budget: &mut crate::fetcher::network::NetworkBudget,
-    ) -> Result<JsonValue> {
+    ) -> Result<Arc<JsonValue>> {
         let api = self.policy.repositories.npm_metadata_url(package)?;
-        serde_json::from_slice(&self.download_with_budget(&api, true, budget).await?).map_err(
-            |error| Error::Resolution {
-                package: dependency.id(),
-                message: format!("invalid npm registry response: {error}"),
-            },
-        )
+        let key = api.as_str();
+        if let Some((metadata, _)) = self.npm_metadata.lock().await.documents.get(key).cloned() {
+            return Ok(metadata);
+        }
+
+        let request_lock = self
+            .npm_metadata_locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(key.to_owned())
+            .or_default()
+            .clone();
+        let _request_guard = request_lock.lock().await;
+        if let Some((metadata, _)) = self.npm_metadata.lock().await.documents.get(key).cloned() {
+            return Ok(metadata);
+        }
+
+        let (bytes, _) = self
+            .download_with_accept_and_budget(
+                &api,
+                true,
+                "application/vnd.npm.install-v1+json",
+                budget,
+            )
+            .await?;
+        let metadata =
+            Arc::new(
+                serde_json::from_slice(&bytes).map_err(|error| Error::Resolution {
+                    package: dependency.id(),
+                    message: format!("invalid npm registry response: {error}"),
+                })?,
+            );
+        let metadata_bytes = bytes.len();
+        let mut cache = self.npm_metadata.lock().await;
+        while cache.bytes.saturating_add(metadata_bytes) > MAX_CACHED_NPM_METADATA_BYTES
+            && !cache.documents.is_empty()
+        {
+            let evicted = cache.documents.keys().next().cloned().unwrap();
+            if let Some((_, bytes)) = cache.documents.remove(&evicted) {
+                cache.bytes = cache.bytes.saturating_sub(bytes);
+            }
+        }
+        cache.bytes = cache.bytes.saturating_add(metadata_bytes);
+        cache
+            .documents
+            .insert(key.to_owned(), (Arc::clone(&metadata), metadata_bytes));
+        Ok(metadata)
     }
 }
 
@@ -157,6 +169,52 @@ fn npm_package_and_requirement(dependency: &Dependency) -> (String, String) {
         Some((name, requirement)) if !name.is_empty() => (name.to_owned(), requirement.to_owned()),
         _ => (raw.to_owned(), "*".to_owned()),
     }
+}
+
+/// Reject npm package specifiers that npm resolves without consulting the registry.
+///
+/// Direct tarballs and Git dependencies are legitimate `package.json` values, but
+/// this fetcher can only analyze them once a lockfile has pinned an immutable
+/// artifact URL and supported integrity value. Treating them as registry tags
+/// would both misrepresent npm's resolution semantics and produce misleading
+/// registry errors.
+fn validate_npm_registry_requirement(dependency: &Dependency, requirement: &str) -> Result<()> {
+    if Url::parse(requirement)
+        .ok()
+        .is_some_and(|url| matches!(url.scheme(), "http" | "https"))
+    {
+        return Err(Error::Resolution {
+            package: dependency.id(),
+            message: "direct npm tarball dependencies require a lockfile integrity pin".to_owned(),
+        });
+    }
+
+    if is_npm_git_requirement(requirement) {
+        return Err(Error::Resolution {
+            package: dependency.id(),
+            message: "npm Git dependencies require a lockfile-resolved immutable source".to_owned(),
+        });
+    }
+
+    Ok(())
+}
+
+fn is_npm_git_requirement(requirement: &str) -> bool {
+    [
+        "git+",
+        "git://",
+        "git@",
+        "github:",
+        "gist:",
+        "bitbucket:",
+        "gitlab:",
+    ]
+    .into_iter()
+    .any(|prefix| requirement.starts_with(prefix))
+        || (!requirement.starts_with('@')
+            && requirement.matches('/').count() == 1
+            && !requirement.starts_with('.')
+            && !requirement.starts_with('~'))
 }
 
 fn locked_npm_artifact_url(dependency: &Dependency) -> Result<Option<Url>> {
@@ -222,10 +280,8 @@ fn select_npm_release<'a>(
             .iter()
             .filter_map(|(raw_version, release)| {
                 let version = NpmVersion::from_str(raw_version).ok()?;
-                (range.satisfies(&version)
-                    && !npm_release_is_yanked(release)
-                    && npm_release_is_pullable(release))
-                .then_some((version, release))
+                (range.satisfies(&version) && npm_release_is_pullable(release))
+                    .then_some((version, release))
             })
             .max_by(|(left, _), (right, _)| left.cmp(right))
             .map(|(version, release)| (version.to_string(), release))
@@ -238,12 +294,6 @@ fn select_npm_release<'a>(
             package: dependency.id(),
             message: format!("npm registry has no release satisfying {requirement}"),
         })?;
-        if npm_release_is_yanked(release) {
-            return Err(Error::Resolution {
-                package: dependency.id(),
-                message: format!("npm dist-tag {requirement} targets yanked release {version}"),
-            });
-        }
         (version.to_owned(), release)
     } else {
         return Err(Error::Resolution {
@@ -277,9 +327,6 @@ impl SourceFetcher {
             })?;
         let mut older = Vec::new();
         for (raw_version, release) in versions {
-            if npm_release_is_yanked(release) {
-                continue;
-            }
             let Ok(version) = NpmVersion::from_str(raw_version) else {
                 continue;
             };
@@ -301,9 +348,6 @@ impl SourceFetcher {
 
         let mut resolved = Vec::new();
         for (_, version, release) in candidates {
-            if npm_release_is_yanked(release) {
-                continue;
-            }
             let mut candidate = dependency.clone();
             if pin_npm_release(&mut candidate, version, release).is_ok() {
                 resolved.push(candidate);
@@ -367,9 +411,6 @@ impl SourceFetcher {
 
         let mut candidates = Vec::new();
         for (raw_version, release) in versions {
-            if npm_release_is_yanked(release) {
-                continue;
-            }
             let Ok(version) = NpmVersion::from_str(raw_version) else {
                 continue;
             };
@@ -444,24 +485,11 @@ fn npm_endpoint_version(
         package: dependency.id(),
         message: format!("npm {endpoint} endpoint {raw_version} is not a semantic version"),
     })?;
-    let release = versions.get(raw_version).ok_or_else(|| Error::Resolution {
+    versions.get(raw_version).ok_or_else(|| Error::Resolution {
         package: dependency.id(),
         message: format!("npm {endpoint} endpoint {raw_version} is not published"),
     })?;
-    if npm_release_is_yanked(release) {
-        return Err(Error::Resolution {
-            package: dependency.id(),
-            message: format!("npm {endpoint} endpoint {raw_version} is yanked"),
-        });
-    }
     Ok(version)
-}
-
-fn npm_release_is_yanked(release: &JsonValue) -> bool {
-    release
-        .get("yanked")
-        .and_then(JsonValue::as_bool)
-        .unwrap_or(false)
 }
 
 fn npm_release_is_pullable(release: &JsonValue) -> bool {
@@ -482,12 +510,6 @@ fn pin_npm_release(
     version: String,
     release: &JsonValue,
 ) -> Result<()> {
-    if npm_release_is_yanked(release) {
-        return Err(Error::Resolution {
-            package: dependency.id(),
-            message: format!("npm release {version} is yanked"),
-        });
-    }
     let dist = release.get("dist").ok_or_else(|| Error::Resolution {
         package: dependency.id(),
         message: format!("npm release {version} has no distribution metadata"),

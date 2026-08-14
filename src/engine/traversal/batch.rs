@@ -23,121 +23,154 @@ use super::{
     },
 };
 
+type PreparedBatchFetch = (usize, FetchRequest, crate::fetcher::PreparedFetch);
+type BatchFetchGroup = (FetchKey, Vec<PreparedBatchFetch>);
+type BatchFetchResult = (
+    FetchKey,
+    Vec<PreparedBatchFetch>,
+    std::result::Result<FetchMetadata, crate::model::OperationalIssue>,
+);
+
 impl Engine<'_> {
     pub(in crate::engine) async fn analyze_with_fetched_roots(
         &self,
         roots: Vec<FetchMetadata>,
     ) -> Result<Vec<Report>> {
+        let mut traversals = self.initialize_batch_traversals(roots)?;
+        let resources = Arc::new(scanner::AnalysisResources::new(
+            self.rules,
+            self.max_analysis_threads,
+        )?);
+
+        self.traverse_batch_dependencies(&mut traversals).await;
+
+        let scans = self.scan_batch_packages(&traversals, resources).await?;
+        Ok(self.finish_batch_reports(traversals, &scans))
+    }
+
+    fn initialize_batch_traversals(
+        &self,
+        roots: Vec<FetchMetadata>,
+    ) -> Result<Vec<BatchTraversal>> {
         if roots.len() > self.limits.max_packages {
             return Err(Error::LimitExceeded {
                 resource: "batch packages".to_owned(),
                 limit: u64::try_from(self.limits.max_packages).unwrap_or(u64::MAX),
             });
         }
-        let mut traversals = roots
+
+        roots
             .into_iter()
             .map(|fetched| {
                 let root = canonicalize_root(&fetched.source)?;
                 Ok(BatchTraversal::new(root, fetched, self.policy.clone()))
             })
-            .collect::<Result<Vec<_>>>()?;
-        let resources = Arc::new(scanner::AnalysisResources::new(
-            self.rules,
-            self.max_analysis_threads,
-        )?);
+            .collect()
+    }
+
+    async fn traverse_batch_dependencies(&self, traversals: &mut [BatchTraversal]) {
         let mut fetched_dependencies = HashMap::new();
 
         loop {
             let mut requests_by_root = Vec::with_capacity(traversals.len());
             let mut has_frontier = false;
 
-            for batch in &mut traversals {
-                let Some(frontier) = batch
-                    .traversal
-                    .next_frontier(&mut batch.report, self.limits.max_packages)
-                else {
-                    requests_by_root.push(Vec::new());
-                    continue;
-                };
-                has_frontier = true;
-                let discoveries = stream::iter(
-                    frontier
-                        .iter()
-                        .map(|pending| self.discover_package(pending)),
-                )
-                .buffered(self.max_analysis_threads)
-                .collect::<Vec<_>>()
-                .await;
-                let mut requests = Vec::new();
-
-                for (pending, (discovery, python_contexts, issues)) in
-                    frontier.into_iter().zip(discoveries)
-                {
-                    batch.report.issues.extend(issues);
-                    if pending.depth < self.limits.max_depth {
-                        requests.extend(self.fetch_requests_for(
-                            &pending,
-                            &discovery,
-                            python_contexts,
-                            &mut batch.report,
-                        ));
+            for batch in traversals.iter_mut() {
+                match self.discover_frontier(batch).await {
+                    Some(requests) => {
+                        has_frontier = true;
+                        requests_by_root.push(requests);
                     }
-                    if pending.report_source {
-                        batch
-                            .packages
-                            .push(DiscoveredPackage { pending, discovery });
-                    }
+                    None => requests_by_root.push(Vec::new()),
                 }
-
-                requests_by_root.push(limit_fetch_requests(
-                    requests,
-                    &mut batch.report,
-                    batch.traversal.visited_count(),
-                    self.limits.max_packages,
-                ));
             }
 
             if !has_frontier {
                 break;
             }
 
-            self.fetch_batch_dependencies(
-                requests_by_root,
-                &mut traversals,
-                &mut fetched_dependencies,
-            )
-            .await;
+            self.fetch_batch_dependencies(requests_by_root, traversals, &mut fetched_dependencies)
+                .await;
         }
+    }
 
-        let scans = self.scan_batch_packages(&traversals, resources).await?;
-        let mut reports = Vec::with_capacity(traversals.len());
-        for mut batch in traversals {
-            for package in batch.packages {
-                let key = ScanKey::new(&package.pending, &self.ignored_root_paths);
-                let scan_counts = match scans.get(&key).expect("every package has a batch scan") {
-                    Ok(scan) => record_shared_scan(&mut batch.report, scan),
-                    Err(issue) => {
-                        batch.report.issues.push(issue.clone());
-                        (0, 0)
-                    }
-                };
-                record_install_scripts(
+    async fn discover_frontier(&self, batch: &mut BatchTraversal) -> Option<Vec<FetchRequest>> {
+        let frontier = batch
+            .traversal
+            .next_frontier(&mut batch.report, self.limits.max_packages)?;
+        let discoveries = stream::iter(
+            frontier
+                .iter()
+                .map(|pending| self.discover_package(pending)),
+        )
+        .buffered(self.max_analysis_threads)
+        .collect::<Vec<_>>()
+        .await;
+        let mut requests = Vec::new();
+
+        for (pending, (discovery, python_contexts, issues)) in frontier.into_iter().zip(discoveries)
+        {
+            batch.report.issues.extend(issues);
+            if pending.depth < self.limits.max_package_depth {
+                requests.extend(self.fetch_requests_for(
+                    &pending,
+                    &discovery,
+                    python_contexts,
                     &mut batch.report,
-                    &package.pending,
-                    &package.discovery.install_scripts,
-                );
-                record_package(
-                    &mut batch.report,
-                    &package.pending,
-                    &package.discovery,
-                    scan_counts,
-                );
+                ));
             }
-            self.finalize(&mut batch.report);
-            reports.push(batch.report);
+            if pending.report_source {
+                batch
+                    .packages
+                    .push(DiscoveredPackage { pending, discovery });
+            }
         }
 
-        Ok(reports)
+        Some(limit_fetch_requests(
+            requests,
+            &mut batch.report,
+            batch.traversal.visited_count(),
+            self.limits.max_packages,
+        ))
+    }
+
+    fn finish_batch_reports(
+        &self,
+        traversals: Vec<BatchTraversal>,
+        scans: &HashMap<
+            ScanKey,
+            std::result::Result<Arc<scanner::ScanOutcome>, crate::model::OperationalIssue>,
+        >,
+    ) -> Vec<Report> {
+        traversals
+            .into_iter()
+            .map(|mut batch| {
+                for package in batch.packages {
+                    let key = ScanKey::new(&package.pending, &self.ignored_root_paths);
+                    let scan_counts = match scans.get(&key).expect("every package has a batch scan")
+                    {
+                        Ok(scan) => record_shared_scan(&mut batch.report, scan),
+                        Err(issue) => {
+                            batch.report.issues.push(issue.clone());
+                            (0, 0)
+                        }
+                    };
+                    record_install_scripts(
+                        &mut batch.report,
+                        &package.pending,
+                        &package.discovery.install_scripts,
+                    );
+                    record_package(
+                        &mut batch.report,
+                        &package.pending,
+                        &package.discovery,
+                        scan_counts,
+                    );
+                }
+                self.finalize(&mut batch.report);
+                batch.report
+            })
+            .collect()
     }
 
     async fn fetch_batch_dependencies(
@@ -149,10 +182,28 @@ impl Engine<'_> {
             std::result::Result<FetchMetadata, crate::model::OperationalIssue>,
         >,
     ) {
-        let mut grouped = Vec::<(
+        let grouped = self.group_batch_fetches(requests_by_root, traversals, fetched);
+        let unique_work = traversals.len().saturating_add(fetched.len());
+
+        if grouped.len() > self.limits.max_packages.saturating_sub(unique_work) {
+            self.report_batch_fetch_limit(grouped, traversals);
+            return;
+        }
+
+        let results = self.fetch_batch_groups(grouped).await;
+        self.apply_batch_fetch_results(results, traversals, fetched);
+    }
+
+    fn group_batch_fetches(
+        &self,
+        requests_by_root: Vec<Vec<FetchRequest>>,
+        traversals: &mut [BatchTraversal],
+        fetched: &HashMap<
             FetchKey,
-            Vec<(usize, FetchRequest, crate::fetcher::PreparedFetch)>,
-        )>::new();
+            std::result::Result<FetchMetadata, crate::model::OperationalIssue>,
+        >,
+    ) -> Vec<BatchFetchGroup> {
+        let mut grouped = Vec::new();
         let mut group_indices = HashMap::new();
 
         for (root_index, requests) in requests_by_root.into_iter().enumerate() {
@@ -174,13 +225,9 @@ impl Engine<'_> {
                     }
                 };
                 let key = FetchKey::new(&request, &prepared);
+
                 if let Some(result) = fetched.get(&key) {
-                    match result {
-                        Ok(metadata) => traversals[root_index]
-                            .traversal
-                            .enqueue([pending_from_fetch(&request, metadata.clone())]),
-                        Err(issue) => traversals[root_index].report.issues.push(issue.clone()),
-                    }
+                    self.apply_batch_fetch_result(root_index, &request, result, traversals);
                     continue;
                 }
 
@@ -192,45 +239,71 @@ impl Engine<'_> {
             }
         }
 
-        let unique_work = traversals.len().saturating_add(fetched.len());
-        if grouped.len() > self.limits.max_packages.saturating_sub(unique_work) {
-            for (_, owners) in grouped {
-                for (root_index, request, _) in owners {
-                    push_batch_package_limit_issue(
-                        &mut traversals[root_index].report,
-                        request.declared_package_id,
-                        self.limits.max_packages as u64,
-                    );
-                }
+        grouped
+    }
+
+    fn report_batch_fetch_limit(
+        &self,
+        grouped: Vec<BatchFetchGroup>,
+        traversals: &mut [BatchTraversal],
+    ) {
+        for (_, owners) in grouped {
+            for (root_index, request, _) in owners {
+                push_batch_package_limit_issue(
+                    &mut traversals[root_index].report,
+                    request.declared_package_id,
+                    self.limits.max_packages as u64,
+                );
             }
-            return;
         }
+    }
 
-        let fetches = stream::iter(grouped).map(|(key, owners)| async move {
-            let request = &owners[0].1;
-            let dependency_id = request.dependency.id();
-            let result = self
-                .fetcher
-                .fetch_prepared(owners[0].2.clone())
-                .await
-                .map_err(|error| operational_issue(error, Some(dependency_id), "fetch", false));
-            (key, owners, result)
-        });
-        let results = fetches
+    async fn fetch_batch_groups(&self, grouped: Vec<BatchFetchGroup>) -> Vec<BatchFetchResult> {
+        stream::iter(grouped)
+            .map(|(key, owners)| async move {
+                let request = &owners[0].1;
+                let dependency_id = request.dependency.id();
+                let result = self
+                    .fetcher
+                    .fetch_prepared(owners[0].2.clone())
+                    .await
+                    .map_err(|error| operational_issue(error, Some(dependency_id), "fetch", false));
+                (key, owners, result)
+            })
             .buffered(MAX_CONCURRENT_FETCHES)
-            .collect::<Vec<_>>()
-            .await;
+            .collect()
+            .await
+    }
 
+    fn apply_batch_fetch_results(
+        &self,
+        results: Vec<BatchFetchResult>,
+        traversals: &mut [BatchTraversal],
+        fetched: &mut HashMap<
+            FetchKey,
+            std::result::Result<FetchMetadata, crate::model::OperationalIssue>,
+        >,
+    ) {
         for (key, owners, result) in results {
             for (root_index, request, _) in &owners {
-                match &result {
-                    Ok(metadata) => traversals[*root_index]
-                        .traversal
-                        .enqueue([pending_from_fetch(request, metadata.clone())]),
-                    Err(issue) => traversals[*root_index].report.issues.push(issue.clone()),
-                }
+                self.apply_batch_fetch_result(*root_index, request, &result, traversals);
             }
             fetched.insert(key, result);
+        }
+    }
+
+    fn apply_batch_fetch_result(
+        &self,
+        root_index: usize,
+        request: &FetchRequest,
+        result: &std::result::Result<FetchMetadata, crate::model::OperationalIssue>,
+        traversals: &mut [BatchTraversal],
+    ) {
+        match result {
+            Ok(metadata) => traversals[root_index]
+                .traversal
+                .enqueue([pending_from_fetch(request, metadata.clone())]),
+            Err(issue) => traversals[root_index].report.issues.push(issue.clone()),
         }
     }
 

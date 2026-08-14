@@ -19,14 +19,19 @@ pub(in crate::app) struct SuppressionConfig {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(in crate::app) struct FileConfig {
-    pub(super) max_depth: Option<usize>,
+    pub(super) max_package_depth: Option<usize>,
     pub(super) max_packages: Option<usize>,
     pub(super) max_network_requests: Option<usize>,
+    pub(super) max_redirect_hops: Option<usize>,
+    pub(super) request_timeout_seconds: Option<u64>,
     pub(super) max_acquisition_seconds: Option<u64>,
-    pub(super) max_archive_bytes: Option<u64>,
-    pub(super) max_extracted_bytes: Option<u64>,
+    pub(super) max_archive_size: Option<u64>,
+    pub(super) max_extracted_size: Option<u64>,
     pub(super) max_extracted_files: Option<u64>,
-    pub(super) max_source_file_bytes: Option<u64>,
+    pub(super) max_file_depth: Option<usize>,
+    pub(super) max_manifest_file_size: Option<u64>,
+    pub(super) max_source_file_size: Option<u64>,
+    pub(super) max_source_files: Option<u64>,
     pub(super) max_findings: Option<u64>,
     pub(super) max_scan_seconds: Option<u64>,
     pub(super) fail_on_parse_error: Option<bool>,
@@ -54,20 +59,29 @@ impl FileConfig {
     /// `overriding` replace the corresponding global value.
     fn overlay(self, overriding: Self) -> Self {
         Self {
-            max_depth: overriding.max_depth.or(self.max_depth),
+            max_package_depth: overriding.max_package_depth.or(self.max_package_depth),
             max_packages: overriding.max_packages.or(self.max_packages),
             max_network_requests: overriding
                 .max_network_requests
                 .or(self.max_network_requests),
+            max_redirect_hops: overriding.max_redirect_hops.or(self.max_redirect_hops),
+            request_timeout_seconds: overriding
+                .request_timeout_seconds
+                .or(self.request_timeout_seconds),
             max_acquisition_seconds: overriding
                 .max_acquisition_seconds
                 .or(self.max_acquisition_seconds),
-            max_archive_bytes: overriding.max_archive_bytes.or(self.max_archive_bytes),
-            max_extracted_bytes: overriding.max_extracted_bytes.or(self.max_extracted_bytes),
+            max_archive_size: overriding.max_archive_size.or(self.max_archive_size),
+            max_extracted_size: overriding.max_extracted_size.or(self.max_extracted_size),
             max_extracted_files: overriding.max_extracted_files.or(self.max_extracted_files),
-            max_source_file_bytes: overriding
-                .max_source_file_bytes
-                .or(self.max_source_file_bytes),
+            max_file_depth: overriding.max_file_depth.or(self.max_file_depth),
+            max_manifest_file_size: overriding
+                .max_manifest_file_size
+                .or(self.max_manifest_file_size),
+            max_source_file_size: overriding
+                .max_source_file_size
+                .or(self.max_source_file_size),
+            max_source_files: overriding.max_source_files.or(self.max_source_files),
             max_findings: overriding.max_findings.or(self.max_findings),
             max_scan_seconds: overriding.max_scan_seconds.or(self.max_scan_seconds),
             fail_on_parse_error: overriding.fail_on_parse_error.or(self.fail_on_parse_error),
@@ -121,7 +135,7 @@ const INITIAL_CONFIG: &str = r#"# chainsec project configuration
 # Command-line options override values in this file.
 
 # Keep dependency traversal bounded. Set to 0 to scan only this project.
-max_depth = 3
+max_package_depth = 3
 max_packages = 500
 
 # Network access remains disabled unless both options below are configured.

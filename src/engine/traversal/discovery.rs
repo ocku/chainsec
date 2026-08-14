@@ -32,8 +32,14 @@ impl Engine<'_> {
         let npm_contexts = pending.contexts.npm.iter().cloned().collect::<Vec<_>>();
         let python_contexts = pending.contexts.python.iter().cloned().collect::<Vec<_>>();
         let package_id = pending.package_id.clone();
+        let limits = self.limits.clone();
         let discovery = tokio::task::spawn_blocking(move || {
-            manifests::discover_with_contexts(&discovery_source, &npm_contexts, &python_contexts)
+            manifests::discover_with_contexts_and_limits(
+                &discovery_source,
+                &npm_contexts,
+                &python_contexts,
+                &limits,
+            )
         })
         .await;
 
@@ -122,8 +128,14 @@ impl Engine<'_> {
         let discovery_source = pending.source.clone();
         let npm_contexts = pending.contexts.npm.iter().cloned().collect::<Vec<_>>();
         let python_contexts = pending.contexts.python.iter().cloned().collect::<Vec<_>>();
+        let limits = self.limits.clone();
         let discovery = tokio::task::spawn_blocking(move || {
-            manifests::discover_with_contexts(&discovery_source, &npm_contexts, &python_contexts)
+            manifests::discover_with_contexts_and_limits(
+                &discovery_source,
+                &npm_contexts,
+                &python_contexts,
+                &limits,
+            )
         });
         let (scan_result, discovery_result) = tokio::join!(scan_task, discovery);
 

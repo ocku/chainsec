@@ -87,10 +87,12 @@ fn classify_file(path: &Path, bytes: &[u8]) -> Option<FileKind> {
         }
     }
 
-    if is_non_utf8_text(bytes) {
+    if std::str::from_utf8(bytes).is_ok() {
+        bytes.contains(&0).then_some(FileKind::Binary)
+    } else if is_non_utf8_text(bytes) {
         Some(FileKind::NonUtf8Text)
     } else {
-        is_binary(bytes).then_some(FileKind::Binary)
+        Some(FileKind::Binary)
     }
 }
 
@@ -243,12 +245,8 @@ fn is_known_static_asset(path: &Path, bytes: &[u8]) -> bool {
     }
 }
 
-fn is_binary(bytes: &[u8]) -> bool {
-    bytes.contains(&0) || (std::str::from_utf8(bytes).is_err() && !is_non_utf8_text(bytes))
-}
-
 fn is_non_utf8_text(bytes: &[u8]) -> bool {
-    if bytes.is_empty() || bytes.contains(&0) || std::str::from_utf8(bytes).is_ok() {
+    if bytes.is_empty() || bytes.contains(&0) {
         return false;
     }
 

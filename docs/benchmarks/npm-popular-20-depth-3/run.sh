@@ -13,7 +13,7 @@ for package in $packages; do
   slug=$(printf '%s' "$package" | tr '@/ ' '___')
   cargo run -- \
     remote scan "npm:$package" \
-    --max-depth 3 \
+    --max-package-depth 3 \
     --allow-unlocked \
     --cache "$cache_dir" \
     --format json \

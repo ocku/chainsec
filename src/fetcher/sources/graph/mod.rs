@@ -17,7 +17,7 @@ use crate::{
 
 use crate::fetcher::{
     SourceFetcher,
-    archive::{ExtractionStats, check_extraction_limits},
+    archive::{ExtractionStats, account_extracted_entry},
     filesystem::TrustedDir,
 };
 
@@ -35,19 +35,6 @@ use resolution::resolve_graph_modules;
 use resolution::{module_extension, resolve_graph_modules_with_sink};
 
 impl SourceFetcher {
-    #[allow(dead_code)]
-    pub(in crate::fetcher) async fn fetch_deno_graph(
-        &self,
-        root_url: &Url,
-        temporary: &Path,
-        expected: Option<&str>,
-        lockfile: Option<&DenoLockfileSnapshot>,
-    ) -> Result<(PathBuf, String, ExtractionStats)> {
-        let mut budget = self.network_budget();
-        self.fetch_deno_graph_with_budget(root_url, temporary, expected, lockfile, &mut budget)
-            .await
-    }
-
     pub(in crate::fetcher) async fn fetch_deno_graph_with_budget(
         &self,
         root_url: &Url,
@@ -78,34 +65,9 @@ impl SourceFetcher {
                 .download_with_effective_url_and_budget(&requested_url, false, budget)
                 .await?;
             let canonical = canonical_graph_url(&url);
-            if let Some(bytes) = materialized.get(&canonical) {
-                verify_graph_module_integrity(
-                    bytes,
-                    &requested_url,
-                    &url,
-                    is_root,
-                    root_url,
-                    expected,
-                    remote_integrities,
-                )?;
-                if is_root {
-                    root_digest = format!("sha256:{}", hex::encode(Sha256::digest(bytes)));
-                }
-                if requested_url != url {
-                    write_graph_redirect(&source_root, &source, &requested_url, &url)?;
-                }
-                continue;
-            }
-            if materialized.len() >= self.policy.max_deno_modules {
-                return Err(Error::LimitExceeded {
-                    resource: "Deno graph modules".to_owned(),
-                    limit: self.policy.max_deno_modules as u64,
-                });
-            }
-            let bytes = downloaded_bytes;
-            let digest = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));
-            verify_graph_module_integrity(
-                &bytes,
+            let bytes = materialized.get(&canonical).unwrap_or(&downloaded_bytes);
+            let digest = verify_downloaded_graph_module(
+                bytes,
                 &requested_url,
                 &url,
                 is_root,
@@ -117,43 +79,104 @@ impl SourceFetcher {
                 root_digest = digest;
             }
             if requested_url != url {
+                account_extracted_entry(&mut stats, url.as_str().len() as u64, &self.limits)?;
                 write_graph_redirect(&source_root, &source, &requested_url, &url)?;
             }
-            stats.files += 1;
-            stats.bytes += bytes.len() as u64;
-            check_extraction_limits(&stats, &self.limits)?;
-            let extension = module_extension(&url);
-            let filename = format!(
-                "{}.{}",
-                hex::encode(Sha256::digest(canonical.as_bytes())),
-                extension
-            );
-            let output = source.join(&filename);
-            let mut file =
-                source_root
-                    .create_new_file(Path::new(&filename))
-                    .map_err(|source_error| Error::Io {
-                        operation: "create Deno module".to_owned(),
-                        path: output.clone(),
-                        source: source_error,
-                    })?;
-            file.write_all(&bytes).map_err(|source_error| Error::Io {
-                operation: "write Deno module".to_owned(),
-                path: output,
-                source: source_error,
-            })?;
-            resolve_graph_modules_with_sink(&url, &bytes, extension, |module| {
-                enqueue_graph_module(
-                    &mut queue,
-                    &mut queued,
-                    module,
-                    self.policy.max_deno_modules,
-                )
-            })?;
-            materialized.insert(canonical, bytes);
+            if materialized.contains_key(&canonical) {
+                continue;
+            }
+            check_graph_module_limit(materialized.len(), self.limits.max_packages)?;
+            account_extracted_entry(&mut stats, downloaded_bytes.len() as u64, &self.limits)?;
+            materialize_graph_module(
+                &source_root,
+                &source,
+                &url,
+                &canonical,
+                &downloaded_bytes,
+                &mut queue,
+                &mut queued,
+                self.limits.max_packages,
+            )?;
+            materialized.insert(canonical, downloaded_bytes);
         }
         Ok((source, root_digest, stats))
     }
+}
+
+fn verify_downloaded_graph_module(
+    bytes: &[u8],
+    requested_url: &Url,
+    effective_url: &Url,
+    is_root: bool,
+    root_url: &Url,
+    expected: Option<&str>,
+    remote_integrities: Option<&HashMap<String, String>>,
+) -> Result<String> {
+    let digest = format!("sha256:{}", hex::encode(Sha256::digest(bytes)));
+    verify_graph_module_integrity(
+        bytes,
+        requested_url,
+        effective_url,
+        is_root,
+        root_url,
+        expected,
+        remote_integrities,
+    )?;
+    Ok(digest)
+}
+
+fn check_graph_module_limit(materialized: usize, max_modules: usize) -> Result<()> {
+    if materialized >= max_modules {
+        return Err(Error::LimitExceeded {
+            resource: "Deno graph modules".to_owned(),
+            limit: max_modules as u64,
+        });
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn materialize_graph_module(
+    source_root: &TrustedDir,
+    source: &Path,
+    url: &Url,
+    canonical: &str,
+    bytes: &[u8],
+    queue: &mut VecDeque<Url>,
+    queued: &mut HashSet<String>,
+    max_modules: usize,
+) -> Result<()> {
+    let extension = module_extension(url);
+    let filename = format!(
+        "{}.{}",
+        hex::encode(Sha256::digest(canonical.as_bytes())),
+        extension
+    );
+    write_graph_module(source_root, source, &filename, bytes)?;
+    resolve_graph_modules_with_sink(url, bytes, extension, |module| {
+        enqueue_graph_module(queue, queued, module, max_modules)
+    })
+}
+
+fn write_graph_module(
+    source_root: &TrustedDir,
+    source: &Path,
+    filename: &str,
+    bytes: &[u8],
+) -> Result<()> {
+    let output = source.join(filename);
+    let mut file = source_root
+        .create_new_file(Path::new(filename))
+        .map_err(|source_error| Error::Io {
+            operation: "create Deno module".to_owned(),
+            path: output.clone(),
+            source: source_error,
+        })?;
+    file.write_all(bytes).map_err(|source_error| Error::Io {
+        operation: "write Deno module".to_owned(),
+        path: output,
+        source: source_error,
+    })
 }
 
 fn canonical_graph_url(url: &Url) -> String {

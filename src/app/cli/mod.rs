@@ -1,6 +1,13 @@
 use std::path::PathBuf;
 
-use chainsec::{ArtifactRepositories, engine::MAX_ANALYSIS_THREADS, model::Risk};
+use chainsec::{
+    ArtifactRepositories,
+    engine::MAX_ANALYSIS_THREADS,
+    model::{
+        DEFAULT_MAX_FILE_DEPTH, DEFAULT_MAX_MANIFEST_FILE_SIZE, DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        Risk,
+    },
+};
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 
 use super::config::parse_human_size;
@@ -197,27 +204,42 @@ pub(crate) struct CachePurge {
 pub(crate) struct AnalysisOptions {
     /// Maximum dependency depth to acquire and analyze.
     #[arg(long, default_value_t = 3)]
-    pub(crate) max_depth: usize,
+    pub(crate) max_package_depth: usize,
     /// Maximum packages per traversal and aggregate unique work in a remote diff batch.
     #[arg(long, default_value_t = 500)]
     pub(crate) max_packages: usize,
     /// Maximum HTTP requests during one package acquisition, including redirects.
     #[arg(long, default_value_t = 1_000, value_parser = parse_positive_usize)]
     pub(crate) max_network_requests: usize,
+    /// Maximum redirects followed in an HTTP request or Deno lockfile alias chain.
+    #[arg(long, default_value_t = 5)]
+    pub(crate) max_redirect_hops: usize,
+    /// Maximum duration of each HTTP request.
+    #[arg(long, default_value_t = DEFAULT_REQUEST_TIMEOUT_SECONDS)]
+    pub(crate) request_timeout_seconds: u64,
     /// Maximum end-to-end network acquisition time for one package.
     #[arg(long, default_value_t = 300)]
     pub(crate) max_acquisition_seconds: u64,
     /// Maximum downloaded archive size (for example, `100MiB`, `100M`, or `100m`).
-    #[arg(long = "max-archive", default_value = "100MiB", value_parser = parse_human_size)]
-    pub(crate) max_archive_bytes: u64,
+    #[arg(long = "max-archive-size", default_value = "100MiB", value_parser = parse_human_size)]
+    pub(crate) max_archive_size: u64,
     /// Maximum expanded dependency size (for example, `500MiB`, `500M`, or `500m`).
-    #[arg(long = "max-extracted", default_value = "500MiB", value_parser = parse_human_size)]
-    pub(crate) max_extracted_bytes: u64,
+    #[arg(long = "max-extracted-size", default_value = "500MiB", value_parser = parse_human_size)]
+    pub(crate) max_extracted_size: u64,
     #[arg(long, default_value_t = 50_000)]
     pub(crate) max_extracted_files: u64,
+    /// Maximum path components in acquired package files.
+    #[arg(long, default_value_t = DEFAULT_MAX_FILE_DEPTH)]
+    pub(crate) max_file_depth: usize,
+    /// Maximum individual manifest or lockfile size.
+    #[arg(long = "max-manifest-file-size", default_value_t = DEFAULT_MAX_MANIFEST_FILE_SIZE, value_parser = parse_human_size)]
+    pub(crate) max_manifest_file_size: u64,
     /// Maximum individual source file size (for example, `2MiB`, `2M`, or `2m`).
-    #[arg(long = "max-source-file", default_value = "2MiB", value_parser = parse_human_size)]
-    pub(crate) max_source_file_bytes: u64,
+    #[arg(long = "max-source-file-size", default_value = "2MiB", value_parser = parse_human_size)]
+    pub(crate) max_source_file_size: u64,
+    /// Maximum source files scanned during one package scan.
+    #[arg(long, default_value_t = 100_000)]
+    pub(crate) max_source_files: u64,
     /// Maximum findings emitted during one package scan.
     #[arg(long, default_value_t = 100_000)]
     pub(crate) max_findings: u64,

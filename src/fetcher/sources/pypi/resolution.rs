@@ -15,16 +15,6 @@ use super::{
 };
 
 impl SourceFetcher {
-    #[allow(dead_code)]
-    pub(in crate::fetcher) async fn resolve_unlocked_python(
-        &self,
-        dependency: &mut Dependency,
-    ) -> Result<()> {
-        let mut budget = self.network_budget();
-        self.resolve_unlocked_python_with_budget(dependency, &mut budget)
-            .await
-    }
-
     pub(in crate::fetcher) async fn resolve_unlocked_python_with_budget(
         &self,
         dependency: &mut Dependency,
@@ -38,17 +28,6 @@ impl SourceFetcher {
             .pypi_metadata_with_budget(dependency, &api, budget)
             .await?;
         resolve_python_release(dependency, &metadata)
-    }
-
-    #[allow(dead_code)]
-    pub(in crate::fetcher) async fn resolve_python_version_selection(
-        &self,
-        dependency: Dependency,
-        selection: RemoteVersionSelection,
-    ) -> Result<Vec<Dependency>> {
-        let mut budget = self.network_budget();
-        self.resolve_python_version_selection_with_budget(dependency, selection, &mut budget)
-            .await
     }
 
     pub(in crate::fetcher) async fn resolve_python_version_selection_with_budget(

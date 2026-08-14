@@ -19,18 +19,22 @@ use super::{
 
 fn engine_limits(cli: &AnalysisOptions) -> EngineLimits {
     EngineLimits {
-        max_depth: cli.max_depth,
+        max_package_depth: cli.max_package_depth,
         max_packages: cli.max_packages,
         max_network_requests: cli.max_network_requests,
+        max_redirect_hops: cli.max_redirect_hops,
+        request_timeout: Duration::from_secs(cli.request_timeout_seconds),
         max_acquisition_duration: Duration::from_secs(cli.max_acquisition_seconds),
-        max_archive_bytes: cli.max_archive_bytes,
-        max_extracted_bytes: cli.max_extracted_bytes,
+        max_archive_size: cli.max_archive_size,
+        max_extracted_size: cli.max_extracted_size,
         max_extracted_files: cli.max_extracted_files,
-        max_source_file_bytes: cli.max_source_file_bytes,
+        max_file_depth: cli.max_file_depth,
+        max_manifest_file_size: cli.max_manifest_file_size,
+        max_source_file_size: cli.max_source_file_size,
+        max_source_files: cli.max_source_files,
         max_findings: cli.max_findings,
         max_scan_duration: Duration::from_secs(cli.max_scan_seconds),
         fail_on_parse_error: cli.fail_on_parse_error,
-        ..EngineLimits::default()
     }
 }
 
@@ -42,7 +46,6 @@ fn fetch_policy(cli: &AnalysisOptions) -> FetchPolicy {
         repositories: cli.artifactories.clone(),
         trust_local_input: cli.trust_local_input,
         allow_insecure_http: cli.allow_insecure_http,
-        ..FetchPolicy::default()
     }
 }
 

@@ -1,8 +1,8 @@
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 use serde_json::Value as JsonValue;
 
-use super::artifact::{MAX_LOCK_ARTIFACTS_PER_PACKAGE, valid_sha256_integrity};
+use super::artifact::valid_sha256_integrity;
 use crate::{
     error::Result,
     manifests::{
@@ -12,12 +12,33 @@ use crate::{
     model::Dependency,
 };
 
+#[cfg(test)]
 pub(super) fn enrich(path: &Path, dependencies: &mut Vec<Dependency>) -> Result<()> {
+    enrich_bounded(path, dependencies, usize::MAX)
+}
+
+pub(super) fn enrich_bounded(
+    path: &Path,
+    dependencies: &mut Vec<Dependency>,
+    max_packages: usize,
+) -> Result<()> {
     let value: JsonValue =
         serde_json::from_str(&read(path)?).map_err(|error| manifest_error(path, error))?;
     let root = value
         .as_object()
         .ok_or_else(|| manifest_error(path, "Pipfile.lock root must be an object"))?;
+    if root
+        .get("_meta")
+        .and_then(JsonValue::as_object)
+        .and_then(|metadata| metadata.get("pipfile-spec"))
+        .and_then(JsonValue::as_u64)
+        != Some(6)
+    {
+        return Err(manifest_error(
+            path,
+            "Pipfile.lock must have supported integer pipfile-spec 6",
+        ));
+    }
     if !root.contains_key("default") && !root.contains_key("develop") {
         return Err(manifest_error(
             path,
@@ -33,21 +54,28 @@ pub(super) fn enrich(path: &Path, dependencies: &mut Vec<Dependency>) -> Result<
     }
 
     let mut index = JsonPackageIndex::new();
+    let mut seen = HashSet::new();
     for section in ["default", "develop"] {
         let Some(entries) = root.get(section).and_then(JsonValue::as_object) else {
             continue;
         };
         for (name, entry) in entries {
-            let candidates = index.entry(normalize(name)).or_default();
-            if !candidates.contains(&entry) {
-                candidates.push(entry);
+            let normalized = normalize(name);
+            if seen.insert((normalized.clone(), entry)) {
+                index.entry(normalized).or_default().push(entry);
             }
         }
     }
 
     let declared = std::mem::take(dependencies);
-    let mut enriched = Vec::with_capacity(declared.len());
+    let mut enriched = Vec::with_capacity(declared.len().min(max_packages));
     for mut dependency in declared {
+        if enriched.len() >= max_packages {
+            return Err(crate::error::Error::LimitExceeded {
+                resource: "manifest dependencies".to_owned(),
+                limit: u64::try_from(max_packages).unwrap_or(u64::MAX),
+            });
+        }
         let entry = find_json_package(path, &index, &dependency)?;
         let Some(entry) = entry else {
             enriched.push(dependency);
@@ -85,15 +113,7 @@ pub(super) fn enrich(path: &Path, dependencies: &mut Vec<Dependency>) -> Result<
                     ),
                 )
             })?;
-            if hashes.len() > MAX_LOCK_ARTIFACTS_PER_PACKAGE {
-                return Err(manifest_error(
-                    path,
-                    format!(
-                        "Pipfile.lock hashes for {} exceeds the {MAX_LOCK_ARTIFACTS_PER_PACKAGE}-artifact limit",
-                        dependency.name
-                    ),
-                ));
-            }
+
             if !hashes.iter().all(JsonValue::is_string) {
                 return Err(manifest_error(
                     path,
@@ -127,11 +147,18 @@ pub(super) fn enrich(path: &Path, dependencies: &mut Vec<Dependency>) -> Result<
                 dependency.integrity = Some(authorized.join(" "));
                 enriched.push(dependency);
             } else {
-                enriched.extend(authorized.into_iter().map(|hash| {
+                let remaining = max_packages.saturating_sub(enriched.len());
+                if authorized.len() > remaining {
+                    return Err(crate::error::Error::LimitExceeded {
+                        resource: "manifest dependencies".to_owned(),
+                        limit: u64::try_from(max_packages).unwrap_or(u64::MAX),
+                    });
+                }
+                for hash in authorized {
                     let mut artifact = dependency.clone();
                     artifact.integrity = Some(hash.to_owned());
-                    artifact
-                }));
+                    enriched.push(artifact);
+                }
             }
         } else {
             if direct_source {

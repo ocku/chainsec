@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -59,6 +59,12 @@ struct ContextFixtureFetcher {
     fetches: Arc<Mutex<HashMap<String, usize>>>,
 }
 
+struct FailingFixtureFetcher {
+    packages: PathBuf,
+    failures: HashSet<String>,
+    fetches: Arc<Mutex<HashMap<String, usize>>>,
+}
+
 #[async_trait]
 impl Fetcher for CountingFixtureFetcher {
     async fn fetch(
@@ -75,6 +81,40 @@ impl Fetcher for CountingFixtureFetcher {
         Ok(FetchMetadata {
             source: self.packages.join(&dependency.name),
             package_id: dependency.id(),
+            resolved_version: dependency.resolved_version.clone().unwrap(),
+            digest: dependency.integrity.clone().unwrap(),
+            source_url: dependency
+                .source_url
+                .unwrap_or_else(|| "https://fixtures.example.test/package.tar.gz".to_owned()),
+            cache_hit: false,
+        })
+    }
+}
+
+#[async_trait]
+impl Fetcher for FailingFixtureFetcher {
+    async fn fetch(
+        &self,
+        dependency: Dependency,
+        _declared_from: PathBuf,
+    ) -> Result<FetchMetadata> {
+        let package_id = dependency.id();
+        *self
+            .fetches
+            .lock()
+            .unwrap()
+            .entry(package_id.clone())
+            .or_default() += 1;
+        if self.failures.contains(&dependency.name) {
+            return Err(crate::Error::Fetch {
+                package: package_id,
+                source_url: "https://fixtures.example.test/failed-package.tgz".to_owned(),
+                message: "fixture fetch failure".to_owned(),
+            });
+        }
+        Ok(FetchMetadata {
+            source: self.packages.join(&dependency.name),
+            package_id,
             resolved_version: dependency.resolved_version.clone().unwrap(),
             digest: dependency.integrity.clone().unwrap(),
             source_url: dependency

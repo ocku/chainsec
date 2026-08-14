@@ -3,29 +3,36 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use globset::{Glob, GlobSet, GlobSetBuilder};
+use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 
 use serde_json::Value as JsonValue;
 
 use super::{
     NpmLockContext,
-    shared::{ManifestRoot, RootedFileType, github_archive, manifest_error, read, walk_beneath},
+    shared::{
+        BoundedDependencyCollector, ManifestRoot, RootedFileType, github_archive, manifest_error,
+        package_json_dependencies, push_workspace_member_bounded, read, walk_workspace_beneath,
+        workspace_depth_exceeded,
+    },
 };
 use crate::{
     error::Result,
-    model::{Dependency, Ecosystem},
+    model::{Dependency, Ecosystem, EngineLimits},
 };
 
 mod package_lock;
 mod pnpm;
 mod yarn;
 
-const MAX_WORKSPACE_DEPTH: usize = 32;
-const MAX_WORKSPACE_ENTRIES: usize = 4096;
-const MAX_WORKSPACE_MEMBERS: usize = 256;
-const MAX_WORKSPACE_PATTERNS: usize = 4096;
-
+#[cfg(test)]
 pub(super) fn parse(path: &Path) -> Result<(Vec<Dependency>, Option<Vec<String>>)> {
+    parse_with_limit(path, EngineLimits::default().max_packages)
+}
+
+pub(super) fn parse_with_limit(
+    path: &Path,
+    max_packages: usize,
+) -> Result<(Vec<Dependency>, Option<Vec<String>>)> {
     let value: JsonValue =
         serde_json::from_str(&read(path)?).map_err(|error| manifest_error(path, error))?;
     let package = value
@@ -42,35 +49,16 @@ pub(super) fn parse(path: &Path) -> Result<(Vec<Dependency>, Option<Vec<String>>
                 .collect::<Vec<_>>()
         })
         .filter(|scripts| !scripts.is_empty());
-    let mut by_name = HashMap::new();
-    // Peer dependencies are a fallback only. Development dependencies are included
-    // by default, while normal and optional dependencies take precedence, matching
-    // npm's duplicate-section semantics.
-    for section in [
-        "peerDependencies",
-        "devDependencies",
-        "dependencies",
-        "optionalDependencies",
-    ] {
-        let Some(value) = package.get(section) else {
-            continue;
-        };
-        let entries = value
-            .as_object()
-            .ok_or_else(|| manifest_error(path, format!("{section} must be an object")))?;
-        for (name, value) in entries {
-            let requirement = value.as_str().ok_or_else(|| {
-                manifest_error(path, format!("{section}.{name} must be a string"))
-            })?;
-            let mut dependency = Dependency::declared(Ecosystem::Npm, name, requirement);
-            if let Some((archive, commit)) = github_archive(requirement) {
-                dependency.resolved_version = Some(commit);
-                dependency.source_url = Some(archive);
-            }
-            by_name.insert(name.clone(), dependency);
+    let mut dependencies = BoundedDependencyCollector::new(max_packages);
+    for (name, requirement) in package_json_dependencies(path, package, max_packages)? {
+        let mut dependency = Dependency::declared(Ecosystem::Npm, &name, &requirement);
+        if let Some((archive, commit)) = github_archive(&requirement) {
+            dependency.resolved_version = Some(commit);
+            dependency.source_url = Some(archive);
         }
+        dependencies.push(dependency)?;
     }
-    Ok((by_name.into_values().collect(), install_scripts))
+    Ok((dependencies.into_dependencies(), install_scripts))
 }
 
 pub(super) struct EnrichResult {
@@ -123,7 +111,11 @@ pub(super) fn enrich_from_context(
     package_lock::enrich(context, dependencies)
 }
 
-pub(super) fn workspace_members(root: &ManifestRoot, package: &Path) -> Result<Vec<PathBuf>> {
+pub(super) fn workspace_members(
+    root: &ManifestRoot,
+    package: &Path,
+    limits: &EngineLimits,
+) -> Result<Vec<PathBuf>> {
     let value: JsonValue =
         serde_json::from_str(&read(package)?).map_err(|error| manifest_error(package, error))?;
     let package_json = value
@@ -146,12 +138,7 @@ pub(super) fn workspace_members(root: &ManifestRoot, package: &Path) -> Result<V
                 )
             })?
     };
-    if patterns.len() > MAX_WORKSPACE_PATTERNS {
-        return Err(manifest_error(
-            package,
-            format!("npm workspace patterns exceed the {MAX_WORKSPACE_PATTERNS}-entry limit"),
-        ));
-    }
+
     let patterns = patterns
         .iter()
         .map(|pattern| {
@@ -163,19 +150,21 @@ pub(super) fn workspace_members(root: &ManifestRoot, package: &Path) -> Result<V
         .collect::<Result<Vec<_>>>()?;
     let (includes, excludes) = workspace_globs(package, &patterns)?;
     let mut members = Vec::new();
-    let mut entries = 1usize;
-    walk_beneath(
+    walk_workspace_beneath(
         root.path(),
-        MAX_WORKSPACE_DEPTH,
-        &mut |entry, _depth, kind| {
-            entries += 1;
-            if entries > MAX_WORKSPACE_ENTRIES {
-                return Err(manifest_error(
-                    package,
-                    format!(
-                        "npm workspace expansion exceeds the {MAX_WORKSPACE_ENTRIES}-entry limit"
-                    ),
-                ));
+        limits.max_package_depth,
+        limits.max_source_files,
+        &mut |entry, depth, kind| {
+            if workspace_depth_exceeded(
+                kind,
+                depth,
+                limits.max_package_depth,
+                includes.is_match(entry) && !excludes.is_match(entry),
+            ) {
+                return Err(crate::error::Error::LimitExceeded {
+                    resource: "workspace depth".to_owned(),
+                    limit: u64::try_from(limits.max_package_depth).unwrap_or(u64::MAX),
+                });
             }
             if kind == RootedFileType::Symlink {
                 if includes.is_match(entry) && !excludes.is_match(entry) {
@@ -198,15 +187,11 @@ pub(super) fn workspace_members(root: &ManifestRoot, package: &Path) -> Result<V
                 .parent()
                 .ok_or_else(|| manifest_error(package, "workspace member escaped its root"))?;
             if includes.is_match(member) && !excludes.is_match(member) {
-                members.push(member.to_path_buf());
-                if members.len() > MAX_WORKSPACE_MEMBERS {
-                    return Err(manifest_error(
-                        package,
-                        format!(
-                            "npm workspace expansion exceeds the {MAX_WORKSPACE_MEMBERS}-member limit"
-                        ),
-                    ));
-                }
+                push_workspace_member_bounded(
+                    &mut members,
+                    member.to_path_buf(),
+                    limits.max_packages,
+                )?;
             }
             Ok(())
         },
@@ -240,9 +225,12 @@ fn workspace_globs(manifest: &Path, patterns: &[String]) -> Result<(GlobSet, Glo
                 "npm workspace patterns must remain within the workspace root",
             ));
         }
-        let glob = Glob::new(pattern).map_err(|error| {
-            manifest_error(manifest, format!("invalid workspace pattern: {error}"))
-        })?;
+        let glob = GlobBuilder::new(pattern)
+            .literal_separator(true)
+            .build()
+            .map_err(|error| {
+                manifest_error(manifest, format!("invalid workspace pattern: {error}"))
+            })?;
         if exclude {
             excludes.add(glob);
         } else {

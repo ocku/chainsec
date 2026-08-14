@@ -59,10 +59,11 @@ impl ScopedCredential {
         // normalized differently by a proxy or origin server.
         !has_ambiguous_escaped_path_character(self.scope.path())
             && !has_ambiguous_escaped_path_character(url.path())
+            // `Url::origin` compares the scheme, canonical host, and effective port.
+            // DNS resolution is deliberately not part of credential scoping.
             && self.scope.scheme() == "https"
             && url.scheme() == "https"
-            && self.scope.host_str() == url.host_str()
-            && self.scope.port_or_known_default() == url.port_or_known_default()
+            && self.scope.origin() == url.origin()
             && url
                 .path()
                 .strip_prefix(self.scope.path())

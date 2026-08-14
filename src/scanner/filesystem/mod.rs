@@ -1,5 +1,8 @@
 use std::{fs::File, io::Read, path::Path};
 
+#[cfg(unix)]
+use std::ffi::OsString;
+
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use walkdir::DirEntry;
 
@@ -10,26 +13,25 @@ use crate::{
 
 pub(super) const MAX_NON_SOURCE_ANALYSIS_BYTES: u64 = 1024 * 1024;
 
-pub(super) fn language_for_entry(entry: &DirEntry, root: &Path) -> Result<Option<Language>> {
-    let path = entry.path();
-    let language = language_for(path, &[]);
-    if language.is_some() {
-        return Ok(language);
-    }
-
-    let file = open_scanned_file(path, root)?;
-    let contents = read_file_prefix(file, path, 4096)?;
-    Ok(language_for(path, &contents))
-}
-
-pub(super) fn read_entry_contents(
+#[cfg(test)]
+pub(super) fn read_entry(
     entry: &DirEntry,
     root: &Path,
-    language: Option<Language>,
     limits: &EngineLimits,
-) -> Result<(Vec<u8>, u64)> {
+    extension_language: Option<Language>,
+) -> Result<(Option<Language>, Vec<u8>, u64)> {
+    let mut opener = ScannedFileOpener::new(root)?;
+    read_entry_with_opener(entry, &mut opener, limits, extension_language)
+}
+
+pub(super) fn read_entry_with_opener(
+    entry: &DirEntry,
+    opener: &mut ScannedFileOpener<'_>,
+    limits: &EngineLimits,
+    extension_language: Option<Language>,
+) -> Result<(Option<Language>, Vec<u8>, u64)> {
     let path = entry.path();
-    let file = open_scanned_file(path, root)?;
+    let mut file = opener.open(path)?;
     let metadata = file.metadata().map_err(|error| scan_error(path, error))?;
     if !metadata.file_type().is_file() {
         return Err(Error::Scan {
@@ -38,111 +40,186 @@ pub(super) fn read_entry_contents(
         });
     }
     let file_size = metadata.len();
+    let mut contents = if extension_language.is_some() {
+        Vec::new()
+    } else {
+        read_file_prefix(&mut file, path, 4096)?
+    };
+    let language = extension_language.or_else(|| language_for(path, &contents));
 
-    if language.is_some() && file_size > limits.max_source_file_bytes {
+    if language.is_some() && file_size > limits.max_source_file_size {
         return Err(Error::LimitExceeded {
             resource: format!("source file bytes ({})", path.display()),
-            limit: limits.max_source_file_bytes,
+            limit: limits.max_source_file_size,
         });
     }
 
-    let limit = if language.is_some() {
-        limits.max_source_file_bytes
+    if language.is_some() {
+        read_bounded_file_into(&mut file, path, limits.max_source_file_size, &mut contents)?;
     } else {
-        MAX_NON_SOURCE_ANALYSIS_BYTES
-    };
-    let contents = if language.is_some() {
-        read_bounded_file(file, path, limit)?
-    } else {
-        read_file_prefix(file, path, limit)?
-    };
+        read_file_prefix_into(
+            &mut file,
+            path,
+            MAX_NON_SOURCE_ANALYSIS_BYTES,
+            &mut contents,
+        )?;
+    }
     let observed_size = if language.is_some() {
         contents.len() as u64
     } else {
         file_size
     };
 
-    Ok((contents, observed_size))
+    Ok((language, contents, observed_size))
 }
 
-fn open_scanned_file(path: &Path, root: &Path) -> Result<File> {
+pub(super) struct ScannedFileOpener<'a> {
+    root: &'a Path,
     #[cfg(unix)]
-    {
-        open_scanned_file_unix(path, root).map_err(|error| scan_error(path, error))
+    root_directory: Option<File>,
+    #[cfg(unix)]
+    directory_stack: Vec<(OsString, File)>,
+}
+
+impl<'a> ScannedFileOpener<'a> {
+    pub(super) fn new(root: &'a Path) -> Result<Self> {
+        #[cfg(unix)]
+        let root_directory = if root.is_file() {
+            None
+        } else {
+            Some(open_directory_no_follow(root).map_err(|error| scan_error(root, error))?)
+        };
+
+        Ok(Self {
+            root,
+            #[cfg(unix)]
+            root_directory,
+            #[cfg(unix)]
+            directory_stack: Vec::new(),
+        })
     }
 
-    #[cfg(not(unix))]
-    {
-        File::open(path).map_err(|error| scan_error(path, error))
+    fn open(&mut self, path: &Path) -> Result<File> {
+        #[cfg(unix)]
+        {
+            self.open_unix(path)
+                .map_err(|error| scan_error(path, error))
+        }
+
+        #[cfg(not(unix))]
+        {
+            File::open(path).map_err(|error| scan_error(path, error))
+        }
+    }
+
+    #[cfg(unix)]
+    fn open_unix(&mut self, path: &Path) -> std::io::Result<File> {
+        use std::os::fd::AsRawFd;
+
+        // A single-file scan has no directory traversal to pin, but still needs
+        // O_NOFOLLOW for the final component.
+        let Some(root_directory) = &self.root_directory else {
+            return open_no_follow(path, libc::AT_FDCWD);
+        };
+        let relative = path.strip_prefix(self.root).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "path is outside scan root",
+            )
+        })?;
+        let components = relative
+            .components()
+            .map(|component| match component {
+                std::path::Component::Normal(name) => Ok(name.to_os_string()),
+                _ => Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "invalid relative scan path",
+                )),
+            })
+            .collect::<std::io::Result<Vec<_>>>()?;
+        let Some((file_name, directories)) = components.split_last() else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "scan root is not a file",
+            ));
+        };
+
+        let common_depth = self
+            .directory_stack
+            .iter()
+            .zip(directories)
+            .take_while(|((cached, _), requested)| cached == *requested)
+            .count();
+        self.directory_stack.truncate(common_depth);
+
+        for directory_name in &directories[common_depth..] {
+            let parent_fd = self
+                .directory_stack
+                .last()
+                .map_or(root_directory.as_raw_fd(), |(_, directory)| {
+                    directory.as_raw_fd()
+                });
+            let directory = open_component_no_follow(directory_name, parent_fd, true)?;
+            self.directory_stack
+                .push((directory_name.clone(), directory));
+        }
+
+        let parent_fd = self
+            .directory_stack
+            .last()
+            .map_or(root_directory.as_raw_fd(), |(_, directory)| {
+                directory.as_raw_fd()
+            });
+        open_component_no_follow(file_name, parent_fd, false)
     }
 }
 
 #[cfg(unix)]
-fn open_scanned_file_unix(path: &Path, root: &Path) -> std::io::Result<File> {
+fn open_directory_no_follow(path: &Path) -> std::io::Result<File> {
     use std::ffi::CString;
-    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::fd::FromRawFd;
     use std::os::unix::ffi::OsStrExt;
 
-    // A single-file scan has no directory traversal to pin, but still needs
-    // O_NOFOLLOW for the final component.
-    if root.is_file() {
-        return open_no_follow(path, libc::AT_FDCWD);
-    }
-
-    let relative = path.strip_prefix(root).map_err(|_| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "path is outside scan root",
-        )
-    })?;
-    let root_name = CString::new(root.as_os_str().as_bytes())
+    let name = CString::new(path.as_os_str().as_bytes())
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid scan root"))?;
-    let root_fd = unsafe {
+    let fd = unsafe {
         libc::open(
-            root_name.as_ptr(),
+            name.as_ptr(),
             libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
         )
     };
-    if root_fd < 0 {
+    if fd < 0 {
         return Err(std::io::Error::last_os_error());
     }
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
 
-    let mut directory = unsafe { File::from_raw_fd(root_fd) };
-    let mut components = relative.components().peekable();
-    while let Some(component) = components.next() {
-        let std::path::Component::Normal(name) = component else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "invalid relative scan path",
-            ));
-        };
-        let name = CString::new(name.as_bytes()).map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid scan path")
-        })?;
-        let flags = libc::O_RDONLY
-            | libc::O_CLOEXEC
-            | libc::O_NOFOLLOW
-            | if components.peek().is_some() {
-                libc::O_DIRECTORY
-            } else {
-                0
-            };
-        let fd = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
-        if fd < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        let next = unsafe { File::from_raw_fd(fd) };
-        if components.peek().is_some() {
-            directory = next;
-        } else {
-            return Ok(next);
-        }
+#[cfg(unix)]
+fn open_component_no_follow(
+    name: &std::ffi::OsStr,
+    directory_fd: std::os::fd::RawFd,
+    directory: bool,
+) -> std::io::Result<File> {
+    use std::ffi::CString;
+    use std::os::fd::FromRawFd;
+    use std::os::unix::ffi::OsStrExt;
+
+    let name = CString::new(name.as_bytes())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid scan path"))?;
+    let flags = libc::O_RDONLY
+        | libc::O_CLOEXEC
+        | libc::O_NOFOLLOW
+        | if directory { libc::O_DIRECTORY } else { 0 };
+    let fd = unsafe { libc::openat(directory_fd, name.as_ptr(), flags) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
     }
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
 
-    Err(std::io::Error::new(
-        std::io::ErrorKind::InvalidInput,
-        "scan root is not a file",
-    ))
+#[cfg(test)]
+fn open_scanned_file(path: &Path, root: &Path) -> Result<File> {
+    ScannedFileOpener::new(root)?.open(path)
 }
 
 #[cfg(unix)]
@@ -179,24 +256,46 @@ fn read_source_file(path: &Path, limit: u64) -> Result<Vec<u8>> {
     read_bounded_file(file, path, limit)
 }
 
+#[cfg(test)]
 fn read_bounded_file(mut file: File, path: &Path, limit: u64) -> Result<Vec<u8>> {
-    let bytes = read_file_prefix(&mut file, path, limit.saturating_add(1))?;
+    let mut bytes = Vec::new();
+    read_bounded_file_into(&mut file, path, limit, &mut bytes)?;
+    Ok(bytes)
+}
+
+fn read_bounded_file_into(
+    file: &mut File,
+    path: &Path,
+    limit: u64,
+    bytes: &mut Vec<u8>,
+) -> Result<()> {
+    read_file_prefix_into(file, path, limit.saturating_add(1), bytes)?;
     if bytes.len() as u64 > limit {
         return Err(Error::LimitExceeded {
             resource: format!("source file bytes ({})", path.display()),
             limit,
         });
     }
-    Ok(bytes)
+    Ok(())
 }
 
 fn read_file_prefix(mut file: impl Read, path: &Path, limit: u64) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
-    file.by_ref()
-        .take(limit)
-        .read_to_end(&mut bytes)
-        .map_err(|error| scan_error(path, error))?;
+    read_file_prefix_into(&mut file, path, limit, &mut bytes)?;
     Ok(bytes)
+}
+
+fn read_file_prefix_into(
+    file: &mut impl Read,
+    path: &Path,
+    limit: u64,
+    bytes: &mut Vec<u8>,
+) -> Result<()> {
+    let remaining = limit.saturating_sub(bytes.len() as u64);
+    file.take(remaining)
+        .read_to_end(bytes)
+        .map_err(|error| scan_error(path, error))?;
+    Ok(())
 }
 
 fn scan_error(path: &Path, error: std::io::Error) -> Error {

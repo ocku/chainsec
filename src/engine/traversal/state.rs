@@ -12,7 +12,7 @@ use crate::{
 
 use super::super::reporting::push_issue;
 
-pub(super) const MAX_CONCURRENT_FETCHES: usize = 16;
+pub(super) const MAX_CONCURRENT_FETCHES: usize = crate::engine::MAX_ANALYSIS_THREADS;
 
 #[derive(Clone, Default)]
 pub(super) struct DiscoveryContexts {
@@ -88,6 +88,7 @@ pub(super) struct Traversal {
     visited_sources: HashSet<PathBuf>,
     visited_contexts: HashMap<PathBuf, DiscoveryContexts>,
     visited_count: usize,
+    fetch_attempt_count: usize,
 }
 
 impl FetchKey {
@@ -164,6 +165,7 @@ impl Traversal {
             visited_sources: HashSet::new(),
             visited_contexts: HashMap::new(),
             visited_count: 0,
+            fetch_attempt_count: 0,
         }
     }
 
@@ -238,6 +240,16 @@ impl Traversal {
 
     pub(super) fn visited_count(&self) -> usize {
         self.visited_count
+    }
+
+    pub(super) fn remaining_fetch_attempts(&self, package_limit: usize) -> usize {
+        package_limit
+            .saturating_sub(1)
+            .saturating_sub(self.fetch_attempt_count)
+    }
+
+    pub(super) fn record_fetch_attempts(&mut self, count: usize) {
+        self.fetch_attempt_count = self.fetch_attempt_count.saturating_add(count);
     }
 }
 

@@ -4,18 +4,36 @@ use serde_json::{Value as JsonValue, json};
 use tempfile::tempdir;
 
 use super::{
-    LockfileSelection, enrich,
+    LockfileSelection, enrich as enrich_with_limits,
     jsonc::strip_jsonc,
-    lockfile::{LockVersion, enrich_dependency, validate_lockfile_version},
+    lockfile::{
+        LockVersion, enrich_dependency, enrich_dependency_with_redirect_limit,
+        validate_lockfile_version,
+    },
     parse, select_manifest,
 };
 use crate::{
     manifests::shared::{ManifestRoot, with_manifest_roots},
-    model::{Dependency, Ecosystem},
+    model::{Dependency, Ecosystem, EngineLimits},
 };
 
 fn dependency(requirement: &str) -> Dependency {
     Dependency::declared(Ecosystem::Deno, "fixture", requirement)
+}
+
+fn enrich(
+    root: &Path,
+    selection: &LockfileSelection,
+    dependencies: &mut [Dependency],
+    lockfiles: &mut Vec<std::path::PathBuf>,
+) -> crate::Result<()> {
+    enrich_with_limits(
+        root,
+        selection,
+        dependencies,
+        lockfiles,
+        &EngineLimits::default(),
+    )
 }
 
 fn parse_manifest(root: &Path) -> super::ParsedDeno {
@@ -168,18 +186,93 @@ fn filters_non_fetchable_import_map_targets() {
 }
 
 #[test]
+fn recognizes_mixed_case_remote_import_map_urls() {
+    let root = tempdir().unwrap();
+    fs::write(
+        root.path().join("deno.json"),
+        r#"{"imports":{"remote":"HTTPS://example.test/mod.ts"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("deno.lock"),
+        r#"{"version":"4","remote":{"https://example.test/mod.ts":"sha256-remote"}}"#,
+    )
+    .unwrap();
+
+    let mut parsed = parse_manifest(root.path());
+    assert_eq!(
+        parsed.dependencies[0].requirement,
+        "HTTPS://example.test/mod.ts"
+    );
+    enrich(
+        root.path(),
+        &LockfileSelection::default(),
+        &mut parsed.dependencies,
+        &mut Vec::new(),
+    )
+    .unwrap();
+    assert_eq!(
+        parsed.dependencies[0].integrity.as_deref(),
+        Some("sha256-remote")
+    );
+    assert!(parsed.dependencies[0].deno_lockfile_snapshot.is_some());
+}
+
+#[test]
 fn normalizes_npm_subpath_specifiers() {
     assert_eq!(
-        super::normalize_npm_subpath("npm:lodash@4.17.21/fp"),
+        super::import_map::normalize_npm_subpath("npm:lodash@4.17.21/fp"),
         "npm:lodash@4.17.21"
     );
     assert_eq!(
-        super::normalize_npm_subpath("npm:@scope/package@1.2.3/subpath"),
+        super::import_map::normalize_npm_subpath("npm:@scope/package@1.2.3/subpath"),
         "npm:@scope/package@1.2.3"
     );
     assert_eq!(
-        super::normalize_npm_subpath("npm:@scope/package/subpath"),
+        super::import_map::normalize_npm_subpath("npm:@scope/package/subpath"),
         "npm:@scope/package"
+    );
+    assert_eq!(
+        super::import_map::normalize_jsr_subpath("jsr:@scope/package@1.2.3/subpath"),
+        "jsr:@scope/package@1.2.3"
+    );
+    assert_eq!(
+        super::import_map::normalize_jsr_subpath("jsr:/@scope/package@1.2.3/subpath"),
+        "jsr:@scope/package@1.2.3"
+    );
+}
+
+#[test]
+fn normalizes_url_style_registry_import_map_specifiers() {
+    let root = tempdir().unwrap();
+    fs::write(
+        root.path().join("deno.json"),
+        r#"{"imports":{"path":"jsr:/@std/path@^1.0.0/posix"}}"#,
+    )
+    .unwrap();
+    let digest = "a".repeat(64);
+    fs::write(
+        root.path().join("deno.lock"),
+        format!(
+            r#"{{"version":"5","specifiers":{{"jsr:/@std/path@^1.0.0/posix":"@std/path@1.0.8"}},"jsr":{{"@std/path@1.0.8":{{"integrity":"{digest}"}}}}}}"#
+        ),
+    )
+    .unwrap();
+
+    let parsed = parse_manifest(root.path());
+    assert_eq!(parsed.dependencies[0].requirement, "jsr:@std/path@^1.0.0");
+    let mut dependencies = parsed.dependencies;
+    enrich(
+        root.path(),
+        &LockfileSelection::default(),
+        &mut dependencies,
+        &mut Vec::new(),
+    )
+    .unwrap();
+    assert_eq!(dependencies[0].resolved_version.as_deref(), Some("1.0.8"));
+    assert_eq!(
+        dependencies[0].integrity.as_deref(),
+        Some(format!("sha256:{digest}").as_str())
     );
 }
 
@@ -249,7 +342,7 @@ fn discovers_workspace_members_with_inherited_and_overridden_imports() {
     fs::create_dir_all(root.path().join("packages/b")).unwrap();
     fs::write(
         root.path().join("packages/b/package.json"),
-        r#"{"dependencies":{"package-only":"4","local":"workspace:*"}}"#,
+        r#"{"dependencies":{"package-only":"4","local":"workspace:*"},"devDependencies":{"development-only":"5"}}"#,
     )
     .unwrap();
 
@@ -265,6 +358,7 @@ fn discovers_workspace_members_with_inherited_and_overridden_imports() {
     assert!(requirements.contains("jsr:@scope/root@1"));
     assert!(requirements.contains("npm:member@3"));
     assert!(requirements.contains("npm:package-only@4"));
+    assert!(requirements.contains("npm:development-only@5"));
     assert!(
         !requirements
             .iter()
@@ -302,6 +396,155 @@ fn resolves_default_and_named_catalog_dependencies_in_workspace_package_json() {
 }
 
 #[test]
+fn preserves_non_registry_workspace_package_json_dependencies() {
+    let root = tempdir().unwrap();
+    let revision = "0123456789012345678901234567890123456789";
+    fs::write(
+        root.path().join("deno.json"),
+        r#"{"workspace":["packages/*"]}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(root.path().join("packages/app")).unwrap();
+    fs::write(
+        root.path().join("packages/app/package.json"),
+        format!(
+            r#"{{"dependencies":{{"github":"github:owner/repository#{revision}","git":"git+ssh://git@example.test/owner/repository.git#main","tarball":"https://example.test/tool.tgz","jsr":"jsr:@std/assert@^1"}}}}"#
+        ),
+    )
+    .unwrap();
+
+    let dependencies = parse_manifest(root.path()).dependencies;
+    let github = dependencies
+        .iter()
+        .find(|dependency| dependency.name == "github")
+        .unwrap();
+    assert_eq!(
+        github.requirement,
+        format!("github:owner/repository#{revision}")
+    );
+    assert_eq!(github.resolved_version.as_deref(), Some(revision));
+    assert_eq!(
+        github.source_url.as_deref(),
+        Some(format!("https://codeload.github.com/owner/repository/tar.gz/{revision}").as_str())
+    );
+
+    let git = dependencies
+        .iter()
+        .find(|dependency| dependency.name == "git")
+        .unwrap();
+    assert_eq!(
+        git.requirement,
+        "git+ssh://git@example.test/owner/repository.git#main"
+    );
+
+    let tarball = dependencies
+        .iter()
+        .find(|dependency| dependency.name == "tarball")
+        .unwrap();
+    assert_eq!(tarball.requirement, "https://example.test/tool.tgz");
+    assert_eq!(
+        tarball.source_url.as_deref(),
+        Some("https://example.test/tool.tgz")
+    );
+
+    let jsr = dependencies
+        .iter()
+        .find(|dependency| dependency.name == "jsr")
+        .unwrap();
+    assert_eq!(jsr.requirement, "jsr:@std/assert@^1");
+}
+
+#[test]
+fn preserves_case_insensitive_package_url_and_git_protocols() {
+    let root = tempdir().unwrap();
+    fs::write(
+        root.path().join("deno.json"),
+        r#"{"workspace":["packages/*"]}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(root.path().join("packages/app")).unwrap();
+    fs::write(
+        root.path().join("packages/app/package.json"),
+        r#"{"dependencies":{"tarball":"HTTPS://example.test/tool.tgz","git":"GIT+SSH://git@example.test/owner/repository.git#main"}}"#,
+    )
+    .unwrap();
+
+    let dependencies = parse_manifest(root.path()).dependencies;
+    let tarball = dependencies
+        .iter()
+        .find(|dependency| dependency.name == "tarball")
+        .unwrap();
+    assert_eq!(tarball.requirement, "HTTPS://example.test/tool.tgz");
+    assert_eq!(
+        tarball.source_url.as_deref(),
+        Some("HTTPS://example.test/tool.tgz")
+    );
+
+    let git = dependencies
+        .iter()
+        .find(|dependency| dependency.name == "git")
+        .unwrap();
+    assert_eq!(
+        git.requirement,
+        "GIT+SSH://git@example.test/owner/repository.git#main"
+    );
+}
+
+#[test]
+fn root_package_json_catalogs_override_deno_catalogs() {
+    let root = tempdir().unwrap();
+    fs::write(
+        root.path().join("deno.json"),
+        r#"{"workspace":["packages/*"],"catalog":{"react":"^18"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("package.json"),
+        r#"{"catalog":{"react":"^19"},"catalogs":{"testing":{"vitest":"^3"}}}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(root.path().join("packages/app")).unwrap();
+    fs::write(
+        root.path().join("packages/app/package.json"),
+        r#"{"dependencies":{"react":"catalog:"},"devDependencies":{"vitest":"catalog:testing"}}"#,
+    )
+    .unwrap();
+
+    let requirements = parse_manifest(root.path())
+        .dependencies
+        .into_iter()
+        .map(|dependency| dependency.requirement)
+        .collect::<std::collections::HashSet<_>>();
+    assert!(requirements.contains("npm:react@^19"));
+    assert!(requirements.contains("npm:vitest@^3"));
+    assert!(!requirements.contains("npm:react@^18"));
+}
+
+#[test]
+fn resolves_catalog_imports_in_workspace_member_config() {
+    let root = tempdir().unwrap();
+    fs::write(
+        root.path().join("deno.json"),
+        r#"{"workspace":["packages/*"],"catalog":{"chalk":"^5"},"catalogs":{"testing":{"vitest":"^3"}}}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(root.path().join("packages/app")).unwrap();
+    fs::write(
+        root.path().join("packages/app/deno.json"),
+        r#"{"imports":{"chalk":"catalog:","vitest":"catalog:testing"}}"#,
+    )
+    .unwrap();
+
+    let requirements = parse_manifest(root.path())
+        .dependencies
+        .into_iter()
+        .map(|dependency| dependency.requirement)
+        .collect::<std::collections::HashSet<_>>();
+    assert!(requirements.contains("npm:chalk@^5"));
+    assert!(requirements.contains("npm:vitest@^3"));
+}
+
+#[test]
 fn rejects_missing_catalog_dependency_in_workspace_package_json() {
     let root = tempdir().unwrap();
     fs::write(
@@ -332,7 +575,11 @@ fn workspace_patterns_apply_exclusions_and_require_confined_paths() {
         r#"{"workspace":["packages/*","!packages/ignored"]}"#,
     )
     .unwrap();
-    for (member, dependency) in [("included", "included"), ("ignored", "ignored")] {
+    for (member, dependency) in [
+        ("included", "included"),
+        ("ignored", "ignored"),
+        ("included/nested", "nested"),
+    ] {
         fs::create_dir_all(root.path().join("packages").join(member)).unwrap();
         fs::write(
             root.path().join("packages").join(member).join("deno.json"),
@@ -341,7 +588,15 @@ fn workspace_patterns_apply_exclusions_and_require_confined_paths() {
         .unwrap();
     }
 
-    let parsed = parse_manifest(root.path());
+    let parsed = super::parse_with_limits(
+        root.path(),
+        &root.path().join("deno.json"),
+        &EngineLimits {
+            max_package_depth: 4,
+            ..EngineLimits::default()
+        },
+    )
+    .unwrap();
     assert!(
         parsed
             .dependencies
@@ -352,7 +607,7 @@ fn workspace_patterns_apply_exclusions_and_require_confined_paths() {
         !parsed
             .dependencies
             .iter()
-            .any(|dependency| dependency.name == "ignored")
+            .any(|dependency| dependency.name == "ignored" || dependency.name == "nested")
     );
 
     fs::write(
@@ -364,73 +619,118 @@ fn workspace_patterns_apply_exclusions_and_require_confined_paths() {
 }
 
 #[test]
-fn bounds_import_mappings_and_aggregate_dependencies() {
+fn dependency_expansion_respects_the_configured_package_limit() {
     let root = tempdir().unwrap();
-    let entries = (0..=super::MAX_IMPORT_MAPPINGS)
+    let manifest = root.path().join("deno.json");
+    fs::write(
+        &manifest,
+        r#"{"workspace":["packages/*"],"imports":{"root":"npm:root@1"}}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(root.path().join("packages/app")).unwrap();
+    fs::write(
+        root.path().join("packages/app/deno.json"),
+        r#"{"imports":{"member":"npm:member@1"}}"#,
+    )
+    .unwrap();
+
+    let error = super::parse_with_limits(
+        root.path(),
+        &manifest,
+        &EngineLimits {
+            max_packages: 1,
+            ..EngineLimits::default()
+        },
+    )
+    .unwrap_err();
+
+    assert!(matches!(error, crate::error::Error::LimitExceeded { .. }));
+    assert!(error.to_string().contains("manifest dependencies"));
+}
+
+#[test]
+fn workspace_traversal_only_fails_for_matching_depth_boundaries() {
+    let root = tempdir().unwrap();
+    let manifest = root.path().join("deno.json");
+    fs::write(&manifest, r#"{"workspace":["packages/*"]}"#).unwrap();
+    fs::create_dir_all(root.path().join("packages/app")).unwrap();
+    fs::write(root.path().join("packages/app/deno.json"), "{}").unwrap();
+    let limits = EngineLimits {
+        max_package_depth: 1,
+        ..EngineLimits::default()
+    };
+
+    let parsed = super::parse_with_limits(root.path(), &manifest, &limits).unwrap();
+    assert!(parsed.dependencies.is_empty());
+
+    fs::write(&manifest, r#"{"workspace":["packages"]}"#).unwrap();
+    let depth_error = super::parse_with_limits(root.path(), &manifest, &limits).unwrap_err();
+    assert!(matches!(
+        depth_error,
+        crate::error::Error::LimitExceeded { ref resource, .. } if resource == "workspace depth"
+    ));
+}
+
+#[test]
+fn workspace_traversal_respects_the_configured_entry_limit() {
+    let root = tempdir().unwrap();
+    let manifest = root.path().join("deno.json");
+    fs::write(&manifest, r#"{"workspace":["packages/*"]}"#).unwrap();
+    fs::create_dir_all(root.path().join("packages/app")).unwrap();
+    fs::write(root.path().join("packages/app/deno.json"), "{}").unwrap();
+
+    let error = super::parse_with_limits(
+        root.path(),
+        &manifest,
+        &EngineLimits {
+            max_package_depth: 3,
+            max_source_files: 1,
+            ..EngineLimits::default()
+        },
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("workspace entries"));
+}
+
+#[test]
+fn rejects_catalogs_in_workspace_members() {
+    let root = tempdir().unwrap();
+    fs::write(
+        root.path().join("deno.json"),
+        r#"{"workspace":["packages/*"]}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(root.path().join("packages/app")).unwrap();
+    fs::write(
+        root.path().join("packages/app/deno.json"),
+        r#"{"catalog":{"example":"1.0.0"}}"#,
+    )
+    .unwrap();
+
+    let error = parse(root.path(), &root.path().join("deno.json")).unwrap_err();
+    assert!(error.to_string().contains("may not configure catalogs"));
+}
+
+#[test]
+fn does_not_count_inherited_root_mappings_for_each_workspace_member() {
+    let root = tempdir().unwrap();
+    let imports = (0..65)
         .map(|index| format!(r#""dependency-{index}":"npm:dependency-{index}@1""#))
         .collect::<Vec<_>>()
         .join(",");
     fs::write(
         root.path().join("deno.json"),
-        format!(r#"{{"imports":{{{entries}}}}}"#),
+        format!(r#"{{"workspace":["packages/*"],"imports":{{{imports}}}}}"#),
     )
     .unwrap();
-    let error = parse(root.path(), &root.path().join("deno.json")).unwrap_err();
-    assert!(error.to_string().contains("import mappings exceed"));
-
-    let mappings = super::ImportMappings {
-        imports: (0..super::MAX_DISCOVERED_DEPENDENCIES)
-            .map(|index| (format!("dependency-{index}"), "npm:dependency@1".to_owned()))
-            .collect(),
-        scoped: Vec::new(),
-    };
-    let error = super::ensure_dependency_limit(
-        root.path(),
-        super::mappings_to_dependencies(&mappings).len() + 1,
-    )
-    .unwrap_err();
-    assert!(error.to_string().contains("discovered dependencies exceed"));
-}
-
-#[test]
-fn bounds_workspace_patterns_before_glob_compilation() {
-    let root = tempdir().unwrap();
-    let patterns = (0..=super::MAX_WORKSPACE_PATTERNS)
-        .map(|index| {
-            if index % 2 == 0 {
-                format!(r#""packages/{index}""#)
-            } else {
-                format!(r#""!packages/{index}""#)
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-    fs::write(
-        root.path().join("deno.json"),
-        format!(r#"{{"workspace":[{patterns}]}}"#),
-    )
-    .unwrap();
-
-    let error = parse(root.path(), &root.path().join("deno.json")).unwrap_err();
-    assert!(error.to_string().contains("workspace patterns exceed"));
-}
-
-#[test]
-fn bounds_workspace_member_expansion() {
-    let root = tempdir().unwrap();
-    fs::write(
-        root.path().join("deno.json"),
-        r#"{"workspace":["members/*"]}"#,
-    )
-    .unwrap();
-    for index in 0..=super::MAX_WORKSPACE_MEMBERS {
-        let member = root.path().join("members").join(index.to_string());
+    for index in 0..2 {
+        let member = root.path().join("packages").join(index.to_string());
         fs::create_dir_all(&member).unwrap();
         fs::write(member.join("deno.json"), "{}").unwrap();
     }
 
-    let error = parse(root.path(), &root.path().join("deno.json")).unwrap_err();
-    assert!(error.to_string().contains("member limit"));
+    let parsed = parse_manifest(root.path());
+    assert_eq!(parsed.dependencies.len(), 65);
 }
 
 #[cfg(unix)]
@@ -473,21 +773,38 @@ fn rejects_external_import_map_cycles() {
 }
 
 #[test]
-fn bounds_external_import_map_recursion() {
+fn external_import_maps_respect_the_global_depth_limit() {
     let root = tempdir().unwrap();
     let manifest = root.path().join("deno.json");
-    fs::write(&manifest, r#"{"importMap":"map-0.json"}"#).unwrap();
-    for index in 0..32 {
-        fs::write(
-            root.path().join(format!("map-{index}.json")),
-            format!(r#"{{"importMap":"map-{}.json"}}"#, index + 1),
-        )
-        .unwrap();
-    }
-    fs::write(root.path().join("map-32.json"), r#"{"imports":{}}"#).unwrap();
+    fs::write(&manifest, r#"{"importMap":"a.json"}"#).unwrap();
+    fs::write(root.path().join("a.json"), r#"{"importMap":"b.json"}"#).unwrap();
+    fs::write(
+        root.path().join("b.json"),
+        r#"{"imports":{"demo":"npm:demo@1"}}"#,
+    )
+    .unwrap();
 
-    let error = parse(root.path(), &manifest).unwrap_err();
-    assert!(error.to_string().contains("recursion exceeds"));
+    let parsed = super::parse_with_limits(
+        root.path(),
+        &manifest,
+        &EngineLimits {
+            max_package_depth: 2,
+            ..EngineLimits::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(parsed.dependencies.len(), 1);
+
+    let error = super::parse_with_limits(
+        root.path(),
+        &manifest,
+        &EngineLimits {
+            max_package_depth: 1,
+            ..EngineLimits::default()
+        },
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("depth limit"));
 }
 
 #[cfg(unix)]
@@ -600,6 +917,46 @@ fn resolves_v3_packages_specifiers_and_npm_layout() {
 }
 
 #[test]
+fn does_not_resolve_ambiguous_registry_subpath_specifiers() {
+    let lockfile = json!({
+        "version": "4",
+        "specifiers": {
+            "npm:example@^1/first": "example@1.1.0",
+            "npm:example@^1/second": "example@1.2.0"
+        },
+        "npm": {
+            "example@1.1.0": {"integrity": "sha512-first"},
+            "example@1.2.0": {"integrity": "sha512-second"}
+        }
+    });
+    let mut npm = dependency("npm:example@^1");
+
+    assert!(!enrich_dependency(&lockfile, LockVersion::V4, &mut npm));
+    assert!(npm.resolved_version.is_none());
+    assert!(npm.integrity.is_none());
+}
+
+#[test]
+fn resolves_jsr_subpath_specifiers() {
+    let digest = "a".repeat(64);
+    let lockfile = json!({
+        "version": "4",
+        "specifiers": {
+            "jsr:@std/path@^1.0.0/posix": "@std/path@1.0.8"
+        },
+        "jsr": {"@std/path@1.0.8": {"integrity": digest}}
+    });
+    let mut jsr = dependency("jsr:@std/path@^1.0.0/posix");
+
+    assert!(enrich_dependency(&lockfile, LockVersion::V4, &mut jsr));
+    assert_eq!(jsr.resolved_version.as_deref(), Some("1.0.8"));
+    assert_eq!(
+        jsr.integrity.as_deref(),
+        Some(format!("sha256:{digest}").as_str())
+    );
+}
+
+#[test]
 fn rejects_out_of_range_npm_and_jsr_specifiers() {
     let lockfile = json!({
         "version": "4",
@@ -618,6 +975,64 @@ fn rejects_out_of_range_npm_and_jsr_specifiers() {
     let mut jsr = dependency("jsr:@scope/example@^1.0.0");
     assert!(!enrich_dependency(&lockfile, LockVersion::V4, &mut jsr));
     assert!(jsr.resolved_version.is_none());
+}
+
+#[test]
+fn resolves_v5_redirected_remote_dependencies() {
+    let root = tempdir().unwrap();
+    fs::write(
+        root.path().join("deno.lock"),
+        r#"{"version":"5","redirects":{"https://origin.example/mod.ts":"https://cdn.example/mod.ts"},"remote":{"https://cdn.example/mod.ts":"sha256-redirected"}}"#,
+    )
+    .unwrap();
+    let mut dependencies = vec![dependency("https://origin.example/mod.ts")];
+
+    enrich(
+        root.path(),
+        &LockfileSelection::default(),
+        &mut dependencies,
+        &mut Vec::new(),
+    )
+    .unwrap();
+    assert_eq!(
+        dependencies[0].integrity.as_deref(),
+        Some("sha256-redirected")
+    );
+    assert!(dependencies[0].deno_lockfile_snapshot.is_some());
+}
+
+#[test]
+fn rejects_remote_redirect_chains_beyond_the_hop_limit() {
+    let redirects = (0..2)
+        .map(|index| {
+            (
+                format!("https://example.test/{index}"),
+                JsonValue::String(format!("https://example.test/{}", index + 1)),
+            )
+        })
+        .collect::<serde_json::Map<String, JsonValue>>();
+    let lockfile = json!({
+        "version": "5",
+        "redirects": redirects,
+        "remote": {"https://example.test/2": "sha256-remote"}
+    });
+    let mut remote = dependency("https://example.test/0");
+
+    assert!(!enrich_dependency_with_redirect_limit(
+        &lockfile,
+        LockVersion::V5,
+        &mut remote,
+        1,
+    ));
+    assert!(remote.integrity.is_none());
+
+    assert!(enrich_dependency_with_redirect_limit(
+        &lockfile,
+        LockVersion::V5,
+        &mut remote,
+        2,
+    ));
+    assert_eq!(remote.integrity.as_deref(), Some("sha256-remote"));
 }
 
 #[test]
@@ -722,6 +1137,38 @@ fn rejects_custom_lockfile_through_intermediate_symlink() {
             &mut lockfiles,
         )
         .is_err()
+    );
+}
+
+#[test]
+fn remote_dependencies_share_their_lockfile_snapshot() {
+    let root = tempdir().unwrap();
+    fs::write(
+        root.path().join("deno.lock"),
+        r#"{"version":"4","remote":{"https://example.test/a.ts":"sha256-a","https://example.test/b.ts":"sha256-b"}}"#,
+    )
+    .unwrap();
+    let mut dependencies = vec![
+        dependency("https://example.test/a.ts"),
+        dependency("https://example.test/b.ts"),
+    ];
+
+    enrich(
+        root.path(),
+        &LockfileSelection::default(),
+        &mut dependencies,
+        &mut Vec::new(),
+    )
+    .unwrap();
+
+    assert!(
+        dependencies[0]
+            .deno_lockfile_snapshot
+            .as_ref()
+            .unwrap()
+            .shares_remote_integrities_with(
+                dependencies[1].deno_lockfile_snapshot.as_ref().unwrap()
+            )
     );
 }
 

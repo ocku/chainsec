@@ -1,7 +1,10 @@
-use std::{collections::HashMap, fs};
+use std::{collections::HashMap, fs, path::PathBuf};
 
 use super::*;
-use crate::manifests::shared::{ManifestRoot, with_manifest_roots};
+use crate::{
+    manifests::shared::{ManifestRoot, with_manifest_roots},
+    model::EngineLimits,
+};
 
 #[test]
 fn includes_development_dependencies_with_npm_precedence() {
@@ -32,6 +35,62 @@ fn includes_development_dependencies_with_npm_precedence() {
     assert_eq!(requirements["dev"], "development");
     assert_eq!(requirements["dev-peer"], "development");
     assert_eq!(requirements["peer"], "peer");
+}
+
+#[test]
+fn workspace_single_star_does_not_include_nested_members() {
+    let temporary = tempfile::tempdir().unwrap();
+    let package = temporary.path().join("package.json");
+    fs::write(&package, r#"{"workspaces":["packages/*"]}"#).unwrap();
+    fs::create_dir_all(temporary.path().join("packages/app/nested")).unwrap();
+    fs::write(temporary.path().join("packages/app/package.json"), "{}").unwrap();
+    fs::write(
+        temporary.path().join("packages/app/nested/package.json"),
+        "{}",
+    )
+    .unwrap();
+
+    let root = ManifestRoot::open(temporary.path()).unwrap();
+    assert_eq!(
+        workspace_members(&root, &package, &EngineLimits::default()).unwrap(),
+        vec![PathBuf::from("packages/app")]
+    );
+}
+
+#[test]
+fn workspace_traversal_respects_configured_limits() {
+    let temporary = tempfile::tempdir().unwrap();
+    let package = temporary.path().join("package.json");
+    fs::write(&package, r#"{"workspaces":["packages/**"]}"#).unwrap();
+    fs::create_dir_all(temporary.path().join("packages/app/nested")).unwrap();
+    fs::write(temporary.path().join("packages/app/package.json"), "{}").unwrap();
+
+    let root = ManifestRoot::open(temporary.path()).unwrap();
+    let entry_error = workspace_members(
+        &root,
+        &package,
+        &EngineLimits {
+            max_package_depth: 3,
+            max_source_files: 1,
+            ..EngineLimits::default()
+        },
+    )
+    .unwrap_err();
+    assert!(entry_error.to_string().contains("workspace entries"));
+
+    let depth_limits = EngineLimits {
+        max_package_depth: 1,
+        ..EngineLimits::default()
+    };
+    let members = workspace_members(&root, &package, &depth_limits).unwrap();
+    assert!(members.is_empty());
+
+    fs::write(&package, r#"{"workspaces":["packages"]}"#).unwrap();
+    let depth_error = workspace_members(&root, &package, &depth_limits).unwrap_err();
+    assert!(matches!(
+        depth_error,
+        crate::error::Error::LimitExceeded { ref resource, .. } if resource == "workspace depth"
+    ));
 }
 
 #[test]

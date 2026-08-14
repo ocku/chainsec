@@ -112,6 +112,10 @@ impl ArtifactRepositories {
         Ok(self)
     }
 
+    pub(super) fn npm_metadata_base_url(&self) -> &Url {
+        &self.npm_metadata_base_url
+    }
+
     pub fn npm_metadata_url(&self, package: &str) -> Result<Url> {
         append_path_segments(&self.npm_metadata_base_url, [package])
     }

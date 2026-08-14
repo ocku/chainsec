@@ -40,6 +40,18 @@ fn accepts_canonical_github_commit_archive() {
 }
 
 #[test]
+fn unverified_pinned_github_archives_from_distinct_repositories_have_distinct_ids() {
+    let first = dependency(&format!(
+        "https://codeload.github.com/first-owner/example/tar.gz/{REVISION}"
+    ));
+    let second = dependency(&format!(
+        "https://codeload.github.com/second-owner/example/tar.gz/{REVISION}"
+    ));
+
+    assert_ne!(first.id(), second.id());
+}
+
+#[test]
 fn rejects_noncanonical_github_archive_urls() {
     let cases = [
         format!("https://codeload.github.com.attacker.example/owner/repository/tar.gz/{REVISION}"),

@@ -171,13 +171,27 @@ fn local_dependency_snapshot_rejects_too_many_entries() {
 }
 
 #[test]
+fn local_dependency_snapshot_accepts_bytes_at_the_exact_limit() {
+    let project = tempfile::tempdir().unwrap();
+    let dependency_directory = project.path().join("dep");
+    fs::create_dir(&dependency_directory).unwrap();
+    fs::write(dependency_directory.join("index.js"), b"12345").unwrap();
+    let limits = EngineLimits {
+        max_extracted_size: 5,
+        ..EngineLimits::default()
+    };
+
+    fetch_local_with_limits(project.path(), limits).unwrap();
+}
+
+#[test]
 fn local_dependency_snapshot_rejects_too_many_bytes() {
     let project = tempfile::tempdir().unwrap();
     let dependency_directory = project.path().join("dep");
     fs::create_dir(&dependency_directory).unwrap();
     fs::write(dependency_directory.join("index.js"), b"123456").unwrap();
     let limits = EngineLimits {
-        max_extracted_bytes: 5,
+        max_extracted_size: 5,
         ..EngineLimits::default()
     };
 
@@ -195,16 +209,20 @@ fn local_dependency_snapshot_rejects_excessive_path_depth() {
     let project = tempfile::tempdir().unwrap();
     let mut directory = project.path().join("dep");
     fs::create_dir(&directory).unwrap();
-    for _ in 0..=super::MAX_LOCAL_PATH_COMPONENTS {
+    let limits = EngineLimits {
+        max_file_depth: 4,
+        ..EngineLimits::default()
+    };
+    for _ in 0..=limits.max_file_depth {
         directory = directory.join("nested");
         fs::create_dir(&directory).unwrap();
     }
 
-    let error = fetch_local_with_limits(project.path(), EngineLimits::default()).unwrap_err();
+    let error = fetch_local_with_limits(project.path(), limits).unwrap_err();
 
     assert!(matches!(
         error,
         crate::Error::Policy { operation, message }
-            if operation == "local dependency" && message.contains("deeper than 128 components")
+            if operation == "local dependency" && message.contains("deeper than 4 components")
     ));
 }

@@ -1,9 +1,15 @@
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
+    collections::{HashMap, HashSet},
+    fmt,
     fs::{self, File, OpenOptions},
     io::{self, Read},
     path::{Component, Path, PathBuf},
+    rc::Rc,
 };
+
+use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
+use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 
 #[cfg(unix)]
 use std::{
@@ -14,9 +20,107 @@ use std::{
     },
 };
 
-use crate::error::{Error, Result};
+use crate::{
+    error::{Error, Result},
+    model::{DEFAULT_MAX_MANIFEST_FILE_SIZE, Dependency},
+};
 
-const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
+/// Maximum bytes accepted from any declaration, workspace manifest, import map, or lockfile.
+///
+/// Manifest parsers share this boundary so no ecosystem can accidentally accept larger untrusted
+/// parser inputs than another. This is intentionally independent of source and archive limits.
+pub(super) const MAX_MANIFEST_FILE_BYTES: u64 = DEFAULT_MAX_MANIFEST_FILE_SIZE;
+
+thread_local! {
+    static ACTIVE_MANIFEST_FILE_LIMITS: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Collects unique manifest dependencies while enforcing the package budget at insertion time.
+///
+/// Parsers use this directly while expanding declaration sections, groups, and workspaces so they
+/// never need to build an over-limit intermediate dependency vector.
+pub(super) struct BoundedDependencyCollector {
+    dependencies: Vec<Dependency>,
+    known: HashSet<Dependency>,
+    max_packages: usize,
+}
+
+impl BoundedDependencyCollector {
+    pub(super) fn new(max_packages: usize) -> Self {
+        Self {
+            dependencies: Vec::new(),
+            known: HashSet::new(),
+            max_packages,
+        }
+    }
+
+    pub(super) fn from_dependencies(
+        dependencies: Vec<Dependency>,
+        max_packages: usize,
+    ) -> Result<Self> {
+        let mut collector = Self::new(max_packages);
+        collector.extend(dependencies)?;
+        Ok(collector)
+    }
+
+    pub(super) fn push(&mut self, dependency: Dependency) -> Result<()> {
+        if self.known.contains(&dependency) {
+            return Ok(());
+        }
+        if self.dependencies.len() >= self.max_packages {
+            return Err(Error::LimitExceeded {
+                resource: "manifest dependencies".to_owned(),
+                limit: u64::try_from(self.max_packages).unwrap_or(u64::MAX),
+            });
+        }
+        self.known.insert(dependency.clone());
+        self.dependencies.push(dependency);
+        Ok(())
+    }
+
+    pub(super) fn extend(&mut self, incoming: impl IntoIterator<Item = Dependency>) -> Result<()> {
+        for dependency in incoming {
+            self.push(dependency)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn into_dependencies(self) -> Vec<Dependency> {
+        self.dependencies
+    }
+}
+
+pub(super) fn extend_dependencies_bounded(
+    dependencies: &mut Vec<Dependency>,
+    incoming: impl IntoIterator<Item = Dependency>,
+    max_packages: usize,
+) -> Result<()> {
+    let existing = std::mem::take(dependencies);
+    let mut collector = BoundedDependencyCollector::from_dependencies(existing, max_packages)?;
+    let result = collector.extend(incoming);
+    *dependencies = collector.into_dependencies();
+    result
+}
+
+/// Retains a unique workspace member without allowing workspace expansion to exceed the same
+/// configured package budget used by every manifest ecosystem.
+pub(super) fn push_workspace_member_bounded(
+    members: &mut Vec<PathBuf>,
+    member: PathBuf,
+    max_packages: usize,
+) -> Result<()> {
+    if members.contains(&member) {
+        return Ok(());
+    }
+    if members.len() >= max_packages {
+        return Err(Error::LimitExceeded {
+            resource: "workspace members".to_owned(),
+            limit: u64::try_from(max_packages).unwrap_or(u64::MAX),
+        });
+    }
+    members.push(member);
+    Ok(())
+}
 
 thread_local! {
     static ACTIVE_ROOTS: RefCell<Vec<ActiveRoot>> = const { RefCell::new(Vec::new()) };
@@ -93,7 +197,7 @@ fn is_open_file(file: Result<File>, path: &Path) -> Result<bool> {
 #[cfg(unix)]
 pub(super) fn walk_beneath(
     directory: &Path,
-    max_depth: usize,
+    max_package_depth: usize,
     visit: &mut impl FnMut(&Path, usize, RootedFileType) -> Result<()>,
 ) -> Result<()> {
     let directory = absolute_lexical(directory).map_err(|source| io_error(directory, source))?;
@@ -112,11 +216,56 @@ pub(super) fn walk_beneath(
         Some(descriptor) => descriptor?,
         None => ManifestRoot::open(&directory)?.directory,
     };
-    walk_directory(descriptor, &directory, Path::new(""), 0, max_depth, visit)
+    walk_directory(
+        descriptor,
+        &directory,
+        Path::new(""),
+        0,
+        max_package_depth,
+        visit,
+    )
 }
 
+#[cfg(unix)]
+pub(super) fn walk_workspace_beneath(
+    directory: &Path,
+    max_package_depth: usize,
+    max_entries: u64,
+    visit: &mut impl FnMut(&Path, usize, RootedFileType) -> Result<()>,
+) -> Result<()> {
+    let mut visited_entries = 0u64;
+    walk_beneath(directory, max_package_depth, &mut |entry, depth, kind| {
+        visited_entries = visited_entries.saturating_add(1);
+        if visited_entries > max_entries {
+            return Err(Error::LimitExceeded {
+                resource: "workspace entries".to_owned(),
+                limit: max_entries,
+            });
+        }
+        visit(entry, depth, kind)
+    })
+}
+
+pub(super) fn workspace_depth_exceeded(
+    kind: RootedFileType,
+    depth: usize,
+    max_package_depth: usize,
+    included: bool,
+) -> bool {
+    kind == RootedFileType::Directory && depth >= max_package_depth && included
+}
+
+#[cfg(test)]
 pub(super) fn with_manifest_roots<T>(
     roots: &[ManifestRoot],
+    operation: impl FnOnce() -> T,
+) -> Result<T> {
+    with_manifest_roots_and_limit(roots, MAX_MANIFEST_FILE_BYTES, operation)
+}
+
+pub(super) fn with_manifest_roots_and_limit<T>(
+    roots: &[ManifestRoot],
+    max_manifest_file_size: u64,
     operation: impl FnOnce() -> T,
 ) -> Result<T> {
     let active = roots
@@ -138,9 +287,22 @@ pub(super) fn with_manifest_roots<T>(
         previous_len
     });
     let guard = ActiveRootsGuard(previous_len);
+    ACTIVE_MANIFEST_FILE_LIMITS.with(|limits| limits.borrow_mut().push(max_manifest_file_size));
+    let limit_guard = ActiveManifestFileLimitGuard;
     let result = operation();
+    drop(limit_guard);
     drop(guard);
     Ok(result)
+}
+
+struct ActiveManifestFileLimitGuard;
+
+impl Drop for ActiveManifestFileLimitGuard {
+    fn drop(&mut self) {
+        ACTIVE_MANIFEST_FILE_LIMITS.with(|limits| {
+            limits.borrow_mut().pop();
+        });
+    }
 }
 
 struct ActiveRootsGuard(usize);
@@ -208,27 +370,32 @@ pub(super) fn read_beneath(directory: &Path, relative: &Path) -> Result<String> 
     ))
 }
 
-fn read_open_file(path: &Path, file: File) -> Result<String> {
+fn read_open_file(path: &Path, mut file: File) -> Result<String> {
+    let limit = ACTIVE_MANIFEST_FILE_LIMITS.with(|limits| {
+        limits
+            .borrow()
+            .last()
+            .copied()
+            .unwrap_or(MAX_MANIFEST_FILE_BYTES)
+    });
     let metadata = file.metadata().map_err(|source| io_error(path, source))?;
     if !metadata.file_type().is_file() {
         return Err(manifest_error(path, "manifest is not a regular file"));
     }
-    if metadata.len() > MAX_MANIFEST_BYTES {
-        return Err(manifest_error(
-            path,
-            format!("manifest exceeds the {MAX_MANIFEST_BYTES}-byte read limit"),
-        ));
+    if metadata.len() > limit {
+        return Err(manifest_file_limit_error(path, limit));
     }
 
-    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
-    file.take(MAX_MANIFEST_BYTES + 1)
+    // The descriptor may refer to a concurrently growing file. `take` ensures the allocation and
+    // read remain bounded even when the size observed above becomes stale.
+    let capacity = usize::try_from(metadata.len().min(limit)).unwrap_or(0);
+    let mut bytes = Vec::with_capacity(capacity);
+    file.by_ref()
+        .take(limit.saturating_add(1))
         .read_to_end(&mut bytes)
         .map_err(|source| io_error(path, source))?;
-    if bytes.len() as u64 > MAX_MANIFEST_BYTES {
-        return Err(manifest_error(
-            path,
-            format!("manifest exceeds the {MAX_MANIFEST_BYTES}-byte read limit"),
-        ));
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > limit {
+        return Err(manifest_file_limit_error(path, limit));
     }
     String::from_utf8(bytes).map_err(|source| {
         io_error(
@@ -368,7 +535,7 @@ fn walk_directory(
     root: &Path,
     relative: &Path,
     depth: usize,
-    max_depth: usize,
+    max_package_depth: usize,
     visit: &mut impl FnMut(&Path, usize, RootedFileType) -> Result<()>,
 ) -> Result<()> {
     let descriptor = directory.into_raw_fd();
@@ -424,9 +591,12 @@ fn walk_directory(
             libc::S_IFLNK => RootedFileType::Symlink,
             _ => RootedFileType::Other,
         };
+        if kind == RootedFileType::Directory && excluded_directory(name.to_bytes()) {
+            continue;
+        }
         let child_depth = depth + 1;
         visit(&child_relative, child_depth, kind)?;
-        if kind == RootedFileType::Directory && child_depth < max_depth {
+        if kind == RootedFileType::Directory && child_depth < max_package_depth {
             // SAFETY: `stream` is a valid open directory stream.
             let directory_fd = unsafe { libc::dirfd(stream.0) };
             let child = open_at(
@@ -435,7 +605,14 @@ fn walk_directory(
                 libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_NONBLOCK,
             )
             .map_err(|source| io_error(&root.join(&child_relative), source))?;
-            walk_directory(child, root, &child_relative, child_depth, max_depth, visit)?;
+            walk_directory(
+                child,
+                root,
+                &child_relative,
+                child_depth,
+                max_package_depth,
+                visit,
+            )?;
         }
     }
 }
@@ -490,11 +667,243 @@ fn io_error(path: &Path, source: io::Error) -> Error {
     }
 }
 
+fn excluded_directory(name: &[u8]) -> bool {
+    [
+        b".git".as_slice(),
+        b".chainsec-cache".as_slice(),
+        b"node_modules".as_slice(),
+        b"target".as_slice(),
+        b".venv".as_slice(),
+        b"venv".as_slice(),
+        b"env".as_slice(),
+        b"__pycache__".as_slice(),
+    ]
+    .contains(&name)
+}
+
+fn manifest_file_limit_error(path: &Path, limit: u64) -> Error {
+    manifest_error(
+        path,
+        format!("manifest exceeds the shared {limit}-byte file limit"),
+    )
+}
+
 pub(super) fn manifest_error(path: &Path, error: impl ToString) -> Error {
     Error::Manifest {
         path: path.to_owned(),
         message: error.to_string(),
     }
+}
+
+/// Parses a YAML manifest without allowing aliases to expand into an object graph larger than the
+/// bounded input itself. The budget is derived from the actual file bytes, so Yarn and pnpm share
+/// the configured manifest limit rather than gaining a separate parser-specific limit.
+pub(super) fn parse_bounded_yaml_json(path: &Path, text: &str) -> Result<JsonValue> {
+    let budget = Rc::new(YamlNodeBudget {
+        remaining: Cell::new(text.len().saturating_add(1)),
+    });
+    BoundedJsonSeed { budget }
+        .deserialize(serde_yaml::Deserializer::from_str(text))
+        .map_err(|error| manifest_error(path, error))
+}
+
+struct YamlNodeBudget {
+    remaining: Cell<usize>,
+}
+
+impl YamlNodeBudget {
+    fn charge<E: de::Error>(&self) -> std::result::Result<(), E> {
+        let remaining = self.remaining.get();
+        if remaining == 0 {
+            return Err(E::custom(
+                "expanded YAML node count exceeds the bounded manifest input size",
+            ));
+        }
+        self.remaining.set(remaining - 1);
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct BoundedJsonSeed {
+    budget: Rc<YamlNodeBudget>,
+}
+
+impl<'de> DeserializeSeed<'de> for BoundedJsonSeed {
+    type Value = JsonValue;
+
+    fn deserialize<D>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        self.budget.charge()?;
+        deserializer.deserialize_any(BoundedJsonVisitor {
+            budget: self.budget,
+        })
+    }
+}
+
+struct BoundedJsonVisitor {
+    budget: Rc<YamlNodeBudget>,
+}
+
+impl BoundedJsonVisitor {
+    fn seed(&self) -> BoundedJsonSeed {
+        BoundedJsonSeed {
+            budget: Rc::clone(&self.budget),
+        }
+    }
+}
+
+impl<'de> Visitor<'de> for BoundedJsonVisitor {
+    type Value = JsonValue;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a YAML value representable as JSON")
+    }
+
+    fn visit_bool<E>(self, value: bool) -> std::result::Result<Self::Value, E> {
+        Ok(JsonValue::Bool(value))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> std::result::Result<Self::Value, E> {
+        Ok(JsonValue::Number(value.into()))
+    }
+
+    fn visit_u64<E>(self, value: u64) -> std::result::Result<Self::Value, E> {
+        Ok(JsonValue::Number(value.into()))
+    }
+
+    fn visit_f64<E: de::Error>(self, value: f64) -> std::result::Result<Self::Value, E> {
+        JsonNumber::from_f64(value)
+            .map(JsonValue::Number)
+            .ok_or_else(|| E::custom("non-finite YAML number cannot be represented as JSON"))
+    }
+
+    fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E> {
+        Ok(JsonValue::String(value.to_owned()))
+    }
+
+    fn visit_string<E>(self, value: String) -> std::result::Result<Self::Value, E> {
+        Ok(JsonValue::String(value))
+    }
+
+    fn visit_none<E>(self) -> std::result::Result<Self::Value, E> {
+        Ok(JsonValue::Null)
+    }
+
+    fn visit_unit<E>(self) -> std::result::Result<Self::Value, E> {
+        Ok(JsonValue::Null)
+    }
+
+    fn visit_some<D>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        self.seed().deserialize(deserializer)
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> std::result::Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut values = Vec::with_capacity(sequence.size_hint().unwrap_or(0));
+        while let Some(value) = sequence.next_element_seed(self.seed())? {
+            values.push(value);
+        }
+        Ok(JsonValue::Array(values))
+    }
+
+    fn visit_map<A>(self, mut mapping: A) -> std::result::Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut values = JsonMap::with_capacity(mapping.size_hint().unwrap_or(0));
+        while let Some(key) = mapping.next_key_seed(self.seed())? {
+            let JsonValue::String(key) = key else {
+                return Err(de::Error::custom("YAML mapping keys must be strings"));
+            };
+            values.insert(key, mapping.next_value_seed(self.seed())?);
+        }
+        Ok(JsonValue::Object(values))
+    }
+}
+
+pub(super) fn optional_json_string<'a>(
+    path: &Path,
+    object: &'a JsonMap<String, JsonValue>,
+    field: &str,
+    context: &str,
+) -> Result<Option<&'a str>> {
+    object
+        .get(field)
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| manifest_error(path, format!("{context} {field} must be a string")))
+        })
+        .transpose()
+}
+
+pub(super) fn optional_toml_string<'a>(
+    path: &Path,
+    table: &'a ::toml::value::Table,
+    field: &str,
+    context: &str,
+) -> Result<Option<&'a str>> {
+    table
+        .get(field)
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| manifest_error(path, format!("{context} {field} must be a string")))
+        })
+        .transpose()
+}
+
+pub(super) fn is_sha256_integrity(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
+}
+
+/// Collects package dependencies using npm's cross-section precedence.
+pub(super) fn package_json_dependencies(
+    path: &Path,
+    package: &JsonMap<String, JsonValue>,
+    max_packages: usize,
+) -> Result<HashMap<String, String>> {
+    let mut by_name = HashMap::new();
+    // Peer dependencies are a fallback only. Development dependencies are included
+    // by default, while normal and optional dependencies take precedence, matching
+    // npm's duplicate-section semantics.
+    for section in [
+        "peerDependencies",
+        "devDependencies",
+        "dependencies",
+        "optionalDependencies",
+    ] {
+        let Some(value) = package.get(section) else {
+            continue;
+        };
+        let entries = value
+            .as_object()
+            .ok_or_else(|| manifest_error(path, format!("{section} must be an object")))?;
+        for (name, value) in entries {
+            let requirement = value.as_str().ok_or_else(|| {
+                manifest_error(path, format!("{section}.{name} must be a string"))
+            })?;
+            let is_new = !by_name.contains_key(name);
+            if is_new && by_name.len() >= max_packages {
+                return Err(Error::LimitExceeded {
+                    resource: "manifest dependencies".to_owned(),
+                    limit: u64::try_from(max_packages).unwrap_or(u64::MAX),
+                });
+            }
+            by_name.insert(name.clone(), requirement.to_owned());
+        }
+    }
+    Ok(by_name)
 }
 
 pub(super) fn strip_url_fragment(url: &str) -> String {

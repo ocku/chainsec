@@ -17,9 +17,10 @@ pub(super) fn record_scan(report: &mut Report, scan: scanner::ScanOutcome) -> (u
     report.statistics.source_files += scan.scanned_files;
     report.statistics.source_bytes += scan.scanned_bytes;
     report.issues.extend(scan.issues);
-    for finding in scan.findings {
-        push_finding(report, finding);
-    }
+    // Scanner findings are already deduplicated and constrained to the
+    // per-package finding budget. IDs include the package identity, so findings
+    // from different package scans cannot collide.
+    report.findings.extend(scan.findings);
     counts
 }
 
@@ -27,9 +28,8 @@ pub(super) fn record_shared_scan(report: &mut Report, scan: &scanner::ScanOutcom
     report.statistics.source_files += scan.scanned_files;
     report.statistics.source_bytes += scan.scanned_bytes;
     report.issues.extend(scan.issues.iter().cloned());
-    for finding in &scan.findings {
-        push_finding(report, finding.clone());
-    }
+    // See `record_scan`: the shared outcome has already performed both checks.
+    report.findings.extend(scan.findings.iter().cloned());
 
     (scan.scanned_files, scan.scanned_bytes)
 }

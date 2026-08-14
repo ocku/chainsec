@@ -72,7 +72,7 @@ graph TD
 - Dependencies must have a resolved version and integrity from a supported lockfile unless `--allow-unlocked` is supplied.
 - Configured npm, PyPI, and JSR repositories must use HTTPS. A local `localhost`/loopback development registry may use HTTP only with the explicit `--allow-insecure-http`/`allow_insecure_http = true` opt-in, which is recorded in JSON report policy. Locked artifact URLs remain subject to the normal HTTP(S) and host policy.
 - Supported registry and Deno artifact/module integrity values are checked before extraction or analysis. GitHub full-commit archives use the commit as their immutable identity; their downloaded SHA-256 is recorded for provenance but is not lockfile-supplied and cannot be independently checked against a declared artifact digest.
-- Archive paths are confined beneath extraction roots; links, special files, and duplicate entries are rejected. Tar-family paths are limited to 128 components; ZIP/wheel paths are traversal-checked but do not have the same explicit component-depth limit.
+- Archive paths are confined beneath extraction roots; links, special files, and duplicate entries are rejected. Tar-family, ZIP/wheel, JSR, and local dependency snapshot paths share the configured path-component depth limit (128 by default).
 - Downloads, extraction, source files, package count, graph depth, Deno graph size, redirects, requests, and per-package scan duration are bounded.
 - Cache entries use resolved identities and pinned source URLs, retain valid publication winners, safely replace invalid entries under per-entry locks, and reconstruct scan-private source from integrity-bound retained artifacts on every hit.
 
@@ -83,7 +83,7 @@ For the precise trust model and remaining limitations, see [`docs/SECURITY_MODEL
 Local/offline scan:
 
 ```sh
-chainsec scan --max-depth 0
+chainsec scan --max-package-depth 0
 ```
 
 Locked dependency scan with an explicit network policy:

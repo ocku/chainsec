@@ -6,7 +6,7 @@ use serde_json::Value as JsonValue;
 use crate::manifests::{
     NpmLockContext,
     npm::{github_archive_matches, local_source_url, matching_github_archive},
-    shared::{github_archive, manifest_error, read, strip_url_fragment},
+    shared::{github_archive, manifest_error, optional_json_string, read, strip_url_fragment},
 };
 use crate::{error::Result, model::Dependency};
 
@@ -45,6 +45,12 @@ pub(super) fn enrich(
 
     let packages = optional_object(path, root, "packages")?;
     let legacy_dependencies = optional_object(path, root, "dependencies")?;
+    if let Some(packages) = packages {
+        validate_package_entries(path, packages, "package-lock.json packages", false)?;
+    }
+    if let Some(dependencies) = legacy_dependencies {
+        validate_package_entries(path, dependencies, "package-lock.json dependencies", true)?;
+    }
     let mut contexts = HashMap::new();
     for dependency in dependencies {
         if let Some(packages) = packages {
@@ -265,6 +271,54 @@ fn locked_version_compatible(dependency: &Dependency, package: &JsonValue, local
         .and_then(JsonValue::as_str)
         .and_then(|version| NpmVersion::from_str(version).ok())
         .is_some_and(|version| range.satisfies(&version))
+}
+
+fn validate_package_entries(
+    path: &std::path::Path,
+    entries: &serde_json::Map<String, JsonValue>,
+    context: &str,
+    legacy: bool,
+) -> Result<()> {
+    for (name, value) in entries {
+        let package = value
+            .as_object()
+            .ok_or_else(|| manifest_error(path, format!("{context}.{name} must be an object")))?;
+        let package_context = format!("{context}.{name}");
+        for field in ["name", "version", "resolved", "integrity", "from"] {
+            optional_json_string(path, package, field, &package_context)?;
+        }
+        if let Some(link) = package.get("link")
+            && !link.is_boolean()
+        {
+            return Err(manifest_error(
+                path,
+                format!("{package_context} link must be a boolean"),
+            ));
+        }
+        if let Some(requires) = package.get("requires")
+            && !requires.is_object()
+        {
+            return Err(manifest_error(
+                path,
+                format!("{package_context} requires must be an object"),
+            ));
+        }
+        if legacy && let Some(children) = package.get("dependencies") {
+            let children = children.as_object().ok_or_else(|| {
+                manifest_error(
+                    path,
+                    format!("{package_context} dependencies must be an object"),
+                )
+            })?;
+            validate_package_entries(
+                path,
+                children,
+                &format!("{package_context}.dependencies"),
+                true,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn optional_object<'a>(

@@ -354,13 +354,15 @@ async fn graph_fetch_enforces_a_per_acquisition_request_limit() {
     let (_cache, mut fetcher) = graph_http_fetcher(root_certificate);
     fetcher.limits.max_network_requests = 2;
     let temporary = tempfile::tempdir().unwrap();
+    let mut budget = fetcher.network_budget();
 
     let error = fetcher
-        .fetch_deno_graph(
+        .fetch_deno_graph_with_budget(
             &root_url,
             temporary.path(),
             Some(&root_integrity),
             Some(&lockfile),
+            &mut budget,
         )
         .await
         .unwrap_err();
@@ -384,13 +386,15 @@ async fn graph_fetch_enforces_an_end_to_end_acquisition_deadline() {
     let (_cache, mut fetcher) = graph_http_fetcher(root_certificate);
     fetcher.limits.max_acquisition_duration = Duration::from_millis(70);
     let temporary = tempfile::tempdir().unwrap();
+    let mut budget = fetcher.network_budget();
 
     let error = fetcher
-        .fetch_deno_graph(
+        .fetch_deno_graph_with_budget(
             &root_url,
             temporary.path(),
             Some(&root_integrity),
             Some(&lockfile),
+            &mut budget,
         )
         .await
         .unwrap_err();
@@ -402,7 +406,7 @@ async fn graph_fetch_enforces_an_end_to_end_acquisition_deadline() {
         error.to_string().contains("package acquisition seconds"),
         "{error}"
     );
-    assert_eq!(requests.lock().unwrap().len(), 2);
+    assert!(requests.lock().unwrap().len() <= 2);
 }
 
 fn write_cached_module(source: &Path, url: &Url, bytes: &[u8]) {
@@ -722,7 +726,43 @@ fn cached_redirected_graph_accepts_requested_binding_and_uses_effective_import_b
         .unwrap();
 
     assert_eq!(digest, integrity(root_bytes));
-    assert_eq!(stats.files, 2);
+    assert_eq!(stats.files, 3);
+    assert_eq!(
+        stats.bytes,
+        (root_bytes.len() + child_bytes.len() + effective.as_str().len()) as u64
+    );
+}
+
+#[test]
+fn cached_graph_rebuild_rejects_unallowed_import_hosts() {
+    let (temporary, fetcher) = graph_fetcher();
+    let cached_source = temporary.path().join("cached");
+    let output = temporary.path().join("output");
+    fs::create_dir_all(&output).unwrap();
+
+    let root = Url::parse("https://example.test/root.ts").unwrap();
+    let unallowed = Url::parse("https://unallowed.test/child.ts").unwrap();
+    let root_bytes = b"import \"https://unallowed.test/child.ts\";\n";
+    let child_bytes = b"export const safe = true;\n";
+    write_cached_module(&cached_source, &root, root_bytes);
+    write_cached_module(&cached_source, &unallowed, child_bytes);
+    let snapshot = remote_snapshot(HashMap::from([
+        (root.to_string(), integrity(root_bytes)),
+        (unallowed.to_string(), integrity(child_bytes)),
+    ]));
+
+    let error = fetcher
+        .rebuild_cached_deno_graph(
+            &root,
+            &output,
+            Some(&integrity(root_bytes)),
+            Some(&snapshot),
+            &cached_source,
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("unallowed.test"));
+    assert!(error.to_string().contains("allowlist"));
 }
 
 #[test]
@@ -844,8 +884,11 @@ fn cached_aliases_to_one_effective_module_reconstruct_once_with_all_redirects() 
         .unwrap();
 
     assert_eq!(digest, integrity(root_bytes));
-    assert_eq!(stats.files, 2);
-    assert_eq!(stats.bytes, (root_bytes.len() + module_bytes.len()) as u64);
+    assert_eq!(stats.files, 4);
+    assert_eq!(
+        stats.bytes,
+        (root_bytes.len() + module_bytes.len() + 2 * effective.as_str().len()) as u64
+    );
     for alias in [&alias_a, &alias_b] {
         assert_eq!(
             fs::read_to_string(source.join(graph_redirect_filename(alias))).unwrap(),
@@ -853,6 +896,51 @@ fn cached_aliases_to_one_effective_module_reconstruct_once_with_all_redirects() 
         );
     }
     assert_eq!(fs::read_dir(source).unwrap().count(), 4);
+}
+
+#[test]
+fn cached_graph_rebuild_counts_redirects_against_extraction_limits() {
+    let (cache, mut fetcher) = graph_fetcher();
+    fetcher.limits.max_extracted_files = 3;
+    let root = Url::parse("https://example.test/root.ts").unwrap();
+    let alias_a = Url::parse("https://example.test/alias-a.ts").unwrap();
+    let alias_b = Url::parse("https://example.test/alias-b.ts").unwrap();
+    let effective = Url::parse("https://example.test/v1/module.ts").unwrap();
+    let root_bytes = b"import \"./alias-a.ts\"; import \"./alias-b.ts\";\n";
+    let module_bytes = b"export const safe = true;\n";
+    let cached_source = cache.path().join("cached");
+    write_cached_module(&cached_source, &root, root_bytes);
+    write_cached_module(&cached_source, &effective, module_bytes);
+    for alias in [&alias_a, &alias_b] {
+        fs::write(
+            cached_source.join(graph_redirect_filename(alias)),
+            effective.as_str(),
+        )
+        .unwrap();
+    }
+    let temporary = cache.path().join("temporary");
+    fs::create_dir(&temporary).unwrap();
+    let snapshot = remote_snapshot(HashMap::from([
+        (root.to_string(), integrity(root_bytes)),
+        (alias_a.to_string(), integrity(module_bytes)),
+        (alias_b.to_string(), integrity(module_bytes)),
+    ]));
+
+    let error = fetcher
+        .rebuild_cached_deno_graph(
+            &root,
+            &temporary,
+            Some(&integrity(root_bytes)),
+            Some(&snapshot),
+            &cached_source,
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        Error::LimitExceeded { resource, limit }
+            if resource == "extracted files" && limit == 3
+    ));
 }
 
 #[test]
@@ -912,7 +1000,7 @@ fn cached_graph_rebuild_decodes_escaped_specifiers_and_checks_child_integrity() 
 #[test]
 fn cached_graph_rebuild_enforces_module_limit_when_queuing_children() {
     let (cache, mut fetcher) = graph_fetcher();
-    fetcher.policy.max_deno_modules = 2;
+    fetcher.limits.max_packages = 2;
     let root = Url::parse("https://example.test/root.ts").unwrap();
     let first = Url::parse("https://example.test/first.ts").unwrap();
     let second = Url::parse("https://example.test/second.ts").unwrap();

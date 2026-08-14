@@ -1,7 +1,10 @@
 use std::{fs, path::PathBuf};
 
 use super::*;
-use crate::{manifests::strip_jsonc, model::Ecosystem};
+use crate::{
+    manifests::strip_jsonc,
+    model::{Ecosystem, EngineLimits},
+};
 
 #[test]
 fn jsonc_preserves_comment_markers_in_strings() {
@@ -25,6 +28,40 @@ fn partial_discovery_retains_successful_ecosystems_but_public_api_errors() {
     assert_eq!(outcome.discovery.dependencies.len(), 1);
     assert_eq!(outcome.discovery.dependencies[0].ecosystem, Ecosystem::Deno);
     assert!(discover(root.path()).is_err());
+}
+
+#[test]
+fn configured_package_limit_applies_to_all_manifest_ecosystems() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(
+        root.path().join("package.json"),
+        r#"{"dependencies":{"npm-package":"1"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("pyproject.toml"),
+        "[project]\ndependencies = [\"python-package==1\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("deno.json"),
+        r#"{"imports":{"deno-package":"npm:deno-package@1"}}"#,
+    )
+    .unwrap();
+
+    let limits = EngineLimits {
+        max_packages: 2,
+        ..EngineLimits::default()
+    };
+    let outcome = discover_with_contexts_and_limits(root.path(), &[], &[], &limits);
+
+    assert_eq!(outcome.discovery.dependencies.len(), limits.max_packages);
+    assert!(
+        outcome
+            .errors
+            .iter()
+            .any(|error| matches!(error, Error::LimitExceeded { .. }))
+    );
 }
 
 #[test]
@@ -62,6 +99,63 @@ fn malformed_lockfile_keeps_declared_dependencies_visible() {
     let outcome = discover_with_contexts(root.path(), &[], &[]);
 
     assert_eq!(outcome.errors.len(), 1);
+    assert_eq!(outcome.discovery.dependencies.len(), 1);
+    assert_eq!(outcome.discovery.dependencies[0].name, "example");
+    assert!(outcome.discovery.dependencies[0].lockfile.is_none());
+}
+
+#[test]
+fn malformed_python_lockfile_keeps_declared_dependencies_visible() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(
+        root.path().join("pyproject.toml"),
+        "[project]\ndependencies = [\"example>=1\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("poetry.lock"),
+        "[[package]]\nname = \"example\"\nversion = \"not-a-version\"\n",
+    )
+    .unwrap();
+
+    let outcome = discover_with_contexts(root.path(), &[], &[]);
+
+    assert_eq!(outcome.errors.len(), 1);
+    assert_eq!(outcome.discovery.dependencies.len(), 1);
+    assert_eq!(outcome.discovery.dependencies[0].name, "example");
+    assert!(outcome.discovery.dependencies[0].lockfile.is_none());
+}
+
+#[test]
+fn python_artifact_expansion_respects_the_configured_package_limit() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(
+        root.path().join("Pipfile"),
+        "[packages]\nexample = \"==1\"\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("Pipfile.lock"),
+        format!(
+            r#"{{"_meta":{{"pipfile-spec":6}},"default":{{"example":{{"version":"==1","hashes":["sha256:{}","sha256:{}"]}}}},"develop":{{}}}}"#,
+            "1".repeat(64),
+            "2".repeat(64)
+        ),
+    )
+    .unwrap();
+    let limits = EngineLimits {
+        max_packages: 1,
+        ..EngineLimits::default()
+    };
+
+    let outcome = discover_with_contexts_and_limits(root.path(), &[], &[], &limits);
+
+    assert!(
+        outcome
+            .errors
+            .iter()
+            .any(|error| matches!(error, Error::LimitExceeded { .. }))
+    );
     assert_eq!(outcome.discovery.dependencies.len(), 1);
     assert_eq!(outcome.discovery.dependencies[0].name, "example");
     assert!(outcome.discovery.dependencies[0].lockfile.is_none());

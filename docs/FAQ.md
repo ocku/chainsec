@@ -26,7 +26,7 @@ By default, a dependency must be fully identified by a supported lockfile (exact
 
 ## Can I scan only my own project without dependencies?
 
-Yes. `chainsec scan --max-depth 0` scans only the root project and does not traverse dependencies. This is also the recommended way to verify an installation.
+Yes. `chainsec scan --max-package-depth 0` scans only the root project and does not traverse dependencies. This is also the recommended way to verify an installation.
 
 ## How do I scan dependencies safely?
 

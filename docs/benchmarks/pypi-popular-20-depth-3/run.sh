@@ -14,7 +14,7 @@ for package in $packages; do
   slug=$(printf '%s' "$package" | tr '@/ ' '___')
   cargo run -- \
     remote scan "pypi:$package" \
-    --max-depth 3 \
+    --max-package-depth 3 \
     --allow-unlocked \
     --allow-host files.pythonhosted.org \
     --cache "$cache_dir" \

@@ -3,7 +3,10 @@ use super::*;
 #[test]
 fn integrity_is_checked() {
     let digest = format!("sha256:{}", hex::encode(Sha256::digest(b"safe")));
-    assert!(verify_integrity(b"safe", Some(&digest), "fixture").is_ok());
+    assert_eq!(
+        verify_integrity_digest(b"safe", Some(&digest), "fixture").unwrap(),
+        digest
+    );
     assert!(verify_integrity(b"changed", Some(&digest), "fixture").is_err());
 }
 
@@ -90,5 +93,8 @@ fn npm_integrity_accepts_any_matching_digest_from_the_strongest_algorithm() {
     let wrong = format!("sha512-{}", STANDARD.encode(Sha512::digest(b"changed")));
     let correct = format!("sha512-{}", STANDARD.encode(Sha512::digest(b"safe")));
 
-    assert!(verify_integrity(b"safe", Some(&format!("{wrong} {correct}")), "fixture").is_ok());
+    assert_eq!(
+        verify_integrity_digest(b"safe", Some(&format!("{wrong} {correct}")), "fixture").unwrap(),
+        correct
+    );
 }

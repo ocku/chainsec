@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::{validate_child_name, validate_relative_path};
 
@@ -60,4 +60,44 @@ fn rejects_an_intermediate_symlink_in_a_trusted_directory_path() {
     symlink(outside.path(), &link).unwrap();
 
     assert!(TrustedDir::open(&link.join("cache")).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn bounded_child_listing_stops_at_the_requested_count() {
+    use super::TrustedDir;
+
+    let temporary = tempfile::tempdir().unwrap();
+    for name in ["first", "second", "third"] {
+        std::fs::write(temporary.path().join(name), "").unwrap();
+    }
+
+    let names = TrustedDir::open(temporary.path())
+        .unwrap()
+        .list_child_names_up_to(2)
+        .unwrap();
+
+    assert_eq!(names.len(), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn listing_children_does_not_consume_the_trusted_directory_cursor() {
+    use super::TrustedDir;
+
+    let temporary = tempfile::tempdir().unwrap();
+    std::fs::write(temporary.path().join("first"), "").unwrap();
+    std::fs::write(temporary.path().join("second"), "").unwrap();
+    let trusted = TrustedDir::open(temporary.path()).unwrap();
+
+    let mut first_listing = trusted.list_child_names().unwrap();
+    let mut second_listing = trusted.list_child_names().unwrap();
+    first_listing.sort();
+    second_listing.sort();
+
+    assert_eq!(first_listing, second_listing);
+    assert_eq!(
+        first_listing,
+        vec![PathBuf::from("first"), PathBuf::from("second")]
+    );
 }

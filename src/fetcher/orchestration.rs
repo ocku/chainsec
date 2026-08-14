@@ -1,4 +1,8 @@
-use std::{fs, path::PathBuf, sync::Mutex};
+use std::{
+    fs,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use crate::{
     error::{Error, Result},
@@ -15,11 +19,11 @@ use super::{
 
 impl SourceFetcher {
     /// Builds the async HTTP client, or returns `None` in offline mode.
-    fn build_client(policy: &FetchPolicy) -> Option<Result<Client>> {
+    fn build_client(policy: &FetchPolicy, limits: &EngineLimits) -> Option<Result<Client>> {
         if policy.offline {
             return None;
         }
-        let request_timeout = policy.request_timeout;
+        let request_timeout = limits.request_timeout;
         Some(
             Client::builder()
                 .timeout(request_timeout)
@@ -54,19 +58,23 @@ impl SourceFetcher {
                 path: workspace_root.path().to_owned(),
                 source,
             })?;
-        let client = Self::build_client(&policy).transpose()?;
+        let client = Self::build_client(&policy, &limits).transpose()?;
         Ok(Self {
             cache,
-            cache_root,
+            cache_root: Arc::new(cache_root),
             cache_locks,
             cache_lock_directory,
             policy,
             limits,
             client,
-            workspaces: Mutex::new(Vec::new()),
+            npm_metadata: Arc::new(tokio::sync::Mutex::new(Default::default())),
+            npm_metadata_locks: Arc::new(Mutex::new(Default::default())),
+            completed_fetches: Arc::new(Mutex::new(Default::default())),
+            fetch_locks: Arc::new(Mutex::new(Default::default())),
+            workspaces: Arc::new(Mutex::new(Vec::new())),
             workspace_root_path,
-            _workspace_root: workspace_root,
-            _lifecycle_lock: lifecycle_lock,
+            _workspace_root: Arc::new(workspace_root),
+            _lifecycle_lock: Arc::new(lifecycle_lock),
         })
     }
 

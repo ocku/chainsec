@@ -10,9 +10,10 @@ use zip::{ZipWriter, write::SimpleFileOptions};
 
 #[test]
 fn traversal_paths_are_rejected() {
-    assert!(!safe_relative(Path::new("../escape")));
-    assert!(!safe_relative(Path::new("/absolute")));
-    assert!(safe_relative(Path::new("package/src/lib.js")));
+    assert!(!safe_relative(Path::new("../escape"), 128));
+    assert!(!safe_relative(Path::new("/absolute"), 128));
+    assert!(safe_relative(Path::new("package/src/lib.js"), 128));
+    assert!(!safe_relative(Path::new("package/src/lib.js"), 2));
 }
 
 #[test]
@@ -215,7 +216,7 @@ fn oversized_zip_is_rejected_before_write() {
     }
     let destination = tempfile::tempdir().unwrap();
     let limits = EngineLimits {
-        max_extracted_bytes: 5,
+        max_extracted_size: 5,
         ..EngineLimits::default()
     };
     assert!(extract_zip(&bytes.into_inner(), destination.path(), &limits).is_err());
@@ -223,7 +224,7 @@ fn oversized_zip_is_rejected_before_write() {
 }
 
 #[test]
-fn archive_directory_entries_count_toward_the_file_limit() {
+fn tar_file_limit_is_rejected_before_any_entry_is_written() {
     let mut bytes = Cursor::new(Vec::new());
     {
         let mut builder = Builder::new(&mut bytes);
@@ -251,8 +252,7 @@ fn archive_directory_entries_count_toward_the_file_limit() {
     .unwrap_err();
 
     assert_eq!(error.code(), "limit_exceeded");
-    assert!(destination.path().join("first").is_dir());
-    assert!(!destination.path().join("second").exists());
+    assert_eq!(destination.path().read_dir().unwrap().count(), 0);
 }
 
 #[test]
@@ -466,7 +466,7 @@ fn tar_with_hidden_extension(entry_type: u8, content: &[u8]) -> Vec<u8> {
 fn assert_hidden_tar_metadata_is_bounded(entry_type: u8, content: &[u8], name: &str) {
     let destination = tempfile::tempdir().unwrap();
     let limits = EngineLimits {
-        max_extracted_bytes: 0,
+        max_extracted_size: 0,
         max_extracted_files: 1,
         ..EngineLimits::default()
     };
@@ -499,7 +499,7 @@ fn tar_payload_at_exact_extraction_limit_is_accepted() {
 
     let destination = tempfile::tempdir().unwrap();
     let limits = EngineLimits {
-        max_extracted_bytes: content.len() as u64,
+        max_extracted_size: content.len() as u64,
         max_extracted_files: 1,
         ..EngineLimits::default()
     };
@@ -560,7 +560,7 @@ fn oversized_pax_header_is_rejected_by_the_extraction_limit() {
 
     let destination = tempfile::tempdir().unwrap();
     let limits = EngineLimits {
-        max_extracted_bytes: 0,
+        max_extracted_size: 0,
         ..EngineLimits::default()
     };
     let error = extract_tar(

@@ -1,16 +1,50 @@
-use std::{fs, fs::File};
+use std::fs;
 
 use super::*;
 
 #[test]
-fn rejects_oversized_files() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("package-lock.json");
-    let file = File::create(&path).unwrap();
-    file.set_len(MAX_MANIFEST_BYTES + 1).unwrap();
+fn bounded_yaml_rejects_alias_expansion_larger_than_its_input() {
+    let yaml = r#"
+a: &a [x, x, x, x, x, x, x, x]
+b: &b [*a, *a, *a, *a, *a, *a, *a, *a]
+c: &c [*b, *b, *b, *b, *b, *b, *b, *b]
+d: [*c, *c, *c, *c, *c, *c, *c, *c]
+"#;
 
-    let error = read(&path).unwrap_err();
-    assert!(error.to_string().contains("read limit"));
+    let error = parse_bounded_yaml_json(Path::new("pnpm-lock.yaml"), yaml).unwrap_err();
+
+    assert!(error.to_string().contains("expanded YAML node count"));
+}
+
+#[test]
+fn bounded_yaml_accepts_non_amplifying_aliases() {
+    let yaml = "entry: &entry {version: 1.0.0}\ncopy: *entry\n";
+    let value = parse_bounded_yaml_json(Path::new("yarn.lock"), yaml).unwrap();
+
+    assert_eq!(value["entry"], value["copy"]);
+}
+
+#[test]
+fn workspace_depth_only_exceeds_at_matching_directory_boundaries() {
+    assert!(workspace_depth_exceeded(
+        RootedFileType::Directory,
+        2,
+        2,
+        true
+    ));
+    assert!(!workspace_depth_exceeded(
+        RootedFileType::Directory,
+        2,
+        2,
+        false
+    ));
+    assert!(!workspace_depth_exceeded(RootedFileType::File, 2, 2, true));
+    assert!(!workspace_depth_exceeded(
+        RootedFileType::Directory,
+        1,
+        2,
+        true
+    ));
 }
 
 #[cfg(unix)]
@@ -26,6 +60,19 @@ fn rejects_symlinks() {
 
     let error = read(&path).unwrap_err();
     assert!(error.to_string().contains("symbolic link"));
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_oversized_manifest_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("package.json");
+    let file = fs::File::create(&path).unwrap();
+    file.set_len(MAX_MANIFEST_FILE_BYTES + 1).unwrap();
+
+    let error = read(&path).unwrap_err();
+    assert!(error.to_string().contains("shared"));
+    assert!(error.to_string().contains("file limit"));
 }
 
 #[cfg(unix)]

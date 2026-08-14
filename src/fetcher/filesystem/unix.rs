@@ -60,7 +60,15 @@ impl TrustedDir {
 
     /// Lists the names of direct children. Names are not resolved through paths.
     pub(in crate::fetcher) fn list_child_names(&self) -> io::Result<Vec<PathBuf>> {
-        read_dir_at(&self.file)
+        read_dir_at(&self.file, None)
+    }
+
+    /// Lists at most `maximum` direct-child names without resolving them.
+    pub(in crate::fetcher) fn list_child_names_up_to(
+        &self,
+        maximum: usize,
+    ) -> io::Result<Vec<PathBuf>> {
+        read_dir_at(&self.file, Some(maximum))
     }
 
     /// Removes a direct child, recursively when it is a directory, without
@@ -139,7 +147,7 @@ impl TrustedDir {
         open_at(
             directory.as_raw_fd(),
             name,
-            libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOFOLLOW,
+            libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_NOFOLLOW,
             0,
         )
     }
@@ -277,8 +285,17 @@ fn mkdir_new_at(directory: RawFd, path: &Path, mode: libc::mode_t) -> io::Result
     }
 }
 
-fn read_dir_at(directory: &File) -> io::Result<Vec<PathBuf>> {
-    let fd = directory.try_clone()?.into_raw_fd();
+fn read_dir_at(directory: &File, maximum: Option<usize>) -> io::Result<Vec<PathBuf>> {
+    // `dup` (and therefore `File::try_clone`) shares a directory cursor with
+    // the original descriptor. Open `.` instead so each enumeration starts at
+    // the beginning and cannot affect later listings through this handle.
+    let fd = open_at(
+        directory.as_raw_fd(),
+        Path::new("."),
+        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+        0,
+    )?
+    .into_raw_fd();
     // SAFETY: `fd` is uniquely owned and transferred to the DIR stream.
     let stream = unsafe { libc::fdopendir(fd) };
     if stream.is_null() {
@@ -304,6 +321,12 @@ fn read_dir_at(directory: &File) -> io::Result<Vec<PathBuf>> {
         // SAFETY: d_name is NUL-terminated for entries returned by readdir.
         let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
         if name != b"." && name != b".." {
+            if maximum.is_some_and(|maximum| names.len() == maximum) {
+                // Stop before allocating an unbounded list. The caller can use
+                // the truncated result to report its own entry limit.
+                unsafe { libc::closedir(stream) };
+                return Ok(names);
+            }
             names.push(PathBuf::from(OsString::from_vec(name.to_vec())));
         }
     }
@@ -322,7 +345,7 @@ fn remove_at(directory: RawFd, name: &Path) -> io::Result<()> {
         libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
         0,
     )?;
-    for child_name in read_dir_at(&child)? {
+    for child_name in read_dir_at(&child, None)? {
         remove_at(child.as_raw_fd(), &child_name)?;
     }
     unlink_at(directory, name, libc::AT_REMOVEDIR)

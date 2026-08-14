@@ -1,0 +1,20 @@
+{
+  "_meta": {
+    "hash": { "sha256": "fixture" },
+    "pipfile-spec": 6,
+    "requires": {},
+    "sources": []
+  },
+  "default": {
+    "requests": {
+      "version": "==2.32.3",
+      "hashes": ["sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+    }
+  },
+  "develop": {
+    "pytest": {
+      "version": "==8.3.4",
+      "hashes": ["sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]
+    }
+  }
+}

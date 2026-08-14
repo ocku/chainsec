@@ -1,7 +1,17 @@
+use std::fs;
+
 use super::*;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use flate2::{Compression, write::GzEncoder};
-use sha2::Sha512;
+use sha2::{Digest, Sha256, Sha512};
+use url::Url;
+
+use crate::{
+    error::{Error, Result},
+    model::{Dependency, Ecosystem, FetchMetadata},
+};
+
+use super::storage::lock_entry;
 
 fn acquisition(fetcher: &SourceFetcher, dependency: &Dependency) -> Acquisition {
     fetcher.acquisition(dependency).unwrap()
@@ -256,7 +266,7 @@ fn publish_fixture(
 #[test]
 fn oversized_artifact_is_rejected_during_cache_publication() {
     let limits = crate::model::EngineLimits {
-        max_archive_bytes: 3,
+        max_archive_size: 3,
         ..crate::model::EngineLimits::default()
     };
     let (_root, fetcher, dependency, acquisition, workspace) =
@@ -271,28 +281,40 @@ fn oversized_artifact_is_rejected_during_cache_publication() {
 }
 
 #[test]
-fn retained_source_publication_enforces_per_file_and_aggregate_limits() {
-    for (first, second, expected_resource) in [
-        (b"four".as_slice(), b"".as_slice(), "source file bytes"),
-        (b"abc".as_slice(), b"def".as_slice(), "extracted bytes"),
-    ] {
-        let limits = crate::model::EngineLimits {
-            max_source_file_bytes: 3,
-            max_extracted_bytes: 5,
-            ..crate::model::EngineLimits::default()
-        };
-        let (_root, fetcher, dependency, acquisition, workspace) =
-            publication_fixture(limits, Ecosystem::Deno, "jsr:@scope/fixture@1.0.0");
-        fs::write(workspace.join(CACHED_ARTIFACT), b"manifest").unwrap();
-        fs::write(workspace.join("source/first.ts"), first).unwrap();
-        fs::write(workspace.join("source/second.ts"), second).unwrap();
+fn retained_source_publication_enforces_aggregate_extracted_size() {
+    let limits = crate::model::EngineLimits {
+        max_source_file_size: 3,
+        max_extracted_size: 5,
+        ..crate::model::EngineLimits::default()
+    };
+    let (_root, fetcher, dependency, acquisition, workspace) =
+        publication_fixture(limits, Ecosystem::Deno, "jsr:@scope/fixture@1.0.0");
+    fs::write(workspace.join(CACHED_ARTIFACT), b"manifest").unwrap();
+    fs::write(workspace.join("source/first.ts"), b"abc").unwrap();
+    fs::write(workspace.join("source/second.ts"), b"def").unwrap();
 
-        assert!(matches!(
-            publish_fixture(&fetcher, &dependency, &acquisition, &workspace),
-            Err(Error::LimitExceeded { resource, .. }) if resource == expected_resource
-        ));
-        assert!(!acquisition.destination.exists());
-    }
+    assert!(matches!(
+        publish_fixture(&fetcher, &dependency, &acquisition, &workspace),
+        Err(Error::LimitExceeded { resource, .. }) if resource == "extracted bytes"
+    ));
+    assert!(!acquisition.destination.exists());
+}
+
+#[test]
+fn retained_source_publication_does_not_apply_scan_file_limit_or_count_directories() {
+    let limits = crate::model::EngineLimits {
+        max_source_file_size: 3,
+        max_extracted_size: 10,
+        max_extracted_files: 1,
+        ..crate::model::EngineLimits::default()
+    };
+    let (_root, fetcher, dependency, acquisition, workspace) =
+        publication_fixture(limits, Ecosystem::Deno, "jsr:@scope/fixture@1.0.0");
+    fs::write(workspace.join(CACHED_ARTIFACT), b"manifest").unwrap();
+    fs::create_dir_all(workspace.join("source/nested/deep")).unwrap();
+    fs::write(workspace.join("source/nested/deep/module.ts"), b"four").unwrap();
+
+    assert!(publish_fixture(&fetcher, &dependency, &acquisition, &workspace).is_ok());
 }
 
 #[cfg(unix)]
@@ -347,6 +369,24 @@ fn cache_hits_use_independent_workspaces_without_republishing() {
     assert_ne!(first_source, second_source);
     assert!(!first_source.starts_with(&retained));
     assert!(!second_source.starts_with(&retained));
+    assert!(
+        !first_source
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join(CACHED_ARTIFACT)
+            .exists()
+    );
+    assert!(
+        !second_source
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join(CACHED_ARTIFACT)
+            .exists()
+    );
     assert_eq!(
         fs::read(first_source.join("index.js")).unwrap(),
         b"module.exports = 1;\n"
@@ -845,6 +885,31 @@ fn cache_purge_removes_abandoned_staging_directories() {
             .path()
             .join("cache.locks/lifecycle.lock")
             .is_file()
+    );
+}
+
+#[test]
+fn cache_identity_cannot_confuse_field_contents_with_field_boundaries() {
+    let cache = tempfile::tempdir().unwrap();
+    let fetcher = SourceFetcher::new(
+        cache.path().join("cache"),
+        super::super::FetchPolicy::default(),
+        crate::model::EngineLimits::default(),
+    )
+    .unwrap();
+    let source_url = "https://example.test/shared.tgz";
+    let mut embedded = Dependency::declared(Ecosystem::Npm, "shared", "1.0.0");
+    embedded.resolved_version = Some("1.0.0".to_owned());
+    embedded.integrity = Some(format!("sha512-shared\0source-url\0{source_url}"));
+    let mut separate = Dependency::declared(Ecosystem::Npm, "shared", "1.0.0");
+    separate.resolved_version = Some("1.0.0".to_owned());
+    separate.integrity = Some("sha512-shared".to_owned());
+    separate.source_url = Some(source_url.to_owned());
+
+    // The previous delimiter-based encoding produced identical inputs for these values.
+    assert_ne!(
+        destination(&fetcher, &embedded),
+        destination(&fetcher, &separate)
     );
 }
 

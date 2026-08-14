@@ -279,6 +279,24 @@ fn duplicate_source_matches_do_not_consume_the_finding_budget() {
 }
 
 #[test]
+fn scanner_enforces_the_source_file_budget() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(directory.path().join("first.js"), "const first = 1;\n").unwrap();
+    fs::write(directory.path().join("second.js"), "const second = 2;\n").unwrap();
+    let limits = EngineLimits {
+        max_source_files: 1,
+        ..EngineLimits::default()
+    };
+
+    let error = scan(directory.path(), "root", &built_in_rules(), &limits).unwrap_err();
+
+    assert!(matches!(
+        error,
+        Error::LimitExceeded { ref resource, limit: 1 } if resource == "source files"
+    ));
+}
+
+#[test]
 fn scanner_enforces_the_finding_budget() {
     let directory = tempfile::tempdir().unwrap();
     fs::write(

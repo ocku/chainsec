@@ -12,16 +12,6 @@ use super::{
 };
 
 impl SourceFetcher {
-    #[allow(dead_code)]
-    pub(in crate::fetcher) async fn python_artifact_url(
-        &self,
-        dependency: &Dependency,
-    ) -> Result<Url> {
-        let mut budget = self.network_budget();
-        self.python_artifact_url_with_budget(dependency, &mut budget)
-            .await
-    }
-
     pub(in crate::fetcher) async fn python_artifact_url_with_budget(
         &self,
         dependency: &Dependency,
@@ -38,13 +28,6 @@ impl SourceFetcher {
             self.python_artifact_url_from_metadata_with_budget(dependency, budget)
                 .await
         }
-    }
-
-    #[allow(dead_code)]
-    async fn python_artifact_url_from_metadata(&self, dependency: &Dependency) -> Result<Url> {
-        let mut budget = self.network_budget();
-        self.python_artifact_url_from_metadata_with_budget(dependency, &mut budget)
-            .await
     }
 
     pub(in crate::fetcher) async fn python_artifact_url_from_metadata_with_budget(
@@ -92,17 +75,6 @@ impl SourceFetcher {
                 ),
             ))
         }
-    }
-
-    #[allow(dead_code)]
-    pub(super) async fn pypi_metadata(
-        &self,
-        dependency: &Dependency,
-        api: &Url,
-    ) -> Result<PyPiMetadata> {
-        let mut budget = self.network_budget();
-        self.pypi_metadata_with_budget(dependency, api, &mut budget)
-            .await
     }
 
     pub(super) async fn pypi_metadata_with_budget(

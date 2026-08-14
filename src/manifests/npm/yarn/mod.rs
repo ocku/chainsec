@@ -5,9 +5,15 @@ use serde_json::Value as JsonValue;
 
 use crate::manifests::{
     npm::{github_archive_matches, local_source_url, matching_github_archive},
-    shared::{github_archive, manifest_error, read, strip_url_fragment},
+    shared::{
+        github_archive, manifest_error, optional_json_string, parse_bounded_yaml_json, read,
+        strip_url_fragment,
+    },
 };
-use crate::{error::Result, model::Dependency};
+use crate::{
+    error::Result,
+    model::{Dependency, canonical_http_url},
+};
 
 pub(super) fn enrich(path: &Path, dependencies: &mut [Dependency]) -> Result<()> {
     let lockfile = lockfile_entries(path)?;
@@ -21,8 +27,8 @@ pub(super) fn enrich(path: &Path, dependencies: &mut [Dependency]) -> Result<()>
 }
 
 struct YarnLockfile {
-    entries: serde_json::Map<String, JsonValue>,
-    selectors: HashMap<String, String>,
+    entries: Vec<(String, JsonValue)>,
+    selectors: HashMap<String, usize>,
 }
 
 fn lockfile_entries(path: &Path) -> Result<YarnLockfile> {
@@ -33,20 +39,33 @@ fn lockfile_entries(path: &Path) -> Result<YarnLockfile> {
     } else {
         normalize_classic(&text)
     };
-    let yaml: serde_yaml::Value =
-        serde_yaml::from_str(&normalized).map_err(|error| manifest_error(path, error))?;
-    let value = serde_json::to_value(yaml).map_err(|error| manifest_error(path, error))?;
+    let value = parse_bounded_yaml_json(path, &normalized)?;
     let JsonValue::Object(entries) = value else {
         return Err(manifest_error(path, "yarn.lock root must be a mapping"));
     };
     if berry {
         validate_berry_version(path, &entries)?;
     }
+    let entries = entries
+        .into_iter()
+        .filter(|(key, _)| key != "__metadata")
+        .collect::<Vec<_>>();
+    for (selector, entry) in &entries {
+        let entry = entry.as_object().ok_or_else(|| {
+            manifest_error(
+                path,
+                format!("Yarn lock entry {selector} must be an object"),
+            )
+        })?;
+        for field in ["version", "resolved", "resolution", "integrity", "checksum"] {
+            optional_json_string(path, entry, field, &format!("Yarn lock entry {selector}"))?;
+        }
+    }
     let mut selectors = HashMap::new();
-    for key in entries.keys().filter(|key| key.as_str() != "__metadata") {
+    for (entry_index, (key, _)) in entries.iter().enumerate() {
         for selector in std::iter::once(key.trim().trim_matches('"')).chain(selectors_in_key(key)) {
-            if let Some(previous) = selectors.insert(selector.to_owned(), key.clone())
-                && previous != *key
+            if let Some(previous) = selectors.insert(selector.to_owned(), entry_index)
+                && previous != entry_index
             {
                 return Err(manifest_error(
                     path,
@@ -88,8 +107,8 @@ fn find_entry<'a>(lockfile: &'a YarnLockfile, dependency: &Dependency) -> Option
     let selector = dependency_selector(dependency);
     let berry_selector = format!("{}@npm:{}", dependency.name, dependency.requirement);
     [selector, berry_selector].into_iter().find_map(|selector| {
-        let key = lockfile.selectors.get(&selector)?;
-        let entry = lockfile.entries.get(key)?;
+        let entry_index = *lockfile.selectors.get(&selector)?;
+        let (_, entry) = lockfile.entries.get(entry_index)?;
         locked_alias_compatible(dependency, entry).then_some(entry)
     })
 }
@@ -134,7 +153,8 @@ fn enrich_dependency(dependency: &mut Dependency, entry: &JsonValue, path: &Path
         .and_then(JsonValue::as_str)
         .map(str::to_owned);
     dependency.source_url = resolved
-        .filter(|url| url.starts_with("http://") || url.starts_with("https://"))
+        .and_then(canonical_http_url)
+        .as_deref()
         .map(strip_url_fragment);
     dependency.integrity = entry
         .get("integrity")

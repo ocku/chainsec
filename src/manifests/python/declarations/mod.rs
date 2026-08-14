@@ -7,25 +7,131 @@ use toml::Value as TomlValue;
 use super::matching::normalize;
 use crate::{
     error::Result,
-    manifests::shared::{github_archive, manifest_error, read},
+    manifests::shared::{BoundedDependencyCollector, github_archive, manifest_error, read},
     model::{Dependency, Ecosystem},
 };
 
+#[cfg(test)]
 pub(in crate::manifests) fn parse(path: &Path) -> Result<Vec<Dependency>> {
-    let text = read(path)?;
-    let value: TomlValue = toml::from_str(&text).map_err(|error| manifest_error(path, error))?;
-    let mut dependencies = Vec::new();
+    parse_with_limit(path, crate::model::EngineLimits::default().max_packages)
+}
+
+pub(in crate::manifests) fn parse_with_limit(
+    path: &Path,
+    max_packages: usize,
+) -> Result<Vec<Dependency>> {
+    let value = parse_toml(path)?;
+    let mut dependencies = BoundedDependencyCollector::new(max_packages);
 
     parse_project_dependencies(path, &value, &mut dependencies)?;
     parse_dependency_groups(path, &value, &mut dependencies)?;
     parse_poetry_dependencies(path, &value, &mut dependencies)?;
-    Ok(dependencies)
+    Ok(dependencies.into_dependencies())
+}
+
+pub(in crate::manifests) fn parse_pipfile_with_limit(
+    path: &Path,
+    max_packages: usize,
+) -> Result<Vec<Dependency>> {
+    let value = parse_toml(path)?;
+    let mut dependencies = BoundedDependencyCollector::new(max_packages);
+
+    for section in ["packages", "dev-packages"] {
+        let Some(entries) = value.get(section) else {
+            continue;
+        };
+        let entries = entries
+            .as_table()
+            .ok_or_else(|| manifest_error(path, format!("Pipfile {section} must be a table")))?;
+        for (name, spec) in entries {
+            dependencies.push(pipfile_dependency(path, name, spec)?)?;
+        }
+    }
+    Ok(dependencies.into_dependencies())
+}
+
+fn parse_toml(path: &Path) -> Result<TomlValue> {
+    let text = read(path)?;
+    toml::from_str(&text).map_err(|error| manifest_error(path, error))
+}
+
+fn pipfile_dependency(path: &Path, name: &str, spec: &TomlValue) -> Result<Dependency> {
+    let (version, extras, markers, source_url) = match spec {
+        TomlValue::String(version) => (version.as_str(), Vec::new(), None, None),
+        TomlValue::Table(table) => {
+            let version = match table.get("version") {
+                Some(value) => value.as_str().ok_or_else(|| {
+                    manifest_error(
+                        path,
+                        format!("Pipfile dependency {name} version must be a string"),
+                    )
+                })?,
+                None => "*",
+            };
+            let extras = match table.get("extras") {
+                Some(value) => value
+                    .as_array()
+                    .ok_or_else(|| {
+                        manifest_error(
+                            path,
+                            format!("Pipfile dependency {name} extras must be an array"),
+                        )
+                    })?
+                    .iter()
+                    .map(TomlValue::as_str)
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or_else(|| {
+                        manifest_error(
+                            path,
+                            format!("Pipfile dependency {name} extras must be strings"),
+                        )
+                    })?,
+                None => Vec::new(),
+            };
+            let markers = match table.get("markers") {
+                Some(value) => Some(value.as_str().ok_or_else(|| {
+                    manifest_error(
+                        path,
+                        format!("Pipfile dependency {name} markers must be a string"),
+                    )
+                })?),
+                None => None,
+            };
+            let source_url = table
+                .get("file")
+                .or_else(|| table.get("path"))
+                .and_then(TomlValue::as_str);
+            (version, extras, markers, source_url)
+        }
+        _ => {
+            return Err(manifest_error(
+                path,
+                format!("Pipfile dependency {name} must be a string or table"),
+            ));
+        }
+    };
+
+    let extras = if extras.is_empty() {
+        String::new()
+    } else {
+        format!("[{}]", extras.join(","))
+    };
+    let version = if version == "*" { "" } else { version };
+    let mut requirement = format!("{name}{extras}{version}");
+    if let Some(markers) = markers {
+        requirement.push_str("; ");
+        requirement.push_str(markers);
+    }
+    if let Some(source_url) = source_url {
+        requirement = format!("{name}{extras} @ {source_url}");
+    }
+    Ok(dependency_from_requirement(&requirement))
 }
 
 fn parse_project_dependencies(
     path: &Path,
     manifest: &TomlValue,
-    dependencies: &mut Vec<Dependency>,
+    dependencies: &mut BoundedDependencyCollector,
 ) -> Result<()> {
     let Some(project) = manifest.get("project") else {
         return Ok(());
@@ -72,7 +178,7 @@ fn collect_requirement_array(
     path: &Path,
     section: &str,
     entries: &TomlValue,
-    dependencies: &mut Vec<Dependency>,
+    dependencies: &mut BoundedDependencyCollector,
 ) -> Result<()> {
     let entries = entries
         .as_array()
@@ -81,14 +187,10 @@ fn collect_requirement_array(
         let requirement = requirement.as_str().ok_or_else(|| {
             manifest_error(path, format!("{section} entry {index} must be a string"))
         })?;
-        dependencies.push(dependency_from_requirement(requirement));
+        dependencies.push(dependency_from_requirement(requirement))?;
     }
     Ok(())
 }
-
-const MAX_DEPENDENCY_GROUPS: usize = 4096;
-const MAX_DEPENDENCY_GROUP_DEPTH: usize = 512;
-const MAX_DEPENDENCY_GROUP_INCLUDES: usize = 16_384;
 
 struct GroupFrame {
     name: String,
@@ -98,7 +200,7 @@ struct GroupFrame {
 fn parse_dependency_groups(
     path: &Path,
     manifest: &TomlValue,
-    dependencies: &mut Vec<Dependency>,
+    dependencies: &mut BoundedDependencyCollector,
 ) -> Result<()> {
     let Some(groups) = manifest.get("dependency-groups") else {
         return Ok(());
@@ -106,16 +208,10 @@ fn parse_dependency_groups(
     let groups = groups
         .as_table()
         .ok_or_else(|| manifest_error(path, "Python dependency-groups must be a table"))?;
-    if groups.len() > MAX_DEPENDENCY_GROUPS {
-        return Err(manifest_error(
-            path,
-            format!("Python dependency-groups exceeds the {MAX_DEPENDENCY_GROUPS}-group limit"),
-        ));
-    }
 
     let mut visited = HashSet::new();
     let mut active = HashSet::new();
-    let mut includes = 0usize;
+
     for root in groups.keys() {
         if visited.contains(root) {
             continue;
@@ -154,7 +250,7 @@ fn parse_dependency_groups(
             frame.next_entry += 1;
             let entry = &entries[index];
             if let Some(requirement) = entry.as_str() {
-                dependencies.push(dependency_from_requirement(requirement));
+                dependencies.push(dependency_from_requirement(requirement))?;
                 continue;
             }
             let include = entry
@@ -175,15 +271,6 @@ fn parse_dependency_groups(
                     )
                 })?;
 
-            includes += 1;
-            if includes > MAX_DEPENDENCY_GROUP_INCLUDES {
-                return Err(manifest_error(
-                    path,
-                    format!(
-                        "Python dependency-group includes exceeds the {MAX_DEPENDENCY_GROUP_INCLUDES}-include limit"
-                    ),
-                ));
-            }
             if visited.contains(include) {
                 continue;
             }
@@ -205,14 +292,7 @@ fn parse_dependency_groups(
                     ),
                 ));
             }
-            if stack.len() >= MAX_DEPENDENCY_GROUP_DEPTH {
-                return Err(manifest_error(
-                    path,
-                    format!(
-                        "Python dependency-group include depth exceeds the {MAX_DEPENDENCY_GROUP_DEPTH}-group limit"
-                    ),
-                ));
-            }
+
             stack.push(GroupFrame {
                 name: include.to_owned(),
                 next_entry: 0,
@@ -226,7 +306,7 @@ fn parse_dependency_groups(
 fn parse_poetry_dependencies(
     path: &Path,
     manifest: &TomlValue,
-    dependencies: &mut Vec<Dependency>,
+    dependencies: &mut BoundedDependencyCollector,
 ) -> Result<()> {
     let Some(poetry) = manifest.get("tool").and_then(|value| value.get("poetry")) else {
         return Ok(());
@@ -274,7 +354,7 @@ fn collect_poetry_dependencies(
     path: &Path,
     section: &str,
     entries: &TomlValue,
-    dependencies: &mut Vec<Dependency>,
+    dependencies: &mut BoundedDependencyCollector,
     skip_python: bool,
 ) -> Result<()> {
     let entries = entries
@@ -291,7 +371,7 @@ fn collect_poetry_dependencies(
             continue;
         }
 
-        dependencies.push(poetry_dependency(path, name, spec)?);
+        dependencies.push(poetry_dependency(path, name, spec)?)?;
     }
     Ok(())
 }
@@ -413,7 +493,7 @@ fn compatible_range(version: &str, caret: bool) -> Option<String> {
         0
     };
     let mut upper = release[..=upper_index].to_vec();
-    upper[upper_index] += 1;
+    upper[upper_index] = upper[upper_index].checked_add(1)?;
     let upper = Version::new(upper).with_epoch(version.epoch());
     Some(format!(">={version},<{upper}"))
 }

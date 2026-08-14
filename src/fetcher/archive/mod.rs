@@ -15,7 +15,9 @@ mod support;
 mod tar;
 mod zip;
 
-pub(super) use support::{ExtractionStats, check_extraction_limits, safe_relative};
+pub(super) use support::{
+    ExtractionStats, account_extracted_bytes, account_extracted_entry, safe_relative,
+};
 #[cfg(test)]
 pub(super) use tar::extract as extract_tar;
 #[cfg(test)]

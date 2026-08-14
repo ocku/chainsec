@@ -18,10 +18,11 @@ use entropy::is_structured_literal;
 #[cfg(test)]
 use filesystem::MAX_NON_SOURCE_ANALYSIS_BYTES;
 use filesystem::{
-    compile_ignored_paths, included, is_test_fixture, language_for_entry, read_entry_contents,
+    ScannedFileOpener, compile_ignored_paths, included, is_test_fixture, language_for,
+    read_entry_with_opener,
 };
 use source_analyzer::{
-    CompiledRuleSet, SourceScanInput, compile_rules, reserve_finding, scan_file,
+    CompiledRuleSet, SourceScanInput, SourceScanWorker, compile_rules, reserve_finding, scan_file,
 };
 
 pub use source_analyzer::validate_rules;
@@ -33,7 +34,6 @@ pub(crate) struct AnalysisResources {
 
 impl AnalysisResources {
     pub(crate) fn new(rules: &[Rule], max_threads: usize) -> Result<Self> {
-        let rules = compile_rules(rules)?;
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(max_threads.max(1))
             .build()
@@ -41,6 +41,7 @@ impl AnalysisResources {
                 path: PathBuf::from("<analysis>"),
                 message: format!("failed to create analysis worker pool: {error}"),
             })?;
+        let rules = pool.install(|| compile_rules(rules))?;
         Ok(Self { rules, pool })
     }
 }
@@ -155,7 +156,7 @@ fn scan_with_resources(
         .pool
         .current_num_threads()
         .max(1)
-        .saturating_mul(2);
+        .saturating_mul(8);
     let batch = SourceBatch {
         resources,
         package,
@@ -164,6 +165,7 @@ fn scan_with_resources(
         finding_budget: &finding_budget,
     };
     let mut pending_sources = Vec::with_capacity(batch_size);
+    let mut file_opener = ScannedFileOpener::new(root)?;
     let walker = WalkDir::new(root)
         .follow_links(false)
         .into_iter()
@@ -179,8 +181,8 @@ fn scan_with_resources(
             continue;
         }
 
-        let language = language_for_entry(&entry, root)?;
-        if language.is_some()
+        let extension_language = language_for(entry.path(), &[]);
+        if extension_language.is_some()
             && outcome
                 .scanned_files
                 .saturating_add(pending_sources.len() as u64)
@@ -191,7 +193,20 @@ fn scan_with_resources(
                 limit: limits.max_source_files,
             });
         }
-        let (source, file_size) = read_entry_contents(&entry, root, language, limits)?;
+        let (language, source, file_size) =
+            read_entry_with_opener(&entry, &mut file_opener, limits, extension_language)?;
+        if language.is_some()
+            && extension_language.is_none()
+            && outcome
+                .scanned_files
+                .saturating_add(pending_sources.len() as u64)
+                >= limits.max_source_files
+        {
+            return Err(Error::LimitExceeded {
+                resource: "source files".to_owned(),
+                limit: limits.max_source_files,
+            });
+        }
         ensure_within_duration(started, limits)?;
         let relative = relative_path(entry.path(), root);
         record_file_analysis(
@@ -284,19 +299,22 @@ fn record_source_batch(
     let analyses = batch.resources.pool.install(|| {
         files
             .par_iter()
-            .map(|file| {
+            .map_init(SourceScanWorker::new, |worker, file| {
                 ensure_within_duration(batch.started, batch.limits)?;
-                scan_file(SourceScanInput {
-                    path: &file.path,
-                    package: batch.package,
-                    language: file.language,
-                    is_tsx: file.is_tsx,
-                    source: &file.source,
-                    rule_sets: &batch.resources.rules,
-                    fail_on_parse_error: batch.limits.fail_on_parse_error,
-                    started: batch.started,
-                    max_scan_duration: batch.limits.max_scan_duration,
-                })
+                scan_file(
+                    worker,
+                    SourceScanInput {
+                        path: &file.path,
+                        package: batch.package,
+                        language: file.language,
+                        is_tsx: file.is_tsx,
+                        source: &file.source,
+                        rule_sets: &batch.resources.rules,
+                        fail_on_parse_error: batch.limits.fail_on_parse_error,
+                        started: batch.started,
+                        max_scan_duration: batch.limits.max_scan_duration,
+                    },
+                )
             })
             .collect::<Result<Vec<_>>>()
     })?;

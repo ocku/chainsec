@@ -21,6 +21,12 @@ pub struct CacheStaging {
     pub(super) directory: TrustedDir,
 }
 
+pub(crate) struct FetchRequest<'a> {
+    pub(super) url: &'a url::Url,
+    pub(super) repository_request: bool,
+    pub(super) source_repository: Option<&'a url::Url>,
+}
+
 #[derive(Clone)]
 pub struct Acquisition {
     // Retained for diagnostics and tests; cache operations use `ecosystem`.
@@ -74,6 +80,7 @@ impl Fetcher for SourceFetcher {
     async fn fetch(&self, dependency: Dependency, declared_from: PathBuf) -> Result<FetchMetadata> {
         let mut dependency = dependency;
         let mut budget = self.network_budget();
+        budget.check()?;
         self.resolve_unlocked_dependency_with_budget(&mut dependency, &mut budget)
             .await?;
         let prepared = self.prepare_fetch(dependency, declared_from)?;
@@ -85,6 +92,7 @@ impl Fetcher for SourceFetcher {
 impl SourceFetcher {
     async fn fetch_prepared_dependency(&self, prepared: PreparedFetch) -> Result<FetchMetadata> {
         let mut budget = self.network_budget();
+        budget.check()?;
         self.fetch_prepared_dependency_with_budget(prepared, &mut budget)
             .await
     }
@@ -102,9 +110,13 @@ impl SourceFetcher {
         } = prepared;
         self.resolve_unlocked_dependency_with_budget(&mut dependency, budget)
             .await?;
+        budget.check()?;
 
         if dependency.is_local() {
-            return self.fetch_local_dependency(&dependency, &declared_from);
+            let fetched =
+                self.fetch_local_dependency_with_budget(&dependency, &declared_from, budget)?;
+            budget.check()?;
+            return Ok(fetched);
         }
         if !dependency.is_resolved() {
             return Err(Error::Resolution {
@@ -113,19 +125,55 @@ impl SourceFetcher {
             });
         }
         let acquisition = acquisition.map_or_else(|| self.acquisition(&dependency), Ok)?;
-        if let CacheLookup::Hit(cached) = self.cached(&dependency, &acquisition)? {
-            return Ok(cached);
+        budget.check()?;
+        let fetch_key = acquisition.identity.clone();
+        let fetch_lock = self
+            .fetch_locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(fetch_key.clone())
+            .or_default()
+            .clone();
+        let _fetch_guard = fetch_lock.lock().await;
+        if let Some(fetched) = self
+            .completed_fetches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&fetch_key)
+            .cloned()
+        {
+            return Ok(fetched);
         }
 
-        self.fetch_remote_dependency_with_budget(&dependency, &acquisition, budget)
-            .await
-    }
-
-    #[allow(dead_code)]
-    pub(super) async fn resolve_remote_root(&self, dependency: &mut Dependency) -> Result<()> {
-        let mut budget = self.network_budget();
-        self.resolve_remote_root_with_budget(dependency, &mut budget)
-            .await
+        let cache_fetcher = self.clone();
+        let cache_dependency = dependency.clone();
+        let cache_acquisition = acquisition.clone();
+        let cached = tokio::task::spawn_blocking(move || {
+            cache_fetcher.cached(&cache_dependency, &cache_acquisition)
+        })
+        .await
+        .map_err(|error| Error::Fetch {
+            package: dependency.id(),
+            source_url: dependency
+                .source_url
+                .clone()
+                .unwrap_or_else(|| dependency.requirement.clone()),
+            message: format!("cache restoration worker failed: {error}"),
+        })??;
+        let fetched = if let CacheLookup::Hit(cached) = cached {
+            budget.check()?;
+            cached
+        } else {
+            budget.check()?;
+            self.fetch_remote_dependency_with_budget(&dependency, &acquisition, budget)
+                .await?
+        };
+        budget.check()?;
+        self.completed_fetches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(fetch_key, fetched.clone());
+        Ok(fetched)
     }
 
     pub(super) async fn resolve_remote_root_with_budget(
@@ -155,13 +203,6 @@ impl SourceFetcher {
                 message: "unsupported remote root source".to_owned(),
             }),
         }
-    }
-
-    #[allow(dead_code)]
-    async fn resolve_unlocked_dependency(&self, dependency: &mut Dependency) -> Result<()> {
-        let mut budget = self.network_budget();
-        self.resolve_unlocked_dependency_with_budget(dependency, &mut budget)
-            .await
     }
 
     async fn resolve_unlocked_dependency_with_budget(
@@ -197,37 +238,30 @@ impl SourceFetcher {
         }
     }
 
-    #[allow(dead_code)]
-    pub(super) async fn fetch_remote_dependency(
-        &self,
-        dependency: &Dependency,
-        acquisition: &Acquisition,
-    ) -> Result<FetchMetadata> {
-        let mut budget = self.network_budget();
-        self.fetch_remote_dependency_with_budget(dependency, acquisition, &mut budget)
-            .await
-    }
-
     pub(super) async fn fetch_remote_dependency_with_budget(
         &self,
         dependency: &Dependency,
         acquisition: &Acquisition,
         budget: &mut NetworkBudget,
     ) -> Result<FetchMetadata> {
-        let (url, repository_request) = self
+        let (url, repository_request, source_repository) = self
             .artifact_request_with_budget(dependency, budget)
             .await?;
+        budget.check()?;
         let temporary = self.create_workspace_directory()?;
+        budget.check()?;
+        let request = FetchRequest {
+            url: &url,
+            repository_request,
+            source_repository: source_repository.as_ref(),
+        };
         let result = self
-            .fetch_into_temporary(
-                dependency,
-                acquisition,
-                &url,
-                repository_request,
-                &temporary,
-                budget,
-            )
-            .await;
+            .fetch_into_temporary(dependency, acquisition, request, &temporary, budget)
+            .await
+            .and_then(|metadata| {
+                budget.check()?;
+                Ok(metadata)
+            });
         if result.is_err() && temporary.exists() {
             let _ = fs::remove_dir_all(&temporary);
         }
@@ -238,8 +272,7 @@ impl SourceFetcher {
         &self,
         dependency: &Dependency,
         acquisition: &Acquisition,
-        url: &url::Url,
-        repository_request: bool,
+        request: FetchRequest<'_>,
         temporary: &Path,
         budget: &mut NetworkBudget,
     ) -> Result<FetchMetadata> {
@@ -251,26 +284,12 @@ impl SourceFetcher {
 
         match dependency.ecosystem {
             Ecosystem::Npm | Ecosystem::Python => {
-                self.fetch_standalone_archive(
-                    dependency,
-                    acquisition,
-                    url,
-                    repository_request,
-                    temporary,
-                    budget,
-                )
-                .await
+                self.fetch_standalone_archive(dependency, acquisition, request, temporary, budget)
+                    .await
             }
             Ecosystem::Deno => {
-                self.fetch_deno_package(
-                    dependency,
-                    acquisition,
-                    url,
-                    repository_request,
-                    temporary,
-                    budget,
-                )
-                .await
+                self.fetch_deno_package(dependency, acquisition, request, temporary, budget)
+                    .await
             }
         }
     }

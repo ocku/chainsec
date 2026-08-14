@@ -20,7 +20,7 @@ Git acquisition never invokes Git or another subprocess. It is limited to public
 
 ### Network is explicit and narrow
 
-Network access defaults off for local scans; `chainsec remote scan` and `chainsec remote diff` automatically enable it. `--online` requires an explicit host allowlist. A `chainsec remote` selector automatically allows only the hosts needed to resolve and download that explicitly requested root package: its configured metadata host, GitHub's archive host for a GitHub remote, and the configured PyPI artifact host for a PyPI remote. Configured Artifactory metadata endpoints, plus an explicitly configured PyPI artifact endpoint, automatically allow their own hosts for online scans. A PyPI metadata response cannot add arbitrary artifact hosts to the allowlist; any host other than the configured endpoint still requires `--allow-host`. Configured npm, PyPI metadata, PyPI artifact, and JSR repository bases, their redirects, and registry-provided artifact URLs must use HTTPS. This prevents unlocked resolution from accepting an attacker-supplied artifact URL and digest from plaintext registry metadata. `allow_insecure_http`/`--allow-insecure-http` is an explicit development-only exception limited to the exact origin, port, and path of a configured loopback repository base; it emits a warning and is recorded in report policy metadata. Plaintext permission is scoped from the initial configured repository URL and cannot be gained through a redirect: HTTPS-to-HTTP loopback downgrades and redirects outside the configured HTTP repository base are rejected. HTTPS repository and CDN redirects retain the normal host-allowlist and per-redirect credential checks. Locked artifact URLs and Deno URL modules retain the general HTTP(S) scheme policy, because their integrity is established independently by a lockfile or declared digest. Every initial URL, Deno graph URL, and redirect target is checked against the allowlist; redirect count, request duration, declared and observed response size, and Deno graph size are bounded. Ambient HTTP proxy settings are disabled so proxy credentials and routing are not inherited.
+Network access defaults off for local scans; `chainsec remote scan` and `chainsec remote diff` automatically enable it. `--online` requires an explicit host allowlist. A `chainsec remote` selector automatically allows only the hosts needed to resolve and download that explicitly requested root package: its configured metadata host, GitHub's archive host for a GitHub remote, and the configured PyPI artifact host for a PyPI remote. Configured Artifactory metadata endpoints, plus an explicitly configured PyPI artifact endpoint, automatically allow their own hosts for online scans. A PyPI metadata response cannot add arbitrary artifact hosts to the allowlist; any host other than the configured endpoint still requires `--allow-host`. Configured npm, PyPI metadata, PyPI artifact, and JSR repository bases, their redirects, and registry-provided artifact URLs must use HTTPS. This prevents unlocked resolution from accepting an attacker-supplied artifact URL and digest from plaintext registry metadata. `allow_insecure_http`/`--allow-insecure-http` is an explicit development-only exception limited to the exact origin, port, and path of a configured loopback repository base; it emits a warning and is recorded in report policy metadata. Plaintext permission is scoped from the initial configured repository URL and cannot be gained through a redirect: HTTPS-to-HTTP loopback downgrades and redirects outside the configured HTTP repository base are rejected. HTTPS repository and CDN redirects retain the normal host-allowlist and per-redirect credential checks. Locked artifact URLs and Deno URL modules retain the general HTTP(S) scheme policy, because their integrity is established independently by a lockfile or declared digest. Every initial URL, Deno graph URL, and redirect target is checked against the allowlist; redirect count, request duration, declared and observed response size, cumulative response bytes per package acquisition, and Deno graph size are bounded. Ambient HTTP proxy settings are disabled so proxy credentials and routing are not inherited.
 
 For example, a mirror may explicitly configure `metadata_base_url = "https://metadata.packages.example/pypi"` and `artifact_base_url = "https://artifacts.packages.example/packages"`; those two hosts are authorized, while a third host in returned metadata is not. Host allowlisting does not defend against compromise of an allowed registry, DNS, certificate authorities, or the TLS implementation. Use narrow exact hosts instead of wildcards. Configured bearer credentials are read only from named environment variables, scoped to their configured URL prefix, and re-evaluated on redirects; they are never sent to GitHub's archive host.
 
@@ -34,9 +34,9 @@ Supported registry lockfiles provide exact versions and integrity. Resolved vers
 
 ### Extraction is confined and bounded
 
-ZIP/wheel and tar-family extraction rejects absolute paths, traversal, symlinks, hard links, special files, and duplicate paths. Tar-family paths are limited to 128 components; ZIP/wheel paths are confined with archive-library traversal checks but do not currently have the same explicit component-depth limit. Extraction creates only regular files/directories beneath a new temporary entry and enforces expanded byte and file limits. Cache publication occurs only after successful verification and extraction.
+ZIP/wheel and tar-family extraction rejects absolute paths, traversal, symlinks, hard links, special files, and duplicate paths. Tar-family, ZIP/wheel, JSR, and local dependency snapshot paths share the configured path-component depth limit (128 by default) in addition to traversal and path-type checks. Extraction creates only regular files/directories beneath a new temporary entry and enforces expanded byte and file limits. Cache publication occurs only after successful verification and extraction.
 
-The current implementation does not separately constrain compression ratio or individual path byte length; total downloaded/expanded bytes and nesting are bounded. ZIP/wheel nesting is not independently capped by a component-count limit.
+The current implementation does not separately constrain compression ratio or individual path byte length; total downloaded/expanded bytes and nesting are bounded.
 
 ### Cache is not trusted
 
@@ -53,21 +53,24 @@ Defaults:
 | Limit | Scope | Default |
 | --- | --- | ---: |
 | Dependency depth | Entire traversal | 3 |
-| Packages | One traversal, or the aggregate unique roots/acquisitions in a remote diff batch | 500 |
+| Packages and Deno URL modules | One traversal, the aggregate unique roots/acquisitions in a remote diff batch, or one Deno URL graph | 500 |
 | Network requests | Each package acquisition, including redirects and JSR files | 1,000 |
 | Network acquisition duration | Each package acquisition end to end | 300 seconds |
 | Downloaded artifact | Each HTTP response/artifact | 100 MiB |
+| Cumulative downloaded bytes | Each package acquisition; sum of the downloaded-artifact and expanded-artifact settings | 600 MiB |
 | Expanded artifact | Each acquired package/graph | 500 MiB |
 | Extracted files | Each acquired package/graph | 50,000 |
+| Acquired path components | Each archive, JSR package, or local snapshot path | 128 |
+| Manifest or lockfile | Each declaration, workspace manifest, import map, or lockfile | 2 MiB |
 | Source file | Each source file | 2 MiB |
 | Source files | Each package scan | 100,000 |
 | Findings | Each package scan | 100,000 |
 | Scan duration | Each package scan | 300 seconds |
-| Deno URL modules | Each Deno URL graph | 1,000 |
-| Redirects | Each HTTP request chain | 5 |
+
+| Redirect hops | Each HTTP request or Deno lockfile alias chain | 5 |
 | HTTP request timeout | Each request | 30 seconds |
 
-Directory symlinks are not followed. `.git`, `.chainsec-cache`, `node_modules`, `target`, virtual environments, and Python bytecode cache directories are excluded. There is no overall wall-clock deadline across the complete dependency traversal; per-package scan duration, per-package acquisition duration, and request limits do not bound the total time of a multi-package scan. Acquisition counters and deadlines are created per package rather than globally, so concurrent package work does not consume another package’s budget.
+Manifest and lockfile reads share one 2 MiB boundary across Python, npm, and Deno parsers. npm and Deno workspace enumeration share the configured dependency-depth and source-file-count budgets, so neither deep nor broad directory trees can force an unbounded manifest walk. Directory symlinks are not followed. `.git`, `.chainsec-cache`, `node_modules`, `target`, virtual environments, and Python bytecode cache directories are excluded. There is no overall wall-clock deadline across the complete dependency traversal; per-package scan duration, per-package acquisition duration, and request limits do not bound the total time of a multi-package scan. Acquisition counters and deadlines are created per package rather than globally, so concurrent package work does not consume another package’s budget.
 
 ## Data and report contract
 

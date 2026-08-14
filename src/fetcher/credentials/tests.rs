@@ -2,36 +2,34 @@ use super::{ScopedCredential, authorization_for};
 use url::Url;
 
 #[test]
-fn credentials_are_scoped_by_host_and_path() {
+fn credentials_are_scoped_by_https_host_port_and_route() {
     let credential = ScopedCredential::bearer(
-        Url::parse("https://artifacts.example/artifactory/api/npm/private/").unwrap(),
+        Url::parse("https://artifacts.example:8443/artifactory/api/npm/private/").unwrap(),
         "secret",
     )
     .unwrap();
-    assert!(
-        authorization_for(
-            std::slice::from_ref(&credential),
-            &Url::parse("https://artifacts.example/artifactory/api/npm/private/package").unwrap()
-        )
-        .unwrap()
-        .is_some()
-    );
-    assert!(
-        authorization_for(
-            std::slice::from_ref(&credential),
-            &Url::parse("https://artifacts.example/artifactory/api/npm/public/package").unwrap()
-        )
-        .unwrap()
-        .is_none()
-    );
-    assert!(
-        authorization_for(
-            std::slice::from_ref(&credential),
-            &Url::parse("http://artifacts.example/artifactory/api/npm/private/package").unwrap()
-        )
-        .unwrap()
-        .is_none()
-    );
+
+    let authorization_for_url = |url: &str| {
+        authorization_for(std::slice::from_ref(&credential), &Url::parse(url).unwrap())
+            .unwrap()
+            .is_some()
+    };
+
+    assert!(authorization_for_url(
+        "https://artifacts.example:8443/artifactory/api/npm/private/package"
+    ));
+
+    for url in [
+        // A different scheme must never receive a credential, even if all other
+        // URL components are identical.
+        "http://artifacts.example:8443/artifactory/api/npm/private/package",
+        "https://other.example:8443/artifactory/api/npm/private/package",
+        "https://artifacts.example:443/artifactory/api/npm/private/package",
+        "https://artifacts.example:8443/artifactory/api/npm/public/package",
+        "https://artifacts.example:8443/artifactory/api/npm/private-sibling/package",
+    ] {
+        assert!(!authorization_for_url(url), "credential leaked to {url}");
+    }
 }
 
 #[test]

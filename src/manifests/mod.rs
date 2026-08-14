@@ -14,7 +14,7 @@ pub(crate) mod shared;
 #[cfg(test)]
 use deno::strip_jsonc;
 pub use discovery::discover;
-pub(crate) use discovery::discover_with_contexts;
+pub(crate) use discovery::discover_with_contexts_and_limits;
 pub(crate) use python::PythonLockContext;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]

@@ -231,7 +231,7 @@ fn json_report_has_versioned_contract() {
             "tests/fixtures/scanner",
             "--format",
             "json",
-            "--max-depth",
+            "--max-package-depth",
             "0",
             "--cache",
             cache.path().to_str().unwrap(),
@@ -283,7 +283,7 @@ fn json_report_records_the_insecure_http_opt_in() {
             "tests/fixtures/scanner",
             "--format",
             "json",
-            "--max-depth",
+            "--max-package-depth",
             "0",
             "--allow-insecure-http",
             "--cache",
@@ -309,7 +309,7 @@ fn human_report_is_the_default_format() {
         .args([
             "scan",
             "tests/fixtures/scanner",
-            "--max-depth",
+            "--max-package-depth",
             "0",
             "--cache",
             cache.path().to_str().unwrap(),
@@ -338,7 +338,7 @@ fn human_report_filters_below_threshold_unless_verbose() {
         .args([
             "scan",
             "tests/fixtures/scanner",
-            "--max-depth",
+            "--max-package-depth",
             "0",
             "--cache",
             cache.path().to_str().unwrap(),
@@ -358,7 +358,7 @@ fn human_report_filters_below_threshold_unless_verbose() {
         .args([
             "scan",
             "tests/fixtures/scanner",
-            "--max-depth",
+            "--max-package-depth",
             "0",
             "--cache",
             cache.path().to_str().unwrap(),
@@ -451,7 +451,7 @@ fn run_registry_diff(arguments: &[&str]) -> (serde_json::Value, Vec<String>) {
         .args([
             "--format",
             "json",
-            "--max-depth",
+            "--max-package-depth",
             "0",
             "--fail-on",
             "critical",
@@ -662,7 +662,7 @@ fn init_creates_a_conservative_root_config_without_scanning() {
             .any(|line| line.trim() == ".chainsec-cache")
     );
 
-    assert!(config.contains("max_depth = 3"));
+    assert!(config.contains("max_package_depth = 3"));
     assert!(config.contains("# online = true"));
     assert!(config.contains("ignored_paths ="));
 
@@ -752,7 +752,7 @@ fn global_config_is_complementary_and_repository_config_takes_precedence() {
     std::fs::write(project.path().join("sample.py"), "eval(payload)\n").unwrap();
     std::fs::write(
         project.path().join("chainsec.toml"),
-        "format = \"json\"\nmax_depth = 0\nfail_on = \"critical\"\n",
+        "format = \"json\"\nmax_package_depth = 0\nfail_on = \"critical\"\n",
     )
     .unwrap();
 
@@ -786,7 +786,7 @@ fn xdg_global_config_takes_precedence_over_home_config() {
     std::fs::create_dir_all(&home_config).unwrap();
     std::fs::write(
         xdg_config.join("config.toml"),
-        "format = \"json\"\nmax_depth = 0\nfail_on = \"critical\"\n",
+        "format = \"json\"\nmax_package_depth = 0\nfail_on = \"critical\"\n",
     )
     .unwrap();
     std::fs::write(home_config.join("config.toml"), "format = \"human\"\n").unwrap();
@@ -825,7 +825,7 @@ fn allowed_hosts_extend_across_global_project_and_cli_configuration() {
     std::fs::write(project.path().join("sample.py"), "print('safe')\n").unwrap();
     std::fs::write(
         project.path().join("chainsec.toml"),
-        "max_depth = 0\nfail_on = \"critical\"\nallowed_hosts = [\"project.example\", \"shared.example\"]\n",
+        "max_package_depth = 0\nfail_on = \"critical\"\nallowed_hosts = [\"project.example\", \"shared.example\"]\n",
     )
     .unwrap();
 
@@ -887,7 +887,7 @@ bearer_token_env = "CHAINSEC_TEST_REGISTRY_TOKEN"
         .arg(project.path())
         .args([
             "--online",
-            "--max-depth",
+            "--max-package-depth",
             "0",
             "--cache",
             cache.path().to_str().unwrap(),
@@ -922,7 +922,7 @@ fn custom_rule_pack_is_loaded_end_to_end() {
         .args([
             "--format",
             "json",
-            "--max-depth",
+            "--max-package-depth",
             "0",
             "--cache",
             cache.path().to_str().unwrap(),
@@ -955,7 +955,7 @@ fn ignored_rule_is_absent_from_the_report() {
         .args([
             "--format",
             "json",
-            "--max-depth",
+            "--max-package-depth",
             "0",
             "--cache",
             cache.path().to_str().unwrap(),
@@ -998,7 +998,7 @@ fn ignore_rule_supports_grouped_globs() {
         .args([
             "--format",
             "json",
-            "--max-depth",
+            "--max-package-depth",
             "0",
             "--cache",
             cache.path().to_str().unwrap(),
@@ -1038,7 +1038,7 @@ fn configured_suppression_is_auditable_and_does_not_fail_the_scan() {
     std::fs::write(
         project.path().join("chainsec.toml"),
         r#"
-max_depth = 0
+max_package_depth = 0
 fail_on = "high"
 
 [[suppressions]]
@@ -1090,7 +1090,7 @@ fn human_report_includes_rule_group_and_dependency() {
         .arg("scan")
         .arg(project.path())
         .args([
-            "--max-depth",
+            "--max-package-depth",
             "0",
             "--cache",
             cache.path().to_str().unwrap(),
@@ -1126,7 +1126,7 @@ fn root_config_ignores_rules_and_paths() {
     .unwrap();
     std::fs::write(
         project.path().join("chainsec.toml"),
-        "max_depth = 0\nignored_rules = [\"execution:chainsec.py.detection.dynamic-code-execution\"]\nignored_paths = [\"tests/*\"]\nfail_on = \"high\"\n",
+        "max_package_depth = 0\nignored_rules = [\"execution:chainsec.py.detection.dynamic-code-execution\"]\nignored_paths = [\"tests/*\"]\nfail_on = \"high\"\n",
     )
     .unwrap();
 
@@ -1168,7 +1168,7 @@ fn cli_ignores_root_paths() {
         .args([
             "--format",
             "json",
-            "--max-depth",
+            "--max-package-depth",
             "0",
             "--cache",
             cache.path().to_str().unwrap(),
@@ -1350,13 +1350,13 @@ fn human_formatted_size_limits_are_accepted() {
         .arg("scan")
         .arg(project.path())
         .args([
-            "--max-depth",
+            "--max-package-depth",
             "0",
-            "--max-archive",
+            "--max-archive-size",
             "100m",
-            "--max-extracted",
+            "--max-extracted-size",
             "100M",
-            "--max-source-file",
+            "--max-source-file-size",
             "100MiB",
             "--cache",
             cache.path().to_str().unwrap(),
@@ -1378,7 +1378,7 @@ fn online_without_allowlist_allows_local_only_scans() {
     let output = Command::new(env!("CARGO_BIN_EXE_chainsec"))
         .arg("scan")
         .arg(project.path())
-        .args(["--online", "--max-depth", "0"])
+        .args(["--online", "--max-package-depth", "0"])
         .output()
         .unwrap();
     assert!(
@@ -1399,7 +1399,7 @@ fn output_file_contains_analysis_and_leaves_stdout_empty() {
         .args([
             "--format",
             "json",
-            "--max-depth",
+            "--max-package-depth",
             "0",
             "--cache",
             cache.path().to_str().unwrap(),

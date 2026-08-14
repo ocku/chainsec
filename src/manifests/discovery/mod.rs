@@ -9,10 +9,10 @@ use super::{
 };
 use crate::{
     error::{Error, Result},
-    model::{Dependency, Language},
+    model::{Dependency, EngineLimits, Language},
 };
 
-use super::shared::{ManifestRoot, with_manifest_roots};
+use super::shared::{ManifestRoot, extend_dependencies_bounded, with_manifest_roots_and_limit};
 
 pub fn discover(root: &Path) -> Result<Discovery> {
     let outcome = discover_with_contexts(root, &[], &[]);
@@ -26,6 +26,20 @@ pub(crate) fn discover_with_contexts(
     root: &Path,
     inherited_npm_contexts: &[NpmLockContext],
     inherited_python_contexts: &[PythonLockContext],
+) -> DiscoveryOutcome {
+    discover_with_contexts_and_limits(
+        root,
+        inherited_npm_contexts,
+        inherited_python_contexts,
+        &EngineLimits::default(),
+    )
+}
+
+pub(crate) fn discover_with_contexts_and_limits(
+    root: &Path,
+    inherited_npm_contexts: &[NpmLockContext],
+    inherited_python_contexts: &[PythonLockContext],
+    limits: &EngineLimits,
 ) -> DiscoveryOutcome {
     let dependencies = Vec::new();
     let lockfiles = Vec::new();
@@ -43,8 +57,13 @@ pub(crate) fn discover_with_contexts(
     ) {
         return empty_outcome(dependencies, lockfiles, error);
     }
-    let rooted = with_manifest_roots(&roots, || {
-        discover_rooted(&roots[0], inherited_npm_contexts, inherited_python_contexts)
+    let rooted = with_manifest_roots_and_limit(&roots, limits.max_manifest_file_size, || {
+        discover_rooted(
+            &roots[0],
+            inherited_npm_contexts,
+            inherited_python_contexts,
+            limits,
+        )
     });
     match rooted {
         Ok(outcome) => outcome,
@@ -102,6 +121,7 @@ fn discover_rooted(
     manifest_root: &ManifestRoot,
     inherited_npm_contexts: &[NpmLockContext],
     inherited_python_contexts: &[PythonLockContext],
+    limits: &EngineLimits,
 ) -> DiscoveryOutcome {
     let mut dependencies = Vec::new();
     let mut lockfiles = Vec::new();
@@ -116,6 +136,7 @@ fn discover_rooted(
         &mut lockfiles,
         &mut install_scripts,
         &mut python_contexts,
+        limits,
     ) {
         errors.push(error);
     }
@@ -125,6 +146,7 @@ fn discover_rooted(
         &mut dependencies,
         &mut lockfiles,
         &mut install_scripts,
+        limits,
     ) {
         Ok(contexts) => contexts,
         Err(error) => {
@@ -132,7 +154,7 @@ fn discover_rooted(
             HashMap::new()
         }
     };
-    if let Err(error) = discover_deno(manifest_root, &mut dependencies, &mut lockfiles) {
+    if let Err(error) = discover_deno(manifest_root, &mut dependencies, &mut lockfiles, limits) {
         errors.push(error);
     }
 
@@ -191,6 +213,7 @@ fn discover_python(
     lockfiles: &mut Vec<PathBuf>,
     install_scripts: &mut Vec<InstallScriptWarning>,
     contexts: &mut BTreeSet<PythonLockContext>,
+    limits: &EngineLimits,
 ) -> Result<()> {
     let root = manifest_root.path();
     let setup_py = root.join("setup.py");
@@ -203,28 +226,45 @@ fn discover_python(
     }
 
     let pyproject = root.join("pyproject.toml");
-    if !manifest_root.is_file(Path::new("pyproject.toml"))? {
+    let pipfile = root.join("Pipfile");
+    let has_pyproject = manifest_root.is_file(Path::new("pyproject.toml"))?;
+    let has_pipfile = manifest_root.is_file(Path::new("Pipfile"))?;
+    if !has_pyproject && !has_pipfile {
         return Ok(());
     }
     for lockfile in ["poetry.lock", "Pipfile.lock", "uv.lock", "pdm.lock"] {
         manifest_root.is_file(Path::new(lockfile))?;
     }
-    let mut python_dependencies = python::parse(&pyproject)?;
+    let mut python_dependencies = Vec::new();
+    if has_pyproject {
+        extend_dependencies_bounded(
+            &mut python_dependencies,
+            python::parse_with_limit(&pyproject, limits.max_packages)?,
+            limits.max_packages,
+        )?;
+    }
+    if has_pipfile {
+        extend_dependencies_bounded(
+            &mut python_dependencies,
+            python::parse_pipfile_with_limit(&pipfile, limits.max_packages)?,
+            limits.max_packages,
+        )?;
+    }
     match python::enrich(
         manifest_root,
         &mut python_dependencies,
         lockfiles,
         inherited_contexts,
+        limits.max_packages,
     ) {
         Ok(python_contexts) => *contexts = python_contexts,
         Err(error) => {
             // Keep declarations visible so an enrichment failure cannot suppress them.
-            dependencies.extend(python_dependencies);
+            extend_dependencies_bounded(dependencies, python_dependencies, limits.max_packages)?;
             return Err(error);
         }
     }
-    dependencies.extend(python_dependencies);
-    Ok(())
+    extend_dependencies_bounded(dependencies, python_dependencies, limits.max_packages)
 }
 
 fn discover_npm(
@@ -233,6 +273,7 @@ fn discover_npm(
     dependencies: &mut Vec<Dependency>,
     lockfiles: &mut Vec<PathBuf>,
     install_scripts: &mut Vec<InstallScriptWarning>,
+    limits: &EngineLimits,
 ) -> Result<HashMap<String, BTreeSet<NpmLockContext>>> {
     let root = manifest_root.path();
     let package = root.join("package.json");
@@ -248,7 +289,8 @@ fn discover_npm(
     ] {
         manifest_root.is_file(Path::new(lockfile))?;
     }
-    let (npm_dependencies, lifecycle_scripts) = npm::parse(&package)?;
+    let (npm_dependencies, lifecycle_scripts) =
+        npm::parse_with_limit(&package, limits.max_packages)?;
     if let Some(scripts) = lifecycle_scripts {
         install_scripts.push(InstallScriptWarning {
             language: Language::JavaScript,
@@ -263,15 +305,16 @@ fn discover_npm(
             Ok(result) => result,
             Err(error) => {
                 // Keep declarations visible so an enrichment failure cannot suppress them.
-                dependencies.extend(local_dependencies);
+                extend_dependencies_bounded(dependencies, local_dependencies, limits.max_packages)?;
                 return Err(error);
             }
         };
     let mut contexts = context_sets(local_contexts);
     let mut workspace_dependencies = Vec::new();
-    for member in npm::workspace_members(manifest_root, &package)? {
+    for member in npm::workspace_members(manifest_root, &package, limits)? {
         let member_package = root.join(&member).join("package.json");
-        let (mut member_dependencies, lifecycle_scripts) = npm::parse(&member_package)?;
+        let (mut member_dependencies, lifecycle_scripts) =
+            npm::parse_with_limit(&member_package, limits.max_packages)?;
         if let Some(scripts) = lifecycle_scripts {
             install_scripts.push(InstallScriptWarning {
                 language: Language::JavaScript,
@@ -291,10 +334,14 @@ fn discover_npm(
                     .insert(child_context);
             }
         }
-        local_dependencies.extend(member_dependencies);
+        extend_dependencies_bounded(
+            &mut local_dependencies,
+            member_dependencies,
+            limits.max_packages,
+        )?;
     }
     if selected_local_lock || inherited_contexts.is_empty() {
-        dependencies.extend(local_dependencies);
+        extend_dependencies_bounded(dependencies, local_dependencies, limits.max_packages)?;
         return Ok(contexts);
     }
 
@@ -308,7 +355,7 @@ fn discover_npm(
         {
             lockfiles.push(context.lockfile.clone());
         }
-        dependencies.extend(contextual_dependencies);
+        extend_dependencies_bounded(dependencies, contextual_dependencies, limits.max_packages)?;
         for (member, member_dependencies) in &workspace_dependencies {
             let mut contextual_dependencies = member_dependencies.clone();
             let mut member_context = context.clone();
@@ -321,7 +368,11 @@ fn discover_npm(
             {
                 lockfiles.push(context.lockfile.clone());
             }
-            dependencies.extend(contextual_dependencies);
+            extend_dependencies_bounded(
+                dependencies,
+                contextual_dependencies,
+                limits.max_packages,
+            )?;
             for (dependency, child_context) in member_child_contexts {
                 inherited_contexts_by_dependency
                     .entry(dependency)
@@ -389,21 +440,21 @@ fn discover_deno(
     root: &ManifestRoot,
     dependencies: &mut Vec<Dependency>,
     lockfiles: &mut Vec<PathBuf>,
+    limits: &EngineLimits,
 ) -> Result<()> {
     let directory = root.path();
     let Some(manifest) = deno::select_manifest(root)? else {
         return Ok(());
     };
 
-    let parsed = deno::parse(directory, &manifest)?;
+    let parsed = deno::parse_with_limits(directory, &manifest, limits)?;
     let mut imports = parsed.dependencies;
-    if let Err(error) = deno::enrich(directory, &parsed.lockfile, &mut imports, lockfiles) {
+    if let Err(error) = deno::enrich(directory, &parsed.lockfile, &mut imports, lockfiles, limits) {
         // Keep declarations visible so an enrichment failure cannot suppress them.
-        dependencies.extend(imports);
+        extend_dependencies_bounded(dependencies, imports, limits.max_packages)?;
         return Err(error);
     }
-    dependencies.extend(imports);
-    Ok(())
+    extend_dependencies_bounded(dependencies, imports, limits.max_packages)
 }
 
 #[cfg(test)]

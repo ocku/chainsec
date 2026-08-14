@@ -97,7 +97,7 @@ These checks are not Tree-sitter source rules.
 | `chainsec.detection.file.binary` | High / High | Unrecognized non-UTF-8 data or NUL bytes when it is not a recognized static asset or native artifact. |
 | `chainsec.detection.file.high-entropy-file` | Medium / Medium | An unrecognized file of at least 256 bytes with Shannon entropy at least 7.0 bits/byte. |
 
-File checks examine all scanned files. Supported source files are read in full within `--max-source-file`; other files are analyzed from a bounded prefix of up to 1 MiB. Compression and native executable/library formats are recognized before unknown binary and entropy classification. Known static assets with a matching signature, including macOS icon files, are skipped to reduce noise.
+File checks examine all scanned files. Supported source files are read in full within `--max-source-file-size`; other files are analyzed from a bounded prefix of up to 1 MiB. Compression and native executable/library formats are recognized before unknown binary and entropy classification. Known static assets with a matching signature, including macOS icon files, are skipped to reduce noise.
 
 ## Capability rules
 

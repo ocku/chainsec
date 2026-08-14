@@ -2,9 +2,9 @@ use std::io::Write;
 
 use std::path::Path;
 
-use crate::model::Language;
+use crate::model::{EngineLimits, Language};
 
-use super::{language_for, read_source_file};
+use super::{language_for, read_entry, read_source_file};
 
 #[test]
 fn source_reads_are_limited_even_when_metadata_is_stale() {
@@ -26,6 +26,44 @@ fn source_reads_reject_symlinks() {
     symlink(&target, &link).unwrap();
 
     assert!(read_source_file(&link, 1024).is_err());
+}
+
+#[test]
+fn extensionless_source_is_detected_and_read_from_one_stream() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("postinstall");
+    let source = b"#!/usr/bin/env python3\neval(payload)\n";
+    std::fs::write(&path, source).unwrap();
+    let entry = walkdir::WalkDir::new(&path)
+        .into_iter()
+        .next()
+        .unwrap()
+        .unwrap();
+
+    let (language, contents, size) =
+        read_entry(&entry, &path, &EngineLimits::default(), None).unwrap();
+
+    assert_eq!(language, Some(Language::Python));
+    assert_eq!(contents, source);
+    assert_eq!(size, source.len() as u64);
+}
+
+#[test]
+fn extensionless_source_reads_still_enforce_the_source_limit() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("postinstall");
+    std::fs::write(&path, b"#!/usr/bin/env python3\neval(payload)\n").unwrap();
+    let entry = walkdir::WalkDir::new(&path)
+        .into_iter()
+        .next()
+        .unwrap()
+        .unwrap();
+    let limits = EngineLimits {
+        max_source_file_size: 16,
+        ..EngineLimits::default()
+    };
+
+    assert!(read_entry(&entry, &path, &limits, None).is_err());
 }
 
 #[test]

@@ -26,6 +26,20 @@ fn dependency(requirement: &str) -> Dependency {
 fn write_lock(name: &str, contents: &str) -> (tempfile::TempDir, std::path::PathBuf) {
     let directory = tempdir().unwrap();
     let path = directory.path().join(name);
+    let contents = match name {
+        "poetry.lock" => format!("[metadata]\nlock-version = \"2.0\"\n{contents}"),
+        "uv.lock" => format!("version = 1\n{contents}"),
+        "pdm.lock" => format!("[metadata]\nlock_version = \"4.5.0\"\n{contents}"),
+        "Pipfile.lock" => {
+            let mut value: serde_json::Value = serde_json::from_str(contents).unwrap();
+            value
+                .as_object_mut()
+                .unwrap()
+                .insert("_meta".into(), serde_json::json!({"pipfile-spec": 6}));
+            serde_json::to_string(&value).unwrap()
+        }
+        _ => contents.to_owned(),
+    };
     fs::write(&path, contents).unwrap();
     (directory, path)
 }
@@ -65,6 +79,35 @@ fn pipfile_deduplicates_identical_default_and_develop_records() {
     assert_eq!(dependencies[0].integrity.as_deref(), Some(hash.as_str()));
 }
 
+#[test]
+fn pipfile_indexes_large_normalized_name_collision_buckets() {
+    let separators = ['-', '_', '.'];
+    let mut entries = serde_json::Map::new();
+    let mut first_name = String::new();
+    for index in 0..1_000usize {
+        let mut variant = index;
+        let mut name = String::new();
+        for (position, character) in "collision".chars().enumerate() {
+            name.push(character);
+            if position < "collision".len() - 1 {
+                name.push(separators[variant % separators.len()]);
+                variant /= separators.len();
+            }
+        }
+        if index == 0 {
+            first_name.clone_from(&name);
+        }
+        entries.insert(name, serde_json::json!({"version": format!("=={index}")}));
+    }
+    let contents = serde_json::json!({"default": entries, "develop": {}}).to_string();
+    let (_directory, path) = write_lock("Pipfile.lock", &contents);
+    let mut dependencies = vec![dependency(&format!("{first_name}>=10000"))];
+
+    let error = pipfile::enrich(&path, &mut dependencies).unwrap_err();
+
+    assert!(error.to_string().contains("no lock record"));
+}
+
 #[cfg(unix)]
 #[test]
 fn lock_selection_uses_the_opened_root_after_path_replacement() {
@@ -73,7 +116,7 @@ fn lock_selection_uses_the_opened_root_after_path_replacement() {
     fs::create_dir(&root_path).unwrap();
     fs::write(
         root_path.join("poetry.lock"),
-        "[[package]]\nname = \"trusted\"\nversion = \"1\"\n",
+        "[metadata]\nlock-version = \"2.0\"\n[[package]]\nname = \"trusted\"\nversion = \"1\"\n",
     )
     .unwrap();
     let root = ManifestRoot::open(&root_path).unwrap();
@@ -85,13 +128,87 @@ fn lock_selection_uses_the_opened_root_after_path_replacement() {
     let mut dependencies = Vec::new();
     let mut lockfiles = Vec::new();
     let contexts = with_manifest_roots(std::slice::from_ref(&root), || {
-        enrich(&root, &mut dependencies, &mut lockfiles, &[])
+        enrich(
+            &root,
+            &mut dependencies,
+            &mut lockfiles,
+            &[],
+            crate::model::EngineLimits::default().max_packages,
+        )
     })
     .unwrap()
     .unwrap();
 
     assert_eq!(contexts.len(), 1);
     assert_eq!(lockfiles, vec![root_path.join("poetry.lock")]);
+}
+
+type LockEnricher = fn(&Path, &mut Vec<Dependency>) -> crate::error::Result<()>;
+
+#[test]
+fn unsupported_or_malformed_lockfile_schemas_fail_closed() {
+    let cases: &[(&str, LockEnricher, &[&str])] = &[
+        (
+            "poetry.lock",
+            enrich_poetry,
+            &[
+                "package = []\n",
+                "[metadata]\nlock-version = 2\npackage = []\n",
+                "[metadata]\nlock-version = \"3.0\"\npackage = []\n",
+            ],
+        ),
+        (
+            "uv.lock",
+            enrich_uv,
+            &[
+                "package = []\n",
+                "version = \"1\"\npackage = []\n",
+                "version = 2\npackage = []\n",
+            ],
+        ),
+        (
+            "pdm.lock",
+            enrich_pdm,
+            &[
+                "package = []\n",
+                "[metadata]\nlock_version = 4.5\npackage = []\n",
+                "[metadata]\nlock_version = \"5.0.0\"\npackage = []\n",
+            ],
+        ),
+    ];
+
+    for (name, enrich, contents) in cases {
+        for contents in *contents {
+            let directory = tempdir().unwrap();
+            let path = directory.path().join(name);
+            fs::write(&path, contents).unwrap();
+            let mut dependencies = vec![dependency("demo>=1")];
+
+            assert!(
+                enrich(&path, &mut dependencies).is_err(),
+                "accepted {name}: {contents}"
+            );
+            assert_eq!(dependencies.len(), 1);
+            assert_eq!(dependencies[0].name, "demo");
+            assert!(dependencies[0].resolved_version.is_none());
+        }
+    }
+
+    for contents in [
+        r#"{"default":{},"develop":{}}"#,
+        r#"{"_meta":{"pipfile-spec":"6"},"default":{},"develop":{}}"#,
+        r#"{"_meta":{"pipfile-spec":7},"default":{},"develop":{}}"#,
+    ] {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("Pipfile.lock");
+        fs::write(&path, contents).unwrap();
+        let mut dependencies = vec![dependency("demo>=1")];
+
+        assert!(pipfile::enrich(&path, &mut dependencies).is_err());
+        assert_eq!(dependencies.len(), 1);
+        assert_eq!(dependencies[0].name, "demo");
+        assert!(dependencies[0].resolved_version.is_none());
+    }
 }
 
 #[test]

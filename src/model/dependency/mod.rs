@@ -3,6 +3,7 @@ use std::{
     fmt,
     hash::{Hash, Hasher},
     path::PathBuf,
+    sync::Arc,
 };
 
 use sha2::{Digest, Sha256};
@@ -31,7 +32,7 @@ impl fmt::Display for Ecosystem {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DenoLockfileSnapshot {
     identity: String,
-    remote_integrities: HashMap<String, String>,
+    remote_integrities: Arc<HashMap<String, String>>,
 }
 
 impl Hash for DenoLockfileSnapshot {
@@ -50,7 +51,7 @@ impl DenoLockfileSnapshot {
                 remote
                     .iter()
                     .filter_map(|(url, integrity)| {
-                        let url = canonical_deno_remote_url(url)?;
+                        let url = canonical_http_url(url)?;
                         integrity
                             .as_str()
                             .map(|integrity| (url, integrity.to_owned()))
@@ -60,7 +61,7 @@ impl DenoLockfileSnapshot {
             .unwrap_or_default();
         Self {
             identity: format!("sha256:{}", hex::encode(Sha256::digest(bytes))),
-            remote_integrities,
+            remote_integrities: Arc::new(remote_integrities),
         }
     }
 
@@ -71,7 +72,7 @@ impl DenoLockfileSnapshot {
     ) -> Self {
         Self {
             identity: identity.into(),
-            remote_integrities,
+            remote_integrities: Arc::new(remote_integrities),
         }
     }
 
@@ -81,6 +82,11 @@ impl DenoLockfileSnapshot {
 
     pub(crate) fn remote_integrities(&self) -> &HashMap<String, String> {
         &self.remote_integrities
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shares_remote_integrities_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.remote_integrities, &other.remote_integrities)
     }
 }
 
@@ -94,13 +100,13 @@ fn deno_remote_integrity_entries(
     let root = value.as_object()?;
     (value.get("version").is_none()
         && !root.is_empty()
-        && root.iter().all(|(url, integrity)| {
-            canonical_deno_remote_url(url).is_some() && integrity.is_string()
-        }))
+        && root
+            .iter()
+            .all(|(url, integrity)| canonical_http_url(url).is_some() && integrity.is_string()))
     .then_some(root)
 }
 
-pub(crate) fn canonical_deno_remote_url(value: &str) -> Option<String> {
+pub(crate) fn canonical_http_url(value: &str) -> Option<String> {
     Url::parse(value)
         .ok()
         .filter(|url| matches!(url.scheme(), "http" | "https"))
@@ -226,8 +232,15 @@ impl Dependency {
             .as_deref()
             .unwrap_or(&self.requirement);
         let integrity = self.integrity.as_deref().unwrap_or("unverified");
+        let source_identity = self
+            .integrity
+            .is_none()
+            .then(|| self.github_archive_url())
+            .flatten()
+            .map(|url| format!("@{url}"))
+            .unwrap_or_default();
         format!(
-            "{}:{}@{}#{}",
+            "{}:{}@{}#{}{source_identity}",
             self.ecosystem,
             canonical_name(&self.ecosystem, &self.name),
             version,

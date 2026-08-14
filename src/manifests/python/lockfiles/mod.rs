@@ -3,7 +3,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::{error::Result, manifests::shared::ManifestRoot, model::Dependency};
+use crate::{
+    error::Result,
+    manifests::shared::{ManifestRoot, extend_dependencies_bounded},
+    model::Dependency,
+};
 
 mod artifact;
 mod common;
@@ -11,7 +15,7 @@ mod pipfile;
 mod toml;
 
 pub(super) use common::package_string;
-use toml::{enrich_pdm, enrich_poetry, enrich_uv};
+use toml::{enrich_pdm_bounded, enrich_poetry_bounded, enrich_uv_bounded};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum PythonLockContext {
@@ -54,12 +58,12 @@ impl PythonLockContext {
         }
     }
 
-    fn enrich(&self, dependencies: &mut Vec<Dependency>) -> Result<()> {
+    fn enrich(&self, dependencies: &mut Vec<Dependency>, max_packages: usize) -> Result<()> {
         match self {
-            Self::Poetry(path) => enrich_poetry(path, dependencies),
-            Self::Pipfile(path) => pipfile::enrich(path, dependencies),
-            Self::Uv(path) => enrich_uv(path, dependencies),
-            Self::Pdm(path) => enrich_pdm(path, dependencies),
+            Self::Poetry(path) => enrich_poetry_bounded(path, dependencies, max_packages),
+            Self::Pipfile(path) => pipfile::enrich_bounded(path, dependencies, max_packages),
+            Self::Uv(path) => enrich_uv_bounded(path, dependencies, max_packages),
+            Self::Pdm(path) => enrich_pdm_bounded(path, dependencies, max_packages),
         }
     }
 }
@@ -69,13 +73,21 @@ pub(in crate::manifests) fn enrich(
     dependencies: &mut Vec<Dependency>,
     lockfiles: &mut Vec<PathBuf>,
     inherited_contexts: &[PythonLockContext],
+    max_packages: usize,
 ) -> Result<BTreeSet<PythonLockContext>> {
     let contexts = match PythonLockContext::find(root)? {
         Some(context) => vec![context],
         None => inherited_contexts.to_vec(),
     };
     for context in &contexts {
-        context.enrich(dependencies)?;
+        // Enrichment is fallible and may expand one declaration into multiple authorized
+        // artifacts. Work on a copy so malformed lock data cannot erase declarations, then apply
+        // the package budget before another inherited context can amplify the result again.
+        let mut enriched = dependencies.clone();
+        context.enrich(&mut enriched, max_packages)?;
+        let mut bounded = Vec::new();
+        extend_dependencies_bounded(&mut bounded, enriched, max_packages)?;
+        *dependencies = bounded;
         let path = context.path();
         if !lockfiles.iter().any(|lockfile| lockfile == path) {
             lockfiles.push(path.to_owned());

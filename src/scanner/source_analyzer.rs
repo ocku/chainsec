@@ -6,6 +6,7 @@ use std::{
     time::Instant,
 };
 
+use rayon::prelude::*;
 use tree_sitter::{CaptureQuantifier, ParseOptions, Parser, Query, QueryCursor, StreamingIterator};
 
 use super::entropy::has_high_entropy;
@@ -28,24 +29,29 @@ pub fn validate_rules(rules: &[Rule]) -> Result<()> {
 }
 
 pub(crate) fn compile_rules(rules: &[Rule]) -> Result<Vec<CompiledRuleSet>> {
-    [Language::Python, Language::JavaScript, Language::TypeScript]
+    let language_rules: Vec<_> = [Language::Python, Language::JavaScript, Language::TypeScript]
         .into_iter()
         .filter_map(|language| {
-            let language_rules = rules
+            let rules = rules
                 .iter()
                 .filter(|rule| rule.language == language)
                 .cloned()
                 .collect::<Vec<_>>();
-            (!language_rules.is_empty()).then_some((language, language_rules))
+            (!rules.is_empty()).then_some((language, rules))
         })
-        .flat_map(|(language, language_rules)| {
-            let mut compiled = vec![compile_rule_set(language, false, language_rules.clone())];
+        .collect();
+
+    language_rules
+        .into_par_iter()
+        .map(|(language, rules)| {
+            let mut compiled = vec![compile_rule_set(language, false, rules.clone())?];
             if language == Language::TypeScript {
-                compiled.push(compile_rule_set(language, true, language_rules));
+                compiled.push(compile_rule_set(language, true, rules)?);
             }
-            compiled
+            Ok(compiled)
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()
+        .map(|compiled| compiled.into_iter().flatten().collect())
 }
 
 fn compile_rule_set(language: Language, is_tsx: bool, rules: Vec<Rule>) -> Result<CompiledRuleSet> {
@@ -127,7 +133,26 @@ pub(super) struct SourceScanInput<'a> {
     pub(super) max_scan_duration: std::time::Duration,
 }
 
-pub(super) fn scan_file(input: SourceScanInput<'_>) -> Result<SourceFileScan> {
+pub(super) struct SourceScanWorker {
+    parser: Parser,
+    cursor: QueryCursor,
+}
+
+impl SourceScanWorker {
+    pub(super) fn new() -> Self {
+        let mut cursor = QueryCursor::new();
+        cursor.set_match_limit(65_536);
+        Self {
+            parser: Parser::new(),
+            cursor,
+        }
+    }
+}
+
+pub(super) fn scan_file(
+    worker: &mut SourceScanWorker,
+    input: SourceScanInput<'_>,
+) -> Result<SourceFileScan> {
     let SourceScanInput {
         path,
         package,
@@ -141,24 +166,29 @@ pub(super) fn scan_file(input: SourceScanInput<'_>) -> Result<SourceFileScan> {
     } = input;
     ensure_within_duration(started, max_scan_duration, path)?;
     let grammar = grammar(language, is_tsx);
-    let mut parser = Parser::new();
-    parser.set_language(&grammar).map_err(|error| Error::Scan {
-        path: path.to_owned(),
-        message: error.to_string(),
-    })?;
+    worker
+        .parser
+        .set_language(&grammar)
+        .map_err(|error| Error::Scan {
+            path: path.to_owned(),
+            message: error.to_string(),
+        })?;
     let cancelled = AtomicUsize::new(0);
-    // Tree-sitter invokes this callback while parsing, allowing the scan deadline
-    // to interrupt parsing rather than only checking before and after it.
+    let mut progress_callbacks = 0_u8;
+    // Tree-sitter can invoke this callback extremely frequently. Sampling the
+    // clock periodically preserves cancellation for long parses without making
+    // every parser step perform a system clock read.
     let mut progress: &mut dyn FnMut(&tree_sitter::ParseState) -> ControlFlow<()> = &mut |_| {
-        if started.elapsed() > max_scan_duration {
+        progress_callbacks = progress_callbacks.wrapping_add(1);
+        if progress_callbacks != 0 || started.elapsed() <= max_scan_duration {
+            ControlFlow::Continue(())
+        } else {
             cancelled.store(1, Ordering::Relaxed);
             ControlFlow::Break(())
-        } else {
-            ControlFlow::Continue(())
         }
     };
     let mut read_source = |byte, _| &source[byte..];
-    let tree = parser.parse_with_options(
+    let tree = worker.parser.parse_with_options(
         &mut read_source,
         None,
         Some(ParseOptions::new().progress_callback(&mut progress)),
@@ -169,6 +199,7 @@ pub(super) fn scan_file(input: SourceScanInput<'_>) -> Result<SourceFileScan> {
             limit: max_scan_duration.as_secs(),
         });
     }
+    ensure_within_duration(started, max_scan_duration, path)?;
     let tree = tree.ok_or_else(|| Error::Scan {
         path: path.to_owned(),
         message: "parser returned no syntax tree".to_owned(),
@@ -200,12 +231,16 @@ pub(super) fn scan_file(input: SourceScanInput<'_>) -> Result<SourceFileScan> {
         return Ok(SourceFileScan { findings, issues });
     };
     let mut deduplicated = HashSet::new();
-    let mut cursor = QueryCursor::new();
-    cursor.set_match_limit(65_536);
     {
-        let mut matches = cursor.matches(&compiled.query, tree.root_node(), source);
+        let mut matches = worker
+            .cursor
+            .matches(&compiled.query, tree.root_node(), source);
+        let mut query_matches = 0_u8;
         while let Some(query_match) = matches.next() {
-            ensure_within_duration(started, max_scan_duration, path)?;
+            query_matches = query_matches.wrapping_add(1);
+            if query_matches == 0 {
+                ensure_within_duration(started, max_scan_duration, path)?;
+            }
             let rule_index = compiled.pattern_rule_indexes[query_match.pattern_index];
             let rule = &compiled.rules[rule_index];
             for capture in query_match
@@ -218,9 +253,7 @@ pub(super) fn scan_file(input: SourceScanInput<'_>) -> Result<SourceFileScan> {
                 }) {
                     continue;
                 }
-                let mut finding = Vec::with_capacity(1);
-                push_finding(
-                    &mut finding,
+                let finding = make_finding(
                     rule,
                     path,
                     package,
@@ -228,14 +261,14 @@ pub(super) fn scan_file(input: SourceScanInput<'_>) -> Result<SourceFileScan> {
                     capture.node.byte_range(),
                     location_for(capture.node.start_position(), capture.node.end_position()),
                 );
-                let finding = finding.pop().expect("push_finding adds one finding");
                 if deduplicated.insert(finding.id.clone()) {
                     findings.push(finding);
                 }
             }
         }
     }
-    if cursor.did_exceed_match_limit() {
+    ensure_within_duration(started, max_scan_duration, path)?;
+    if worker.cursor.did_exceed_match_limit() {
         return Err(Error::LimitExceeded {
             resource: "in-progress query matches".to_owned(),
             limit: 65_536,
@@ -279,19 +312,18 @@ pub(crate) fn reserve_finding(finding_budget: &AtomicU64, max_findings: u64) -> 
     }
 }
 
-fn push_finding(
-    findings: &mut Vec<AnalysisPoint>,
+fn make_finding(
     rule: &Rule,
     path: &Path,
     package: &str,
     source: &[u8],
     range: std::ops::Range<usize>,
     location: Location,
-) {
+) -> AnalysisPoint {
     let matched_bytes = &source[range];
     let matched_code = String::from_utf8_lossy(matched_bytes).into_owned();
     let file = path.to_string_lossy();
-    findings.push(AnalysisPoint {
+    AnalysisPoint {
         id: AnalysisPoint::stable_id(
             &rule.id,
             rule.version,
@@ -314,7 +346,7 @@ fn push_finding(
         matched_code,
         suppressed: false,
         suppression: None,
-    });
+    }
 }
 
 fn grammar(language: Language, is_tsx: bool) -> tree_sitter::Language {

@@ -17,13 +17,46 @@ pub(super) fn jsr_package_and_requirement(dependency: &Dependency) -> Result<(&s
                 package: dependency.id(),
                 message: "JSR dependency must begin with jsr:".to_owned(),
             })?;
-    match specifier.rsplit_once('@') {
-        Some((package, requirement)) if !package.is_empty() => Ok((package, requirement)),
-        _ if !specifier.is_empty() => Ok((specifier, "*")),
-        _ => Err(Error::Resolution {
+    let Some((scope, remainder)) = specifier.split_once('/') else {
+        return Err(Error::Resolution {
             package: dependency.id(),
             message: "JSR dependency has no package name".to_owned(),
-        }),
+        });
+    };
+    if !scope.starts_with('@') || scope.len() == 1 {
+        return Err(Error::Resolution {
+            package: dependency.id(),
+            message: "JSR dependency has no package name".to_owned(),
+        });
+    }
+
+    let package_end = remainder.find(['@', '/']).unwrap_or(remainder.len());
+    if package_end == 0 {
+        return Err(Error::Resolution {
+            package: dependency.id(),
+            message: "JSR dependency has no package name".to_owned(),
+        });
+    }
+    let package = &specifier[..scope.len() + 1 + package_end];
+    let suffix = &remainder[package_end..];
+    if suffix.is_empty() || suffix.starts_with('/') {
+        return Ok((package, "*"));
+    }
+    match suffix {
+        s if s.starts_with('@') => {
+            let requirement = &s[1..];
+            let requirement = requirement
+                .split_once('/')
+                .map_or(requirement, |(range, _)| range);
+            if requirement.is_empty() {
+                return Err(Error::Resolution {
+                    package: dependency.id(),
+                    message: "JSR version requirement cannot be empty".to_owned(),
+                });
+            }
+            Ok((package, requirement))
+        }
+        _ => unreachable!("package suffix begins with @, /, or is empty"),
     }
 }
 
@@ -117,13 +150,28 @@ fn jsr_releases<'a>(
     dependency: &Dependency,
     metadata: &'a JsonValue,
 ) -> Result<&'a serde_json::Map<String, JsonValue>> {
-    metadata
+    let versions = metadata
         .get("versions")
         .and_then(JsonValue::as_object)
         .ok_or_else(|| Error::Resolution {
             package: dependency.id(),
             message: "JSR registry response has no versions".to_owned(),
-        })
+        })?;
+    for (version, release) in versions {
+        let release = release.as_object().ok_or_else(|| Error::Resolution {
+            package: dependency.id(),
+            message: format!("invalid JSR release metadata for {version}"),
+        })?;
+        if release.contains_key("yanked")
+            && !release.get("yanked").is_some_and(JsonValue::is_boolean)
+        {
+            return Err(Error::Resolution {
+                package: dependency.id(),
+                message: format!("invalid JSR yanked status for {version}"),
+            });
+        }
+    }
+    Ok(versions)
 }
 
 fn validate_jsr_endpoints(

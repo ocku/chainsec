@@ -67,6 +67,80 @@ async fn fetched_root_batch_allows_one_shared_dependency_within_aggregate_limit(
 }
 
 #[tokio::test]
+async fn single_root_fetch_attempts_are_bounded_when_a_dependency_fetch_fails() {
+    let root = tempfile::tempdir().unwrap();
+    let packages = tempfile::tempdir().unwrap();
+    for package in ["successful", "child"] {
+        fs::create_dir(packages.path().join(package)).unwrap();
+    }
+    fs::write(
+        root.path().join("package.json"),
+        r#"{"dependencies":{"successful":"1.0.0","missing":"1.0.0"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("package-lock.json"),
+        r#"{
+            "lockfileVersion": 3,
+            "packages": {
+                "": {"dependencies":{"successful":"1.0.0","missing":"1.0.0"}},
+                "node_modules/successful": {"version":"1.0.0","resolved":"https://registry.example.test/successful.tgz","integrity":"sha512-successful"},
+                "node_modules/missing": {"version":"1.0.0","resolved":"https://registry.example.test/missing.tgz","integrity":"sha512-missing"}
+            }
+        }"#,
+    )
+    .unwrap();
+    fs::write(
+        packages.path().join("successful/package.json"),
+        r#"{"dependencies":{"child":"1.0.0"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        packages.path().join("successful/package-lock.json"),
+        r#"{
+            "lockfileVersion": 3,
+            "packages": {
+                "": {"dependencies":{"child":"1.0.0"}},
+                "node_modules/child": {"version":"1.0.0","resolved":"https://registry.example.test/child.tgz","integrity":"sha512-child"}
+            }
+        }"#,
+    )
+    .unwrap();
+    fs::write(
+        packages.path().join("child/package.json"),
+        r#"{"name":"child","version":"1.0.0"}"#,
+    )
+    .unwrap();
+
+    let fetches = Arc::new(Mutex::new(HashMap::new()));
+    let fetcher = FailingFixtureFetcher {
+        packages: packages.path().to_owned(),
+        failures: ["missing".to_owned()].into_iter().collect(),
+        fetches: Arc::clone(&fetches),
+    };
+    let report = Engine::new(
+        &[],
+        &fetcher,
+        EngineLimits {
+            max_packages: 3,
+            ..EngineLimits::default()
+        },
+        true,
+        true,
+        vec![],
+        false,
+    )
+    .analyze(root.path())
+    .await
+    .unwrap();
+
+    assert_eq!(fetches.lock().unwrap().len(), 2);
+    assert!(report.issues.iter().any(|issue| {
+        issue.fatal && issue.operation == "traversal" && issue.message.contains("packages")
+    }));
+}
+
+#[tokio::test]
 async fn fetched_root_batch_rejects_a_frontier_that_exceeds_aggregate_limit() {
     let packages = tempfile::tempdir().unwrap();
     for package in ["root-a", "root-b", "only-a", "only-b"] {

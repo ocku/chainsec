@@ -16,9 +16,9 @@ pub struct ExtractionStats {
     pub bytes: u64,
 }
 
-pub fn safe_relative(path: &Path) -> bool {
+pub fn safe_relative(path: &Path, max_file_depth: usize) -> bool {
     !path.is_absolute()
-        && path.components().count() <= 128
+        && path.components().count() <= max_file_depth
         && path
             .components()
             .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
@@ -31,10 +31,10 @@ pub fn check_extraction_limits(stats: &ExtractionStats, limits: &EngineLimits) -
             limit: limits.max_extracted_files,
         });
     }
-    if stats.bytes > limits.max_extracted_bytes {
+    if stats.bytes > limits.max_extracted_size {
         return Err(Error::LimitExceeded {
             resource: "extracted bytes".to_owned(),
-            limit: limits.max_extracted_bytes,
+            limit: limits.max_extracted_size,
         });
     }
     Ok(())
@@ -60,8 +60,16 @@ pub fn account_extracted_entry(
     declared_size: u64,
     limits: &EngineLimits,
 ) -> Result<()> {
-    stats.files += 1;
-    stats.bytes = stats.bytes.saturating_add(declared_size);
+    stats.files = stats.files.saturating_add(1);
+    account_extracted_bytes(stats, declared_size, limits)
+}
+
+pub fn account_extracted_bytes(
+    stats: &mut ExtractionStats,
+    bytes: u64,
+    limits: &EngineLimits,
+) -> Result<()> {
+    stats.bytes = stats.bytes.saturating_add(bytes);
     check_extraction_limits(stats, limits)
 }
 

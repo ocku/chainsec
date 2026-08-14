@@ -9,13 +9,64 @@ use crate::{
     model::Dependency,
 };
 
+#[derive(Clone, Copy)]
+pub(super) enum LockSchema {
+    Poetry,
+    Uv,
+    Pdm,
+}
+
+impl LockSchema {
+    fn validate(self, path: &Path, value: &TomlValue) -> Result<()> {
+        let (actual, expected, format) = match self {
+            Self::Poetry => (
+                value
+                    .get("metadata")
+                    .and_then(|metadata| metadata.get("lock-version"))
+                    .and_then(TomlValue::as_str),
+                "2.0",
+                "Poetry",
+            ),
+            Self::Pdm => (
+                value
+                    .get("metadata")
+                    .and_then(|metadata| metadata.get("lock_version"))
+                    .and_then(TomlValue::as_str),
+                "4.5.0",
+                "PDM",
+            ),
+            Self::Uv => {
+                let version = value.get("version").and_then(TomlValue::as_integer);
+                if version == Some(1) {
+                    return Ok(());
+                }
+                return Err(manifest_error(
+                    path,
+                    "uv lockfile must have supported integer version 1",
+                ));
+            }
+        };
+        if actual == Some(expected) {
+            Ok(())
+        } else {
+            Err(manifest_error(
+                path,
+                format!("{format} lockfile must have supported schema version {expected}"),
+            ))
+        }
+    }
+}
+
 pub(super) fn enrich_toml_packages(
     path: &Path,
     dependencies: &mut Vec<Dependency>,
-    mut enrich: impl FnMut(&Dependency, &TomlValue) -> Result<Vec<Dependency>>,
+    max_packages: usize,
+    schema: LockSchema,
+    mut enrich: impl FnMut(&Dependency, &TomlValue, usize) -> Result<Vec<Dependency>>,
 ) -> Result<()> {
     let value: TomlValue =
         ::toml::from_str(&read(path)?).map_err(|error| manifest_error(path, error))?;
+    schema.validate(path, &value)?;
     let packages = value
         .get("package")
         .ok_or_else(|| manifest_error(path, "Python lockfile package array is missing"))?
@@ -47,11 +98,16 @@ pub(super) fn enrich_toml_packages(
     let mut enriched = Vec::with_capacity(declared.len());
     for dependency in declared {
         if let Some(package) = find_package(path, &index, &dependency)? {
-            let mut artifacts = enrich(&dependency, package)?;
+            let remaining = max_packages.saturating_sub(enriched.len());
+            let mut artifacts = enrich(&dependency, package, remaining)?;
             for artifact in &mut artifacts {
                 artifact.lockfile = Some(path.to_owned());
             }
-            enriched.extend(artifacts);
+            crate::manifests::shared::extend_dependencies_bounded(
+                &mut enriched,
+                artifacts,
+                max_packages,
+            )?;
         } else {
             enriched.push(dependency);
         }

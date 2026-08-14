@@ -70,6 +70,40 @@ fn poetry_and_deno_v5_locks_are_detected() {
 }
 
 #[test]
+fn standalone_pipfile_lock_enriches_dependencies() {
+    let discovery = manifests::discover(Path::new("tests/fixtures/manifests/pipenv")).unwrap();
+
+    let requests = discovery
+        .dependencies
+        .iter()
+        .find(|dependency| dependency.name == "requests")
+        .expect("Pipfile package should be discovered");
+    assert_eq!(requests.resolved_version.as_deref(), Some("2.32.3"));
+    assert_eq!(
+        requests.integrity.as_deref(),
+        Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    );
+    assert!(
+        requests
+            .lockfile
+            .as_deref()
+            .is_some_and(|path| path.ends_with("Pipfile.lock"))
+    );
+    let pytest = discovery
+        .dependencies
+        .iter()
+        .find(|dependency| dependency.name == "pytest")
+        .expect("Pipfile development package should be discovered");
+    assert_eq!(pytest.resolved_version.as_deref(), Some("8.3.4"));
+    assert!(
+        discovery
+            .lockfiles
+            .iter()
+            .any(|path| path.ends_with("Pipfile.lock"))
+    );
+}
+
+#[test]
 fn uv_lock_enriches_resolved_artifacts() {
     let discovery = manifests::discover(Path::new("tests/fixtures/manifests/uv")).unwrap();
     let httpx = discovery

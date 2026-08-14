@@ -56,7 +56,7 @@ pub(super) fn rules() -> Vec<Rule> {
             "A process API receives a literal reverse-shell command.",
             "Remove the remote shell behavior and investigate the package as potentially compromised.",
             r#"(call function: (attribute object: (identifier) @module attribute: (identifier) @method)
-                  arguments: (argument_list [(string) @command (list (string) @command)] . (_)* )
+                  arguments: (argument_list [(string) @command (list (string) @command) (tuple (string) @command)] . (_)* )
                   (#match? @module "^(os|subprocess)$")
                   (#match? @method "^(system|popen|run|call|Popen)$")
                   (#match? @command "(?i)(/dev/(tcp|udp)/|(^|[^A-Za-z])(nc|ncat)[[:space:]].*-e[[:space:]]+/bin/(ba)?sh|bash[[:space:]]+-i)")) @match"#

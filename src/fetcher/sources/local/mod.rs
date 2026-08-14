@@ -12,18 +12,29 @@ use crate::{
 
 use crate::fetcher::{
     SourceFetcher,
-    archive::{ExtractionStats, check_extraction_limits},
+    archive::{ExtractionStats, account_extracted_bytes, account_extracted_entry},
     filesystem::TrustedDir,
+    network::NetworkBudget,
 };
 
-const MAX_LOCAL_PATH_COMPONENTS: usize = 128;
-
 impl SourceFetcher {
+    #[cfg(test)]
     pub(in crate::fetcher) fn fetch_local_dependency(
         &self,
         dependency: &Dependency,
         declared_from: &Path,
     ) -> Result<FetchMetadata> {
+        let budget = self.network_budget();
+        self.fetch_local_dependency_with_budget(dependency, declared_from, &budget)
+    }
+
+    pub(in crate::fetcher) fn fetch_local_dependency_with_budget(
+        &self,
+        dependency: &Dependency,
+        declared_from: &Path,
+        budget: &NetworkBudget,
+    ) -> Result<FetchMetadata> {
+        budget.check()?;
         let raw_path = local_dependency_path(dependency)?;
         let candidate = if raw_path.is_absolute() {
             raw_path.clone()
@@ -51,7 +62,9 @@ impl SourceFetcher {
             });
         }
 
-        let source = self.snapshot_local_dependency(&source, &declaring_root)?;
+        budget.check()?;
+        let source = self.snapshot_local_dependency(&source, &declaring_root, budget)?;
+        budget.check()?;
 
         Ok(FetchMetadata {
             source,
@@ -69,7 +82,12 @@ impl SourceFetcher {
     /// Copies a confined local dependency into a private workspace before it is
     /// handed to the engine. Keeping a canonical pathname is insufficient: its
     /// final directory can be replaced by a symlink after validation.
-    fn snapshot_local_dependency(&self, source: &Path, declaring_root: &Path) -> Result<PathBuf> {
+    fn snapshot_local_dependency(
+        &self,
+        source: &Path,
+        declaring_root: &Path,
+        budget: &NetworkBudget,
+    ) -> Result<PathBuf> {
         let source_directory = if let Ok(relative) = source.strip_prefix(declaring_root) {
             let declaring_directory =
                 TrustedDir::open(declaring_root).map_err(|source_error| Error::Io {
@@ -122,6 +140,7 @@ impl SourceFetcher {
             destination_directory,
             source,
             &self.limits,
+            budget,
         ) {
             let _ = fs::remove_dir_all(&workspace);
             return Err(error);
@@ -136,33 +155,41 @@ fn copy_local_directory(
     destination: TrustedDir,
     source_path: &Path,
     limits: &crate::model::EngineLimits,
+    budget: &NetworkBudget,
 ) -> Result<()> {
     let mut queue = VecDeque::from([(source, destination, source_path.to_owned(), 0usize)]);
     let mut stats = ExtractionStats::default();
 
     while let Some((source, destination, directory_path, depth)) = queue.pop_front() {
+        budget.check()?;
+        // Enumerate only enough entries to detect an exhausted file budget.
+        // This avoids allocating one PathBuf for every entry in a hostile directory.
+        let remaining_entries = limits.max_extracted_files.saturating_sub(stats.files);
+        let maximum_entries =
+            usize::try_from(remaining_entries.saturating_add(1)).unwrap_or(usize::MAX);
         for name in source
-            .list_child_names()
+            .list_child_names_up_to(maximum_entries)
             .map_err(|source_error| Error::Io {
                 operation: "list local dependency directory".to_owned(),
                 path: directory_path.clone(),
                 source: source_error,
             })?
         {
+            budget.check()?;
             let child_path = directory_path.join(&name);
             let child_depth = depth + 1;
-            if child_depth > MAX_LOCAL_PATH_COMPONENTS {
+            if child_depth > limits.max_file_depth {
                 return Err(Error::Policy {
                     operation: "local dependency".to_owned(),
                     message: format!(
-                        "refusing path deeper than {MAX_LOCAL_PATH_COMPONENTS} components: {}",
+                        "refusing path deeper than {} components: {}",
+                        limits.max_file_depth,
                         child_path.display()
                     ),
                 });
             }
 
-            stats.files = stats.files.saturating_add(1);
-            check_extraction_limits(&stats, limits)?;
+            account_extracted_entry(&mut stats, 0, limits)?;
             match source.open_subdirectory(&name) {
                 Ok(child_source) => {
                     destination
@@ -221,20 +248,26 @@ fn copy_local_file(
                 source_path.display()
             ),
         })?;
-    if !input
-        .metadata()
-        .map_err(|source_error| Error::Io {
-            operation: "inspect local dependency file".to_owned(),
-            path: source_path.to_owned(),
-            source: source_error,
-        })?
-        .is_file()
-    {
+    let metadata = input.metadata().map_err(|source_error| Error::Io {
+        operation: "inspect local dependency file".to_owned(),
+        path: source_path.to_owned(),
+        source: source_error,
+    })?;
+    if !metadata.is_file() {
         return Err(Error::Policy {
             operation: "local dependency".to_owned(),
             message: format!("refusing non-regular path {}", source_path.display()),
         });
     }
+
+    let remaining_bytes = limits.max_extracted_size.saturating_sub(stats.bytes);
+    if metadata.len() > remaining_bytes {
+        return Err(Error::LimitExceeded {
+            resource: "extracted bytes".to_owned(),
+            limit: limits.max_extracted_size,
+        });
+    }
+
     let mut output = destination
         .create_new_file(name)
         .map_err(|source_error| Error::Io {
@@ -243,17 +276,38 @@ fn copy_local_file(
             source: source_error,
         })?;
     let mut buffer = vec![0; 64 * 1024];
+    let mut remaining_bytes = remaining_bytes;
     loop {
-        let read = input.read(&mut buffer).map_err(|source_error| Error::Io {
-            operation: "read local dependency file".to_owned(),
-            path: source_path.to_owned(),
-            source: source_error,
-        })?;
+        if remaining_bytes == 0 {
+            let mut extra = [0];
+            if input.read(&mut extra).map_err(|source_error| Error::Io {
+                operation: "read local dependency file".to_owned(),
+                path: source_path.to_owned(),
+                source: source_error,
+            })? != 0
+            {
+                return Err(Error::LimitExceeded {
+                    resource: "extracted bytes".to_owned(),
+                    limit: limits.max_extracted_size,
+                });
+            }
+            break;
+        }
+        let maximum_read = usize::try_from(remaining_bytes)
+            .unwrap_or(usize::MAX)
+            .min(buffer.len());
+        let read = input
+            .read(&mut buffer[..maximum_read])
+            .map_err(|source_error| Error::Io {
+                operation: "read local dependency file".to_owned(),
+                path: source_path.to_owned(),
+                source: source_error,
+            })?;
         if read == 0 {
             break;
         }
-        stats.bytes = stats.bytes.saturating_add(read as u64);
-        check_extraction_limits(stats, limits)?;
+        remaining_bytes -= read as u64;
+        account_extracted_bytes(stats, read as u64, limits)?;
         output
             .write_all(&buffer[..read])
             .map_err(|source_error| Error::Io {

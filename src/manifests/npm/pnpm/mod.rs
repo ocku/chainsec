@@ -5,13 +5,17 @@ use serde_json::{Map, Value as JsonValue};
 
 use crate::manifests::{
     npm::{github_archive_matches, local_source_url, matching_github_archive},
-    shared::{github_archive, manifest_error, read},
+    shared::{github_archive, manifest_error, optional_json_string, parse_bounded_yaml_json, read},
 };
-use crate::{error::Result, model::Dependency};
+use crate::{
+    error::Result,
+    model::{Dependency, canonical_http_url},
+};
 
 pub(super) fn enrich(path: &Path, dependencies: &mut [Dependency]) -> Result<()> {
     let lockfile = yaml_json(path)?;
     let version = lockfile_version(path, &lockfile)?;
+    validate_lock_fields(path, &lockfile)?;
     let importer = importer(&lockfile);
     let packages = lockfile.get("packages").and_then(JsonValue::as_object);
 
@@ -47,6 +51,94 @@ fn lockfile_version(path: &Path, lockfile: &JsonValue) -> Result<String> {
             format!("unsupported pnpm lockfile version {version}"),
         ))
     }
+}
+
+fn validate_lock_fields(path: &Path, lockfile: &JsonValue) -> Result<()> {
+    let root = lockfile
+        .as_object()
+        .ok_or_else(|| manifest_error(path, "pnpm lockfile root must be an object"))?;
+    if let Some(importers) = root.get("importers") {
+        let importers = importers
+            .as_object()
+            .ok_or_else(|| manifest_error(path, "pnpm importers must be an object"))?;
+        for (importer_name, importer) in importers {
+            let importer = importer.as_object().ok_or_else(|| {
+                manifest_error(
+                    path,
+                    format!("pnpm importer {importer_name} must be an object"),
+                )
+            })?;
+            for section in ["dependencies", "optionalDependencies", "devDependencies"] {
+                let Some(entries) = importer.get(section) else {
+                    continue;
+                };
+                let entries = entries.as_object().ok_or_else(|| {
+                    manifest_error(
+                        path,
+                        format!("pnpm importer {importer_name} {section} must be an object"),
+                    )
+                })?;
+                for (name, locked) in entries {
+                    if locked.is_string() {
+                        continue;
+                    }
+                    let locked = locked.as_object().ok_or_else(|| {
+                        manifest_error(
+                            path,
+                            format!("pnpm locked reference for {name} must be a string or object"),
+                        )
+                    })?;
+                    optional_json_string(
+                        path,
+                        locked,
+                        "specifier",
+                        &format!("pnpm locked reference for {name}"),
+                    )?;
+                    if optional_json_string(
+                        path,
+                        locked,
+                        "version",
+                        &format!("pnpm locked reference for {name}"),
+                    )?
+                    .is_none()
+                    {
+                        return Err(manifest_error(
+                            path,
+                            format!("pnpm locked reference for {name} version is missing"),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    if let Some(packages) = root.get("packages") {
+        let packages = packages
+            .as_object()
+            .ok_or_else(|| manifest_error(path, "pnpm packages must be an object"))?;
+        for (key, package) in packages {
+            let package = package.as_object().ok_or_else(|| {
+                manifest_error(path, format!("pnpm package {key} must be an object"))
+            })?;
+            let resolution = match package.get("resolution") {
+                Some(value) => value.as_object().ok_or_else(|| {
+                    manifest_error(
+                        path,
+                        format!("pnpm package {key} resolution must be an object"),
+                    )
+                })?,
+                None => package,
+            };
+            for field in ["integrity", "tarball"] {
+                optional_json_string(
+                    path,
+                    resolution,
+                    field,
+                    &format!("pnpm package {key} resolution"),
+                )?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn importer(lockfile: &JsonValue) -> &JsonValue {
@@ -219,14 +311,11 @@ fn registry_tarball(resolution: &JsonValue) -> Option<String> {
     resolution
         .get("tarball")
         .and_then(JsonValue::as_str)
-        .filter(|url| url.starts_with("http://") || url.starts_with("https://"))
-        .map(str::to_owned)
+        .and_then(canonical_http_url)
 }
 
 fn yaml_json(path: &Path) -> Result<JsonValue> {
-    let value: serde_yaml::Value =
-        serde_yaml::from_str(&read(path)?).map_err(|error| manifest_error(path, error))?;
-    serde_json::to_value(value).map_err(|error| manifest_error(path, error))
+    parse_bounded_yaml_json(path, &read(path)?)
 }
 
 fn package_keys(

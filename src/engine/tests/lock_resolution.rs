@@ -33,6 +33,9 @@ files = [{file = "dateutil.whl", hash = "sha256:cccccccccccccccccccccccccccccccc
 name = "tzdata"
 version = "2025.2"
 files = [{file = "tzdata.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}]
+
+[metadata]
+lock-version = "2.0"
 "#,
     )
     .unwrap();
@@ -278,7 +281,9 @@ dependencies = ["parent-a", "parent-b"]
     .unwrap();
     fs::write(
         root.path().join("uv.lock"),
-        r#"[[package]]
+        r#"version = 1
+
+[[package]]
 name = "parent-a"
 version = "1.0.0"
 sdist = { url = "https://registry.example.test/parent-a.tar.gz", hash = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
@@ -314,7 +319,9 @@ dependencies = ["shared"]
         fs::write(
             packages.path().join(parent).join("uv.lock"),
             format!(
-                r#"[[package]]
+                r#"version = 1
+
+[[package]]
 name = "shared"
 version = "1.0.0"
 sdist = {{ url = "https://registry.example.test/shared.tar.gz", hash = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" }}

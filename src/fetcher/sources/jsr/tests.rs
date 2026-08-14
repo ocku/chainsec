@@ -18,7 +18,7 @@ use std::{
 type JsrRegistry = (
     String,
     Arc<AtomicBool>,
-    Arc<Mutex<Vec<String>>>,
+    Arc<Mutex<Vec<(String, String)>>>,
     thread::JoinHandle<()>,
 );
 
@@ -92,7 +92,10 @@ fn spawn_jsr_registry(
                 .and_then(|line| line.split_whitespace().nth(1))
                 .unwrap_or("/")
                 .to_owned();
-            server_requests.lock().unwrap().push(path.clone());
+            server_requests
+                .lock()
+                .unwrap()
+                .push((path.clone(), request.into_owned()));
             let unavailable = unavailable_versions
                 .iter()
                 .any(|suffix| path.ends_with(suffix));
@@ -169,7 +172,10 @@ fn spawn_jsr_package_registry(
                 .and_then(|line| line.split_whitespace().nth(1))
                 .unwrap_or("/")
                 .to_owned();
-            server_requests.lock().unwrap().push(path.clone());
+            server_requests.lock().unwrap().push((
+                path.clone(),
+                String::from_utf8_lossy(&request[..read]).into_owned(),
+            ));
             thread::sleep(response_delay);
             let body = if path.ends_with("_meta.json") {
                 metadata.as_slice()
@@ -373,6 +379,52 @@ async fn jsr_file_loop_enforces_a_per_acquisition_request_limit() {
 }
 
 #[tokio::test]
+async fn jsr_manifest_limits_are_enforced_before_downloading_source_files() {
+    for (limits, expected_resource) in [
+        (
+            EngineLimits {
+                max_extracted_files: 1,
+                ..EngineLimits::default()
+            },
+            "JSR package files",
+        ),
+        (
+            EngineLimits {
+                max_extracted_size: 10,
+                ..EngineLimits::default()
+            },
+            "JSR package bytes",
+        ),
+    ] {
+        let files = [
+            ("first.ts", b"first".as_slice()),
+            ("second.ts", b"second".as_slice()),
+        ];
+        let ((base_url, stop, requests, server), integrity) =
+            spawn_jsr_package_registry(&files, Duration::ZERO);
+        let (_cache, mut fetcher) = jsr_fetcher(&base_url, 10);
+        fetcher.limits = limits;
+        let metadata_url = fetcher
+            .policy
+            .repositories
+            .jsr_version_metadata_url("@scope/package", "1.0.0")
+            .unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+
+        let error = fetcher
+            .fetch_jsr_package(&metadata_url, temporary.path(), Some(&integrity))
+            .await
+            .unwrap_err();
+        stop.store(true, Ordering::Relaxed);
+        server.join().unwrap();
+
+        assert_eq!(error.code(), "limit_exceeded", "{error}");
+        assert!(error.to_string().contains(expected_resource), "{error}");
+        assert_eq!(requests.lock().unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
 async fn jsr_file_loop_enforces_an_end_to_end_acquisition_deadline() {
     let files = [
         ("first.ts", b"first".as_slice()),
@@ -432,6 +484,68 @@ fn parses_unversioned_scoped_jsr_package() {
     );
 }
 
+#[test]
+fn parses_jsr_entrypoint_specifiers_without_including_them_in_the_version_requirement() {
+    for (requirement, expected_requirement) in
+        [("jsr:@std/path@1/join", "1"), ("jsr:@std/path/join", "*")]
+    {
+        let dependency = Dependency::declared(Ecosystem::Deno, "path", requirement);
+        assert_eq!(
+            jsr_package_and_requirement(&dependency).unwrap(),
+            ("@std/path", expected_requirement)
+        );
+    }
+}
+
+#[test]
+fn rejects_empty_explicit_jsr_version_requirement() {
+    let dependency = Dependency::declared(Ecosystem::Deno, "assert", "jsr:@std/assert@");
+
+    assert!(
+        jsr_package_and_requirement(&dependency)
+            .unwrap_err()
+            .to_string()
+            .contains("cannot be empty")
+    );
+}
+
+#[test]
+fn rejects_malformed_jsr_release_metadata() {
+    let dependency = Dependency::declared(Ecosystem::Deno, "assert", "jsr:@std/assert");
+    for metadata in [
+        serde_json::json!({ "versions": { "1.0.0": null } }),
+        serde_json::json!({ "versions": { "1.0.0": { "yanked": "yes" } } }),
+    ] {
+        assert!(
+            select_jsr_version(&dependency, "*", &metadata)
+                .unwrap_err()
+                .to_string()
+                .contains("invalid JSR")
+        );
+    }
+}
+
+#[tokio::test]
+async fn jsr_requests_use_a_non_html_accept_header() {
+    let (base_url, stop, requests, server) =
+        spawn_jsr_registry(serde_json::json!({ "versions": { "1.0.0": {} } }), &[], &[]);
+    let (_cache, fetcher) = jsr_fetcher(&base_url, 3);
+    let mut dependency = Dependency::declared(Ecosystem::Deno, "@std/assert", "jsr:@std/assert");
+
+    fetcher.resolve_unlocked_jsr(&mut dependency).await.unwrap();
+    stop.store(true, Ordering::Relaxed);
+    server.join().unwrap();
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    for (_, request) in requests.iter() {
+        let request = request.to_ascii_lowercase();
+        assert!(request.contains("accept: */*\r\n"));
+        assert!(!request.contains("accept: text/html"));
+        assert!(!request.contains("sec-fetch-dest: document"));
+    }
+}
+
 #[tokio::test]
 async fn last_selection_skips_an_unavailable_newest_jsr_version() {
     let (base_url, stop, requests, server) = spawn_jsr_registry(
@@ -463,7 +577,7 @@ async fn last_selection_skips_an_unavailable_newest_jsr_version() {
             .lock()
             .unwrap()
             .iter()
-            .filter(|path| path.ends_with("_meta.json"))
+            .filter(|(path, _)| path.ends_with("_meta.json"))
             .count(),
         3
     );
@@ -494,7 +608,7 @@ async fn last_selection_fails_on_malformed_successful_version_metadata() {
             .lock()
             .unwrap()
             .iter()
-            .filter(|path| path.ends_with("_meta.json"))
+            .filter(|(path, _)| path.ends_with("_meta.json"))
             .count(),
         1
     );
@@ -531,7 +645,7 @@ async fn range_selection_fails_on_malformed_historical_version_metadata() {
             .lock()
             .unwrap()
             .iter()
-            .filter(|path| path.ends_with("_meta.json"))
+            .filter(|(path, _)| path.ends_with("_meta.json"))
             .count(),
         2
     );
@@ -563,7 +677,7 @@ async fn jsr_selection_stops_after_exceeding_the_root_limit() {
             .lock()
             .unwrap()
             .iter()
-            .filter(|path| path.ends_with("_meta.json"))
+            .filter(|(path, _)| path.ends_with("_meta.json"))
             .count(),
         1
     );

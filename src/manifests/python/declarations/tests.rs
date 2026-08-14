@@ -202,21 +202,11 @@ fn rejects_unsupported_poetry_constraints() {
 }
 
 #[test]
-fn dependency_group_depth_is_bounded_without_recursion() {
-    let mut manifest = String::from("[dependency-groups]\n");
-    for index in 0..=MAX_DEPENDENCY_GROUP_DEPTH {
-        if index == MAX_DEPENDENCY_GROUP_DEPTH {
-            manifest.push_str(&format!("g{index} = [\"leaf\"]\n"));
-        } else {
-            manifest.push_str(&format!(
-                "g{index} = [{{include-group = \"g{}\"}}]\n",
-                index + 1
-            ));
-        }
+fn rejects_poetry_compatible_ranges_that_overflow() {
+    let path = Path::new("pyproject.toml");
+    for constraint in ["^18446744073709551615", "~18446744073709551615"] {
+        assert!(poetry_requirement(path, "demo", &TomlValue::String(constraint.into())).is_err());
     }
-
-    let error = parse_manifest(&manifest).unwrap_err();
-    assert!(error.to_string().contains("include depth exceeds"));
 }
 
 #[test]

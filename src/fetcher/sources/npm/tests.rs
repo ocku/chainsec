@@ -41,12 +41,14 @@ async fn uses_the_locked_npm_tarball_url_without_requesting_registry_metadata() 
     dependency.resolved_version = Some("1.0.0".to_owned());
     dependency.source_url = Some("https://artifacts.example.test/npm/example-1.0.0.tgz".to_owned());
 
+    let mut budget = fetcher.network_budget();
+    let (url, _) = fetcher
+        .npm_artifact_request_with_budget(&dependency, &mut budget)
+        .await
+        .unwrap();
+
     assert_eq!(
-        fetcher
-            .npm_artifact_url(&dependency)
-            .await
-            .unwrap()
-            .as_str(),
+        url.as_str(),
         "https://artifacts.example.test/npm/example-1.0.0.tgz"
     );
 }
@@ -145,10 +147,10 @@ fn skips_an_unpullable_selected_npm_version() {
 }
 
 #[test]
-fn selects_highest_non_yanked_npm_release_matching_a_range() {
+fn selects_a_valid_npm_release_regardless_of_nonstandard_yanked_metadata() {
     let metadata = serde_json::json!({
         "versions": {
-            "1.6.0": { "yanked": true },
+            "1.6.0": { "yanked": true, "dist": { "tarball": "https://example.test/1.6.tgz", "integrity": integrity("sha512", 64) } },
             "1.5.0": { "dist": { "tarball": "https://example.test/1.5.tgz", "integrity": integrity("sha512", 64) } },
             "1.0.0": { "dist": { "tarball": "https://example.test/1.tgz", "integrity": integrity("sha512", 64) } }
         }
@@ -157,7 +159,7 @@ fn selects_highest_non_yanked_npm_release_matching_a_range() {
 
     let (version, _) = select_npm_release(&dependency, "^1.0.0", &metadata).unwrap();
 
-    assert_eq!(version, "1.5.0");
+    assert_eq!(version, "1.6.0");
 }
 
 #[test]
@@ -181,22 +183,34 @@ fn unlocked_range_selects_next_highest_pullable_npm_release() {
 }
 
 #[test]
-fn rejects_a_range_when_every_matching_npm_release_is_yanked() {
-    let metadata = serde_json::json!({
-        "versions": {
-            "1.5.0": { "yanked": true },
-            "1.0.0": { "yanked": true }
-        }
-    });
-    let dependency = dependency("^1.0.0");
+fn rejects_documented_non_registry_specifiers_without_treating_them_as_dist_tags() {
+    let dependency = dependency("*");
 
-    let error = select_npm_release(&dependency, "^1.0.0", &metadata).unwrap_err();
+    let error = validate_npm_registry_requirement(&dependency, "https://example.test/example.tgz")
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("tarball dependencies require a lockfile integrity pin")
+    );
 
-    assert!(error.to_string().contains("no release satisfying ^1.0.0"));
+    for requirement in [
+        "git+https://example.test/owner/repository.git#main",
+        "git@github.com:owner/repository.git#main",
+        "github:owner/repository#main",
+        "owner/repository#main",
+    ] {
+        let error = validate_npm_registry_requirement(&dependency, requirement).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Git dependencies require a lockfile-resolved immutable source")
+        );
+    }
 }
 
 #[test]
-fn excludes_yanked_older_npm_versions_from_last_selection() {
+fn includes_valid_npm_versions_with_nonstandard_yanked_metadata_in_last_selection() {
     let metadata = serde_json::json!({
         "versions": {
             "3.0.0": { "dist": { "tarball": "https://example.test/3.tgz", "integrity": integrity("sha512", 64) } },
@@ -218,28 +232,23 @@ fn excludes_yanked_older_npm_versions_from_last_selection() {
             .iter()
             .map(|dependency| dependency.resolved_version.as_deref().unwrap())
             .collect::<Vec<_>>(),
-        ["3.0.0", "1.0.0", "0.5.0"]
+        ["3.0.0", "2.0.0", "1.0.0"]
     );
 }
 
 #[test]
-fn rejects_a_dist_tag_that_targets_a_yanked_npm_release() {
+fn permits_a_dist_tag_that_targets_a_valid_release_with_nonstandard_yanked_metadata() {
     let metadata = serde_json::json!({
         "dist-tags": { "latest": "3.0.0" },
         "versions": {
-            "3.0.0": { "yanked": true },
-            "2.0.0": { "dist": { "tarball": "https://example.test/2.tgz", "integrity": integrity("sha512", 64) } }
+            "3.0.0": { "yanked": true, "dist": { "tarball": "https://example.test/3.tgz", "integrity": integrity("sha512", 64) } }
         }
     });
     let dependency = dependency("npm:example@latest");
 
-    let error = select_npm_release(&dependency, "latest", &metadata).unwrap_err();
+    let (version, _) = select_npm_release(&dependency, "latest", &metadata).unwrap();
 
-    assert!(
-        error
-            .to_string()
-            .contains("dist-tag latest targets yanked release 3.0.0")
-    );
+    assert_eq!(version, "3.0.0");
 }
 
 #[test]
@@ -264,7 +273,7 @@ fn rejects_a_dist_tag_that_targets_an_unpullable_npm_release() {
 }
 
 #[test]
-fn unlocked_npm_and_deno_npm_resolution_skip_yanked_releases() {
+fn unlocked_npm_and_deno_npm_resolution_use_valid_releases_with_nonstandard_yanked_metadata() {
     let metadata = serde_json::json!({
         "versions": {
             "1.1.0": { "yanked": true, "dist": { "tarball": "https://example.test/1.1.tgz", "integrity": integrity("sha512", 64) } },
@@ -274,26 +283,26 @@ fn unlocked_npm_and_deno_npm_resolution_skip_yanked_releases() {
 
     let mut npm = dependency("^1.0.0");
     resolve_npm_release(&mut npm, "^1.0.0".to_owned(), &metadata).unwrap();
-    assert_eq!(npm.resolved_version.as_deref(), Some("1.0.0"));
+    assert_eq!(npm.resolved_version.as_deref(), Some("1.1.0"));
 
     let mut deno = Dependency::declared(Ecosystem::Deno, "example", "npm:example@^1.0.0");
     let (_, requirement) = npm_package_and_requirement(&deno);
     resolve_npm_release(&mut deno, requirement, &metadata).unwrap();
-    assert_eq!(deno.resolved_version.as_deref(), Some("1.0.0"));
+    assert_eq!(deno.resolved_version.as_deref(), Some("1.1.0"));
 }
 
 #[test]
-fn pinning_a_yanked_npm_release_is_rejected() {
+fn pins_a_valid_npm_release_with_nonstandard_yanked_metadata() {
     let release = serde_json::json!({
         "yanked": true,
         "dist": { "tarball": "https://example.test/1.tgz", "integrity": integrity("sha512", 64) }
     });
     let mut dependency = dependency("1.0.0");
 
-    let error = pin_npm_release(&mut dependency, "1.0.0".to_owned(), &release).unwrap_err();
+    pin_npm_release(&mut dependency, "1.0.0".to_owned(), &release).unwrap();
 
-    assert!(error.to_string().contains("npm release 1.0.0 is yanked"));
-    assert!(!dependency.is_resolved());
+    assert_eq!(dependency.resolved_version.as_deref(), Some("1.0.0"));
+    assert!(dependency.is_resolved());
 }
 
 #[test]
@@ -348,7 +357,7 @@ fn ranges_include_endpoints_and_skip_unpullable_npm_intermediates() {
             .iter()
             .map(|dependency| dependency.resolved_version.as_deref().unwrap())
             .collect::<Vec<_>>(),
-        ["2.0.0", "1.6.0", "1.0.0"]
+        ["2.0.0", "1.6.0", "1.4.0", "1.0.0"]
     );
 }
 

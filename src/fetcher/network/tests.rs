@@ -16,9 +16,7 @@ use crate::{
     model::{Dependency, Ecosystem, EngineLimits},
 };
 
-use super::{
-    artifact_url_is_lockfile_defined, credentials_are_permitted, diagnostic_url, jsr_package_name,
-};
+use super::{artifact_url_is_lockfile_defined, diagnostic_url, jsr_package_name};
 
 #[test]
 fn diagnostic_urls_redact_queries_and_fragments() {
@@ -67,6 +65,8 @@ async fn scopes_credentials_and_rejects_https_downgrades_to_unrelated_loopback()
         b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".to_vec(),
     ]);
     let repositories = ArtifactRepositories::default()
+        .with_npm_metadata_base_url(&in_scope_url)
+        .unwrap()
         .with_bearer_token(format!("{in_scope_url}/private/"), "secret")
         .unwrap();
     let fetcher = fetcher_with_tls_certificate(&tls, repositories, false);
@@ -90,6 +90,8 @@ async fn scopes_credentials_and_rejects_https_downgrades_to_unrelated_loopback()
         b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".to_vec(),
     ]);
     let repositories = ArtifactRepositories::default()
+        .with_npm_metadata_base_url(&out_of_scope_url)
+        .unwrap()
         .with_bearer_token(format!("{out_of_scope_url}/private/"), "secret")
         .unwrap();
     let fetcher = fetcher_with_tls_certificate(&tls, repositories, false);
@@ -113,6 +115,8 @@ async fn scopes_credentials_and_rejects_https_downgrades_to_unrelated_loopback()
         format!("HTTP/1.1 302 Found\r\nLocation: {http_url}/package\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").into_bytes(),
     ]);
     let repositories = ArtifactRepositories::default()
+        .with_npm_metadata_base_url(&downgrade_url)
+        .unwrap()
         .with_bearer_token(format!("{downgrade_url}/private/"), "secret")
         .unwrap();
     let fetcher = fetcher_with_tls_certificate(&tls, repositories, true);
@@ -130,6 +134,37 @@ async fn scopes_credentials_and_rejects_https_downgrades_to_unrelated_loopback()
         downgrade_requests.join().unwrap().first().unwrap()
     ));
     assert!(http_requests.join().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn metadata_derived_artifacts_cannot_select_another_repository_credential() {
+    let tls = LocalTlsFixture::new();
+    let (artifact_url, artifact_requests) = tls.serve(vec![
+        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".to_vec(),
+    ]);
+    let metadata_base = Url::parse("https://localhost:1/npm").unwrap();
+    let repositories = ArtifactRepositories::default()
+        .with_npm_metadata_base_url(metadata_base.as_str())
+        .unwrap()
+        .with_bearer_token(format!("{artifact_url}/private/"), "secret")
+        .unwrap();
+    let fetcher = fetcher_with_tls_certificate(&tls, repositories, false);
+    let mut budget = fetcher.network_budget();
+
+    assert_eq!(
+        fetcher
+            .download_with_budget_from_repository(
+                &Url::parse(&format!("{artifact_url}/private/example.tgz")).unwrap(),
+                &metadata_base,
+                &mut budget,
+            )
+            .await
+            .unwrap(),
+        b"ok"
+    );
+    assert!(!has_bearer_token(
+        artifact_requests.join().unwrap().first().unwrap()
+    ));
 }
 
 #[tokio::test]
@@ -292,7 +327,6 @@ fn fetcher_with_tls_certificate(
             allowed_hosts: vec!["localhost".to_owned(), "127.0.0.1".to_owned()],
             repositories,
             allow_insecure_http,
-            request_timeout: Duration::from_secs(5),
             ..FetchPolicy::default()
         },
         EngineLimits::default(),
@@ -345,15 +379,4 @@ fn has_bearer_token(request: &str) -> bool {
     request
         .lines()
         .any(|header| header.eq_ignore_ascii_case("authorization: bearer secret"))
-}
-
-#[test]
-fn github_archive_urls_never_receive_repository_credentials() {
-    assert!(!credentials_are_permitted(
-        &Url::parse("https://codeload.github.com/owner/repository/tar.gz/0123456789012345678901234567890123456789")
-            .unwrap()
-    ));
-    assert!(credentials_are_permitted(
-        &Url::parse("https://registry.example.test/npm/package").unwrap()
-    ));
 }

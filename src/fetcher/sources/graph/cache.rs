@@ -12,7 +12,7 @@ use crate::{
     error::{Error, Result},
     fetcher::{
         SourceFetcher,
-        archive::{ExtractionStats, check_extraction_limits},
+        archive::{ExtractionStats, account_extracted_entry},
         cache::is_unsafe_cache_open_error,
         filesystem::TrustedDir,
     },
@@ -34,7 +34,6 @@ impl SourceFetcher {
         lockfile: Option<&DenoLockfileSnapshot>,
         cached_source: &Path,
     ) -> Result<(PathBuf, String, ExtractionStats)> {
-        let remote_integrities = lockfile.map(DenoLockfileSnapshot::remote_integrities);
         let source = self.create_workspace_subdirectory(
             temporary,
             Path::new("source"),
@@ -53,91 +52,195 @@ impl SourceFetcher {
         let mut root_digest = String::new();
         while let Some(requested_url) = queue.pop_front() {
             let is_root = requested_url == *root_url;
-            let url =
-                self.cached_graph_effective_url(&cached_root, cached_source, &requested_url)?;
+            // The root was selected before cache lookup, and reconstruction never
+            // performs network I/O. Its origin is therefore already authorized by
+            // selection; keep same-origin cached modules usable after a policy change.
+            // Cross-origin imports remain subject to the host policy so cache contents
+            // cannot extend the graph's authority.
+            let enforce_host_policy = requested_url.origin() != root_url.origin();
+            if enforce_host_policy {
+                self.check_url_policy(&requested_url, false)?;
+            }
+            let url = self.cached_graph_effective_url(
+                &cached_root,
+                cached_source,
+                &requested_url,
+                enforce_host_policy,
+            )?;
             let canonical = canonical_graph_url(&url);
 
             if let Some(bytes) = materialized.get(&canonical) {
-                verify_graph_module_integrity(
+                let digest = self.verify_reconstructed_graph_module(
                     bytes,
                     &requested_url,
                     &url,
                     is_root,
                     root_url,
                     expected,
-                    remote_integrities,
+                    lockfile,
                 )?;
                 if is_root {
-                    root_digest = format!("sha256:{}", hex::encode(Sha256::digest(bytes)));
+                    root_digest = digest;
                 }
-                if requested_url != url {
-                    write_graph_redirect(&source_root, &source, &requested_url, &url)?;
-                }
+                self.write_reconstructed_graph_redirect_if_needed(
+                    &source_root,
+                    &source,
+                    &requested_url,
+                    &url,
+                    &mut stats,
+                )?;
                 continue;
             }
-            if materialized.len() >= self.policy.max_deno_modules {
-                return Err(Error::LimitExceeded {
-                    resource: "Deno graph modules".to_owned(),
-                    limit: self.policy.max_deno_modules as u64,
-                });
-            }
+            self.ensure_deno_module_capacity(materialized.len())?;
 
             let extension = module_extension(&url);
-            let filename = format!(
-                "{}.{}",
-                hex::encode(Sha256::digest(canonical.as_bytes())),
-                extension
-            );
+            let filename = cached_graph_module_filename(&canonical, extension);
             let bytes = read_cached_graph_module(
                 &cached_root,
                 cached_source,
                 &filename,
-                self.limits.max_archive_bytes,
+                self.limits.max_archive_size,
             )?;
-            verify_graph_module_integrity(
+            let digest = self.verify_reconstructed_graph_module(
                 &bytes,
                 &requested_url,
                 &url,
                 is_root,
                 root_url,
                 expected,
-                remote_integrities,
+                lockfile,
             )?;
-            let digest = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));
             if is_root {
                 root_digest = digest;
             }
-            if requested_url != url {
-                write_graph_redirect(&source_root, &source, &requested_url, &url)?;
-            }
-            stats.files += 1;
-            stats.bytes = stats.bytes.saturating_add(bytes.len() as u64);
-            check_extraction_limits(&stats, &self.limits)?;
-            let output = source.join(&filename);
-            let mut file =
-                source_root
-                    .create_new_file(Path::new(&filename))
-                    .map_err(|source_error| Error::Io {
-                        operation: "create reconstructed Deno module".to_owned(),
-                        path: output.clone(),
-                        source: source_error,
-                    })?;
-            file.write_all(&bytes).map_err(|source_error| Error::Io {
-                operation: "write reconstructed Deno module".to_owned(),
-                path: output,
-                source: source_error,
-            })?;
-            resolve_graph_modules_with_sink(&url, &bytes, extension, |module| {
-                enqueue_graph_module(
-                    &mut queue,
-                    &mut queued,
-                    module,
-                    self.policy.max_deno_modules,
-                )
-            })?;
+            self.write_reconstructed_graph_redirect_if_needed(
+                &source_root,
+                &source,
+                &requested_url,
+                &url,
+                &mut stats,
+            )?;
+            self.write_reconstructed_graph_module(
+                &source_root,
+                &source,
+                &filename,
+                &bytes,
+                &mut stats,
+            )?;
+            self.enqueue_reconstructed_graph_imports(
+                &url,
+                &bytes,
+                extension,
+                &mut queue,
+                &mut queued,
+            )?;
             materialized.insert(canonical, bytes);
         }
         Ok((source, root_digest, stats))
+    }
+
+    fn ensure_deno_module_capacity(&self, materialized_count: usize) -> Result<()> {
+        if materialized_count >= self.limits.max_packages {
+            return Err(Error::LimitExceeded {
+                resource: "Deno graph modules".to_owned(),
+                limit: self.limits.max_packages as u64,
+            });
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn verify_reconstructed_graph_module(
+        &self,
+        bytes: &[u8],
+        requested_url: &Url,
+        effective_url: &Url,
+        is_root: bool,
+        root_url: &Url,
+        expected: Option<&str>,
+        lockfile: Option<&DenoLockfileSnapshot>,
+    ) -> Result<String> {
+        verify_graph_module_integrity(
+            bytes,
+            requested_url,
+            effective_url,
+            is_root,
+            root_url,
+            expected,
+            lockfile.map(DenoLockfileSnapshot::remote_integrities),
+        )?;
+        Ok(format!("sha256:{}", hex::encode(Sha256::digest(bytes))))
+    }
+
+    fn write_reconstructed_graph_redirect_if_needed(
+        &self,
+        source_root: &TrustedDir,
+        source: &Path,
+        requested_url: &Url,
+        effective_url: &Url,
+        stats: &mut ExtractionStats,
+    ) -> Result<()> {
+        if requested_url != effective_url {
+            self.write_reconstructed_graph_redirect(
+                source_root,
+                source,
+                requested_url,
+                effective_url,
+                stats,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn write_reconstructed_graph_module(
+        &self,
+        source_root: &TrustedDir,
+        source: &Path,
+        filename: &str,
+        bytes: &[u8],
+        stats: &mut ExtractionStats,
+    ) -> Result<()> {
+        account_extracted_entry(stats, bytes.len() as u64, &self.limits)?;
+
+        let output = source.join(filename);
+        let mut file =
+            source_root
+                .create_new_file(Path::new(filename))
+                .map_err(|source_error| Error::Io {
+                    operation: "create reconstructed Deno module".to_owned(),
+                    path: output.clone(),
+                    source: source_error,
+                })?;
+        file.write_all(bytes).map_err(|source_error| Error::Io {
+            operation: "write reconstructed Deno module".to_owned(),
+            path: output,
+            source: source_error,
+        })
+    }
+
+    fn enqueue_reconstructed_graph_imports(
+        &self,
+        url: &Url,
+        bytes: &[u8],
+        extension: &str,
+        queue: &mut VecDeque<Url>,
+        queued: &mut HashSet<String>,
+    ) -> Result<()> {
+        resolve_graph_modules_with_sink(url, bytes, extension, |module| {
+            enqueue_graph_module(queue, queued, module, self.limits.max_packages)
+        })
+    }
+
+    fn write_reconstructed_graph_redirect(
+        &self,
+        source_root: &TrustedDir,
+        source: &Path,
+        requested_url: &Url,
+        effective_url: &Url,
+        stats: &mut ExtractionStats,
+    ) -> Result<()> {
+        account_extracted_entry(stats, effective_url.as_str().len() as u64, &self.limits)?;
+        write_graph_redirect(source_root, source, requested_url, effective_url)
     }
 
     fn cached_graph_effective_url(
@@ -145,6 +248,7 @@ impl SourceFetcher {
         cached_root: &TrustedDir,
         cached_source: &Path,
         requested_url: &Url,
+        enforce_host_policy: bool,
     ) -> Result<Url> {
         let redirect_name = graph_redirect_filename(requested_url);
         let redirect_path = cached_source.join(&redirect_name);
@@ -171,9 +275,19 @@ impl SourceFetcher {
             operation: "cache validation".to_owned(),
             message: format!("cached Deno redirect URL is invalid: {error}"),
         })?;
-        self.check_url_policy(&effective, false)?;
+        if enforce_host_policy {
+            self.check_url_policy(&effective, false)?;
+        }
         Ok(effective)
     }
+}
+
+fn cached_graph_module_filename(canonical_url: &str, extension: &str) -> String {
+    format!(
+        "{}.{}",
+        hex::encode(Sha256::digest(canonical_url.as_bytes())),
+        extension
+    )
 }
 
 fn open_cached_directory(source: &Path, label: &str) -> Result<TrustedDir> {

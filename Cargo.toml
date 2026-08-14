@@ -13,7 +13,7 @@ async-trait = "0.1.89"
 base64 = "0.22.1"
 bzip2 = "0.6.1"
 clap = { version = "4.5.47", features = ["derive"] }
-flate2 = "1.1.2"
+flate2 = { version = "1.1.2", default-features = false, features = ["zlib-rs"] }
 globset = "0.4.16"
 libc = "0.2.189"
 futures = "0.3.31"
@@ -42,6 +42,12 @@ url = "2.5.7"
 walkdir = "2.5.0"
 xz2 = "0.1.7"
 zip = { version = "4.6.0", default-features = false, features = ["deflate-flate2", "bzip2"] }
+
+[profile.dev]
+opt-level = 3
+
+[profile.dev.package."*"]
+opt-level = 3
 
 [dev-dependencies]
 rcgen = "0.14.7"

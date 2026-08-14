@@ -53,7 +53,7 @@ docker build -t chainsec .
 The image runs as a non-root user with `/scan` as the working directory and `/cache` for the package cache. Mount the project you want to scan at `/scan`:
 
 ```sh
-docker run --rm -v /path/to/project:/scan chainsec scan --max-depth 0
+docker run --rm -v /path/to/project:/scan chainsec scan --max-package-depth 0
 ```
 
 For online scans, also mount a cache directory and pass your network policy:
@@ -78,7 +78,7 @@ chainsec --help
 Then run a local offline scan to confirm everything works:
 
 ```sh
-chainsec scan --max-depth 0
+chainsec scan --max-package-depth 0
 ```
 
 ## Next steps

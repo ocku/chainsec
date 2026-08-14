@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     path::PathBuf,
     sync::{Arc, Mutex},
 };
@@ -37,10 +38,17 @@ pub enum RemoteVersionSelection {
     Range { from: String, to: String },
 }
 
+#[derive(Clone, Default)]
+pub(in crate::fetcher) struct NpmMetadataCache {
+    pub(in crate::fetcher) documents: HashMap<String, (Arc<serde_json::Value>, usize)>,
+    pub(in crate::fetcher) bytes: usize,
+}
+
+#[derive(Clone)]
 pub struct SourceFetcher {
     // This path is retained solely for diagnostics and test-facing cache destinations.
     pub(in crate::fetcher) cache: PathBuf,
-    pub(in crate::fetcher) cache_root: TrustedDir,
+    pub(in crate::fetcher) cache_root: Arc<TrustedDir>,
     // Stored beside the cache with owner-only permissions, so cache writers cannot
     // replace lock inodes and split advisory locking.
     pub(in crate::fetcher) cache_locks: Arc<TrustedDir>,
@@ -48,15 +56,20 @@ pub struct SourceFetcher {
     pub(in crate::fetcher) policy: FetchPolicy,
     pub(in crate::fetcher) limits: EngineLimits,
     pub(in crate::fetcher) client: Option<Client>,
-    pub(in crate::fetcher) workspaces: Mutex<Vec<ScanWorkspace>>,
+    pub(in crate::fetcher) npm_metadata: Arc<tokio::sync::Mutex<NpmMetadataCache>>,
+    pub(in crate::fetcher) npm_metadata_locks:
+        Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    pub(in crate::fetcher) completed_fetches: Arc<Mutex<HashMap<String, FetchMetadata>>>,
+    pub(in crate::fetcher) fetch_locks: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    pub(in crate::fetcher) workspaces: Arc<Mutex<Vec<ScanWorkspace>>>,
     // Use the canonical path when reopening workspace directories with `O_NOFOLLOW`.
     // macOS exposes its temporary directory through `/var`, which is a symlink to
     // `/private/var` and would otherwise be rejected as an unsafe path component.
     pub(in crate::fetcher) workspace_root_path: PathBuf,
     // `TempDir` creates this root atomically with owner-only permissions. Keeping it
     // after `workspaces` ensures individual workspaces are removed before the root.
-    pub(in crate::fetcher) _workspace_root: tempfile::TempDir,
-    pub(in crate::fetcher) _lifecycle_lock: CacheLock,
+    pub(in crate::fetcher) _workspace_root: Arc<tempfile::TempDir>,
+    pub(in crate::fetcher) _lifecycle_lock: Arc<CacheLock>,
 }
 
 pub(in crate::fetcher) struct ScanWorkspace {

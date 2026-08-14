@@ -34,14 +34,19 @@ pub(in crate::app) fn apply(
             }
         };
     }
-    apply!(max_depth, "max_depth");
+    apply!(max_package_depth, "max_package_depth");
     apply!(max_packages, "max_packages");
     apply!(max_network_requests, "max_network_requests");
+    apply!(max_redirect_hops, "max_redirect_hops");
+    apply!(request_timeout_seconds, "request_timeout_seconds");
     apply!(max_acquisition_seconds, "max_acquisition_seconds");
-    apply!(max_archive_bytes, "max_archive_bytes");
-    apply!(max_extracted_bytes, "max_extracted_bytes");
+    apply!(max_archive_size, "max_archive_size");
+    apply!(max_extracted_size, "max_extracted_size");
     apply!(max_extracted_files, "max_extracted_files");
-    apply!(max_source_file_bytes, "max_source_file_bytes");
+    apply!(max_file_depth, "max_file_depth");
+    apply!(max_manifest_file_size, "max_manifest_file_size");
+    apply!(max_source_file_size, "max_source_file_size");
+    apply!(max_source_files, "max_source_files");
     apply!(max_findings, "max_findings");
     apply!(max_scan_seconds, "max_scan_seconds");
     apply!(fail_on_parse_error, "fail_on_parse_error");

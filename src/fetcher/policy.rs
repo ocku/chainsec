@@ -1,7 +1,4 @@
-use std::{
-    net::{IpAddr, ToSocketAddrs},
-    time::Duration,
-};
+use std::net::{IpAddr, ToSocketAddrs};
 
 use crate::error::{Error, Result};
 
@@ -13,9 +10,6 @@ pub struct FetchPolicy {
     pub allow_unlocked: bool,
     pub allowed_hosts: Vec<String>,
     pub repositories: ArtifactRepositories,
-    pub request_timeout: Duration,
-    pub max_redirects: usize,
-    pub max_deno_modules: usize,
     pub trust_local_input: bool,
     /// Permit plaintext HTTP only for configured loopback repositories.
     pub allow_insecure_http: bool,
@@ -28,9 +22,6 @@ impl Default for FetchPolicy {
             allow_unlocked: false,
             allowed_hosts: Vec::new(),
             repositories: ArtifactRepositories::default(),
-            request_timeout: Duration::from_secs(30),
-            max_redirects: 5,
-            max_deno_modules: 1_000,
             trust_local_input: false,
             allow_insecure_http: false,
         }
