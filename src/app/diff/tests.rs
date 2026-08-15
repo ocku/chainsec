@@ -285,8 +285,8 @@ fn human_report_shows_total_diffs_and_versions_changed() {
     assert!(plain.contains("Changes  0.0.9 → 0.1.1"));
     assert!(plain.contains("Detections (1)"));
     assert!(plain.contains("Capabilities (1)"));
-    assert!(plain.contains("  +1  network:connect"));
-    assert!(plain.contains("  ±0  High · execution:dynamic-code"));
+    assert!(plain.contains("  +1  network:connect (0 → 1)"));
+    assert!(plain.contains("  ±0  High · execution:dynamic-code (0 → 0)"));
     assert_eq!(plain.matches("↳ 0.1.0, 0.1.1").count(), 2);
 
     let colored = human_diff_report(&report, true);
