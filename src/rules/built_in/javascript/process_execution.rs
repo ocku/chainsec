@@ -6,7 +6,7 @@ pub(super) fn rules() -> Vec<Rule> {
             "chainsec.js.detection.process-spawn",
             Language::JavaScript,
             FindingType::ProcessExecution,
-            Risk::High,
+            Risk::Medium,
             Confidence::High,
             super::super::EXECUTION_RATIONALE,
             super::super::EXECUTION_REMEDIATION,

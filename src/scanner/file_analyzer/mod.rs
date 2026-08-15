@@ -108,7 +108,7 @@ fn finding_details(
             ),
             "Inspect the archive contents and provenance before trusting or executing the file.",
             format!("compressed format: {format}, size: {file_size} bytes"),
-            Risk::High,
+            Risk::Critical,
             Confidence::High,
         ),
         FileKind::NativeArtifact(format) => (
@@ -118,7 +118,7 @@ fn finding_details(
             ),
             "Verify the artifact's package provenance and platform relevance; inspect it with a native-code analyser when needed.",
             format!("native artifact: {format}, size: {file_size} bytes"),
-            Risk::High,
+            Risk::Critical,
             Confidence::High,
         ),
         FileKind::Binary => (
@@ -126,7 +126,7 @@ fn finding_details(
             "The file contains unrecognized binary data and cannot be fully inspected by the source analyser.".to_owned(),
             "Inspect the file with an appropriate binary analyser and verify its provenance.",
             format!("binary file, size: {file_size} bytes"),
-            Risk::High,
+            Risk::Critical,
             Confidence::High,
         ),
         FileKind::NonUtf8Text => (

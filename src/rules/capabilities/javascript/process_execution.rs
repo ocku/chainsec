@@ -23,7 +23,7 @@ pub(super) fn rules() -> Vec<Rule> {
                     "chainsec.js.capability.process-spawn",
                     Language::JavaScript,
                     FindingType::ProcessExecution,
-                    Risk::High,
+                    Risk::Medium,
                     Confidence::High,
                     "The code invokes a process or dynamic-code execution API.",
                     super::super::REMOVE_EXECUTION,

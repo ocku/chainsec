@@ -6,7 +6,7 @@ pub(super) fn rules() -> Vec<Rule> {
             "chainsec.py.detection.guarddog.screen-capture",
             Language::Python,
             FindingType::SecretAccess,
-            Risk::High,
+            Risk::Critical,
             Confidence::High,
             "The code invokes a screen-capture API that can collect sensitive user content.",
             "Remove screen capture from package code or require explicit, visible user consent and local-only handling.",

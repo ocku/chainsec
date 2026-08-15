@@ -35,7 +35,7 @@ pub(super) fn rules() -> Vec<Rule> {
             "chainsec.ts.detection.guarddog.messenger-exfiltration",
             Language::TypeScript,
             FindingType::NetworkAccess,
-            Risk::High,
+            Risk::Critical,
             Confidence::High,
             "A hardcoded Telegram credential/API endpoint or Discord webhook/token appears in a string literal.",
             "Remove the credential or webhook, rotate it, and use an approved secret-backed destination.",

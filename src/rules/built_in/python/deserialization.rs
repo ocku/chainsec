@@ -5,7 +5,7 @@ pub(super) fn rules() -> Vec<Rule> {
         "chainsec.py.detection.unsafe-deserialization",
         Language::Python,
         FindingType::Deserialization,
-        Risk::High,
+        Risk::Medium,
         Confidence::High,
         "Unsafe deserialization can instantiate attacker-controlled objects.",
         "Use a safe data format such as JSON and validate its schema.",

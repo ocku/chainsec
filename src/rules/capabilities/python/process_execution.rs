@@ -21,7 +21,7 @@ pub(super) fn rules() -> Vec<Rule> {
                     "chainsec.py.capability.process-spawn",
                     Language::Python,
                     FindingType::ProcessExecution,
-                    Risk::High,
+                    Risk::Medium,
                     Confidence::High,
                     "The code invokes a process or dynamic-code execution API.",
                     super::super::REMOVE_EXECUTION,

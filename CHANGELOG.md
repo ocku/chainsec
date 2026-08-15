@@ -3,6 +3,14 @@
 All notable changes are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Before the `chainsec` tool reaches `1.0.0`, minor releases and minor report schema revisions may contain documented breaking changes. Each report schema version is an exact contract: consumers must check the full `schema_version` rather than assume versions with the same major number are compatible. Every schema revision requires explicit changelog and migration notes.
 
 
+## [0.5.2]
+
+### Changed
+
+- Recalibrated rule risk levels across all languages: arbitrary code execution, dynamic loading, and process execution detection and capability rules are now `Medium` (was `High`); `write-browser-global` is now `High` (was `Medium`); `hidden-require` is now `Critical` (was `High`); and file analyzer findings for compressed archives, native artifacts, and unrecognized binary files are now `Critical` (was `High`).
+- Version-diff finding identity now matches on package, rule ID and version, file path, and matched code only, without exact line and column positions, so relocated identical code is no longer reported as a separate change.
+
+
 ## [0.5.1]
 
 ### Changed
@@ -18,7 +26,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - JSON report schema is now `1.2.0`, a breaking migration from `1.1.0`; consumers must require and explicitly support the full `schema_version`. In `policy.limits`, migrate `max_depth` to `max_package_depth`, `max_archive_bytes` to `max_archive_size`, `max_extracted_bytes` to `max_extracted_size`, and `max_source_file_bytes` to `max_source_file_size`; the legacy names are not part of schema `1.2.0`. The limits contract also requires `max_network_requests`, `max_redirect_hops`, `request_timeout_seconds`, `max_acquisition_seconds`, `max_file_depth`, `max_manifest_file_size`, `max_findings`, and `fail_on_parse_error`, and `policy` requires `allow_insecure_http`. Capability evidence records now require the same stable ID, rule metadata, risk, confidence, and suppression state as findings. Update validators and field mappings before accepting `1.2.0` reports.
 - Replaced the flat CLI with explicit subcommands. Use `chainsec scan [PATH]` instead of `chainsec [PATH]`, `chainsec remote scan <SOURCE:PACKAGE>` instead of `chainsec --remote <SOURCE:PACKAGE>`, `chainsec init [PATH]` instead of `chainsec [PATH] --init`, and `chainsec cache purge` instead of `chainsec --cache-purge`. Scan options now follow the applicable `scan` or `remote` subcommand.
 - `--allow-host` is now additive: it extends `allowed_hosts` from global and project configuration rather than replacing them. Supplying `--allow-host` cannot exclude a host allowed by configuration; update or remove the relevant configured `allowed_hosts` entry when a restrictive host policy is required.
-- `--max-packages` now defaults to `16384` (was `500`), and `--max-source-file-size` now defaults to `512 MiB` (was `2 MiB`). New limits `--max-network-requests`, `--max-acquisition-seconds`, `--max-file-depth`, `--max-manifest-file-size`, and `--max-findings` are introduced with conservative defaults.
+- `--max-packages` now defaults to `4096` (was `500`), and `--max-source-file-size` now defaults to `20 MiB` (was `2 MiB`). New limits `--max-network-requests`, `--max-acquisition-seconds`, `--max-file-depth`, `--max-manifest-file-size`, and `--max-findings` are introduced with conservative defaults.
 - Recovered source syntax errors are now logged at debug level by default instead of being reported as warnings. `--fail-on-parse-error` (or `fail_on_parse_error = true`) still records them as fatal operational issues without stopping recovered-tree analysis.
 - Yarn Berry lockfiles are now rejected rather than parsed. Berry `npm:` lock entries pin the exact release, but their cache checksums are not npm tarball integrity values. ChainSec obtains the pinned release's tarball URL and integrity from the configured npm registry before download, so scans need `--online` and the registry host must be allowed.
 - Windows CI has been removed. ChainSec compiles only for Unix targets because fetching, extraction, cache, and workspace operations require descriptor-relative no-follow filesystem primitives.

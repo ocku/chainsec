@@ -6,7 +6,7 @@ pub(super) fn rules() -> Vec<Rule> {
             "chainsec.py.detection.process-spawn",
             Language::Python,
             FindingType::ProcessExecution,
-            Risk::High,
+            Risk::Medium,
             Confidence::High,
             "Shell-backed process execution can interpret metacharacters and attacker-controlled command text.",
             super::super::EXECUTION_REMEDIATION,
