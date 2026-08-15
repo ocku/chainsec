@@ -1,6 +1,7 @@
 mod dependency;
 mod finding;
 mod limits;
+mod remote;
 mod report;
 
 pub(crate) use dependency::{DenoLockfileSnapshot, canonical_http_url};
@@ -17,6 +18,7 @@ pub use limits::{
     DEFAULT_MAX_SOURCE_FILE_SIZE, DEFAULT_MAX_SOURCE_FILES, DEFAULT_REQUEST_TIMEOUT_SECONDS,
     EngineLimits, SerializableLimits,
 };
+pub use remote::parse_remote_package;
 pub use report::{
     CapabilityEvidence, CapabilityReport, OperationalIssue, PackageReport, PolicySummary, Report,
     ScanStatistics,

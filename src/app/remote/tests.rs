@@ -1,6 +1,9 @@
-use super::*;
+use chainsec::model::{Ecosystem, parse_remote_package};
+
 use crate::app::cli::{Cli, Command, RemoteSubcommand};
 use clap::Parser;
+
+use super::add_allowed_host;
 
 #[test]
 fn adds_configured_hosts_for_all_remote_sources() {
@@ -52,21 +55,21 @@ fn adds_official_pypi_artifact_host() {
 
 #[test]
 fn parses_registry_remote_roots() {
-    let npm = dependency("npm:express@0.1.0").unwrap();
+    let npm = parse_remote_package("npm:express@0.1.0").unwrap();
     assert_eq!(npm.ecosystem, Ecosystem::Npm);
     assert_eq!(npm.name, "express");
     assert_eq!(npm.requirement, "npm:express@0.1.0");
 
-    let pypi = dependency("pypi:urllib3").unwrap();
+    let pypi = parse_remote_package("pypi:urllib3").unwrap();
     assert_eq!(pypi.ecosystem, Ecosystem::Python);
     assert_eq!(pypi.name, "urllib3");
 
-    let jsr = dependency("jsr:@std/fs").unwrap();
+    let jsr = parse_remote_package("jsr:@std/fs").unwrap();
     assert_eq!(jsr.ecosystem, Ecosystem::Deno);
     assert_eq!(jsr.name, "@std/fs");
     assert_eq!(jsr.requirement, "jsr:@std/fs");
 
-    let versioned_jsr = dependency("jsr:@std/fs@1.0.0").unwrap();
+    let versioned_jsr = parse_remote_package("jsr:@std/fs@1.0.0").unwrap();
     assert_eq!(versioned_jsr.name, "@std/fs");
     assert_eq!(versioned_jsr.requirement, "jsr:@std/fs@1.0.0");
 }
@@ -79,7 +82,7 @@ fn rejects_malformed_npm_remote_roots_before_fetching() {
         "npm:bad/name@1.0.0",
         "npm:.hidden",
     ] {
-        let error = dependency(specifier).unwrap_err();
+        let error = parse_remote_package(specifier).unwrap_err();
         assert!(
             error.to_string().contains("valid package name"),
             "{specifier}"
@@ -90,7 +93,7 @@ fn rejects_malformed_npm_remote_roots_before_fetching() {
 #[test]
 fn parses_pinned_github_remote_root() {
     let revision = "0123456789012345678901234567890123456789";
-    let dependency = dependency(&format!("github:owner/repository@{revision}")).unwrap();
+    let dependency = parse_remote_package(&format!("github:owner/repository@{revision}")).unwrap();
 
     assert!(dependency.is_pinned_github());
     assert_eq!(dependency.resolved_version.as_deref(), Some(revision));
@@ -98,6 +101,6 @@ fn parses_pinned_github_remote_root() {
 
 #[test]
 fn rejects_unpinned_github_remote_root() {
-    let error = dependency("github:owner/repository@main").unwrap_err();
+    let error = parse_remote_package("github:owner/repository@main").unwrap_err();
     assert!(error.to_string().contains("40_HEX_COMMIT"));
 }

@@ -3,6 +3,15 @@
 All notable changes are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Before the `chainsec` tool reaches `1.0.0`, minor releases and minor report schema revisions may contain documented breaking changes. Each report schema version is an exact contract: consumers must check the full `schema_version` rather than assume versions with the same major number are compatible. Every schema revision requires explicit changelog and migration notes.
 
 
+## [0.5.3]
+
+### Changed
+
+- Reorganized the application layer around an explicit `src/app/core` module. `src/app/pipeline.rs` became `src/app/core/orchestration.rs`, and suppression parsing/matching moved into `src/app/core/suppressions.rs`, so presentation modules no longer coordinate the engine and fetcher directly.
+- Replaced the README's summary architecture diagram with a descriptive functional map showing the end-to-end scan, fetch, traversal, finalization, and output flow.
+- Documented `src/app/core` in the development architecture reference.
+
+
 ## [0.5.2]
 
 ### Changed

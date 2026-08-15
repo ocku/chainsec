@@ -7,7 +7,7 @@ use crate::{
     },
     fetcher::SourceFetcher,
     manifests,
-    model::{EngineLimits, Report},
+    model::{EngineLimits, PolicySummary, Report, SerializableLimits},
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -38,16 +38,16 @@ pub(super) fn workspace_requests(
         contexts: DiscoveryContexts::default(),
         report_source: true,
     };
-    let engine = Engine::new(
-        &[],
-        fetcher,
-        EngineLimits::default(),
-        false,
-        true,
-        Vec::new(),
+    let limits = EngineLimits::default();
+    let policy = PolicySummary {
+        require_lockfile: false,
+        offline: true,
         trust_local_input,
-        false,
-    );
+        allow_insecure_http: false,
+        allowed_hosts: Vec::new(),
+        limits: SerializableLimits::from(&limits),
+    };
+    let engine = Engine::new(&[], fetcher, policy);
     let mut report = Report::new(root.to_owned(), engine.policy.clone());
     let requests = engine
         .fetch_requests_for(

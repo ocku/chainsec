@@ -39,19 +39,23 @@ async fn fetched_root_batch_allows_one_shared_dependency_within_aggregate_limit(
         max_packages: 3,
         ..EngineLimits::default()
     };
-    let reports = Engine::new(&[], &fetcher, limits, true, true, vec![], false, false)
-        .analyze_fetched_roots(vec![
-            fetched_fixture_root(
-                packages.path().join("root-a"),
-                "npm:root-a@1.0.0#sha512-root-a",
-            ),
-            fetched_fixture_root(
-                packages.path().join("root-b"),
-                "npm:root-b@1.0.0#sha512-root-b",
-            ),
-        ])
-        .await
-        .unwrap();
+    let reports = Engine::new(
+        &[],
+        &fetcher,
+        engine_policy(limits, true, true, vec![], false, false),
+    )
+    .analyze_fetched_roots(vec![
+        fetched_fixture_root(
+            packages.path().join("root-a"),
+            "npm:root-a@1.0.0#sha512-root-a",
+        ),
+        fetched_fixture_root(
+            packages.path().join("root-b"),
+            "npm:root-b@1.0.0#sha512-root-b",
+        ),
+    ])
+    .await
+    .unwrap();
 
     assert_eq!(
         fetches
@@ -131,15 +135,17 @@ async fn single_root_same_acquisition_with_different_ranges_counts_once() {
     let report = Engine::new(
         &[],
         &fetcher,
-        EngineLimits {
-            max_packages: 6,
-            ..EngineLimits::default()
-        },
-        true,
-        true,
-        vec![],
-        false,
-        false,
+        engine_policy(
+            EngineLimits {
+                max_packages: 6,
+                ..EngineLimits::default()
+            },
+            true,
+            true,
+            vec![],
+            false,
+            false,
+        ),
     )
     .analyze(root.path())
     .await
@@ -220,15 +226,17 @@ async fn fetched_root_batch_same_acquisition_with_different_ranges_counts_once()
     let reports = Engine::new(
         &[],
         &fetcher,
-        EngineLimits {
-            max_packages: 5,
-            ..EngineLimits::default()
-        },
-        true,
-        true,
-        vec![],
-        false,
-        false,
+        engine_policy(
+            EngineLimits {
+                max_packages: 5,
+                ..EngineLimits::default()
+            },
+            true,
+            true,
+            vec![],
+            false,
+            false,
+        ),
     )
     .analyze_fetched_roots(vec![fetched_fixture_root(
         packages.path().join("root"),
@@ -308,15 +316,17 @@ async fn single_root_fetch_attempts_are_bounded_when_a_dependency_fetch_fails() 
     let report = Engine::new(
         &[],
         &fetcher,
-        EngineLimits {
-            max_packages: 3,
-            ..EngineLimits::default()
-        },
-        true,
-        true,
-        vec![],
-        false,
-        false,
+        engine_policy(
+            EngineLimits {
+                max_packages: 3,
+                ..EngineLimits::default()
+            },
+            true,
+            true,
+            vec![],
+            false,
+            false,
+        ),
     )
     .analyze(root.path())
     .await
@@ -369,19 +379,23 @@ async fn fetched_root_batch_rejects_a_frontier_that_exceeds_aggregate_limit() {
         max_packages: 3,
         ..EngineLimits::default()
     };
-    let reports = Engine::new(&[], &fetcher, limits, true, true, vec![], false, false)
-        .analyze_fetched_roots(vec![
-            fetched_fixture_root(
-                packages.path().join("root-a"),
-                "npm:root-a@1.0.0#sha512-root-a",
-            ),
-            fetched_fixture_root(
-                packages.path().join("root-b"),
-                "npm:root-b@1.0.0#sha512-root-b",
-            ),
-        ])
-        .await
-        .unwrap();
+    let reports = Engine::new(
+        &[],
+        &fetcher,
+        engine_policy(limits, true, true, vec![], false, false),
+    )
+    .analyze_fetched_roots(vec![
+        fetched_fixture_root(
+            packages.path().join("root-a"),
+            "npm:root-a@1.0.0#sha512-root-a",
+        ),
+        fetched_fixture_root(
+            packages.path().join("root-b"),
+            "npm:root-b@1.0.0#sha512-root-b",
+        ),
+    ])
+    .await
+    .unwrap();
 
     assert!(fetches.lock().unwrap().is_empty());
     for report in reports {

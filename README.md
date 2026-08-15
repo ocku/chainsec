@@ -50,13 +50,69 @@ How it works: Tree-sitter acts as a scalpel. Instead of blunt regex or substring
 ## How it works
 
 ```mermaid
-graph TD
-    A[Project + lockfiles] --> B[Resolve dependencies]
-    B -->|locked version + integrity| C[Fetch + verify source]
-    C --> D[Tree-sitter scan]
-    D --> E[Report]
-    E --> F[JSON / SARIF / human]
-    E --> G[Exit code]
+flowchart TD
+    run["chainsec command"] --> decide{"which subcommand?"}
+
+    decide -->|"scan"| scan_local["scan a local project directory"]
+    decide -->|"remote scan"| scan_remote["fetch and scan a remote package root"]
+    decide -->|"remote diff"| diff_remote["compare versions of a remote package"]
+    decide -->|"init"| do_init["write chainsec.toml and update gitignore"]
+    decide -->|"cache purge"| do_purge["delete cached source while keeping lock metadata"]
+
+    scan_local --> load_config
+    scan_remote --> load_config
+    diff_remote --> load_config
+    do_init --> done_init["exit"]
+    do_purge --> done_purge["exit"]
+
+    subgraph CONFIG["configuration"]
+        load_config["merge CLI args, project chainsec.toml, and global config"]
+        build_pipeline["build pipeline with limits, fetch policy, rules, and cache"]
+        load_config --> build_pipeline
+    end
+
+    build_pipeline --> begin["begin traversal at the root package"]
+
+    subgraph LOOP["dependency traversal"]
+        frontier["take the next frontier of packages"]
+        discover["read manifests and lockfiles to find dependencies and install scripts"]
+        scan["scan source files with tree-sitter rules and entropy checks"]
+        fetch_req["prepare a fetch for each dependency"]
+        cache_hit{"is the source already cached?"}
+        reuse["restore verified source from cache"]
+        download["download, verify integrity, extract, and publish to cache"]
+        enqueue["add fetched packages to the next frontier"]
+
+        frontier --> discover
+        discover --> scan
+        scan --> fetch_req
+        fetch_req --> cache_hit
+        cache_hit -->|"yes"| reuse
+        cache_hit -->|"no"| download
+        reuse --> enqueue
+        download --> enqueue
+        enqueue --> frontier
+    end
+
+    begin --> frontier
+
+    frontier -->|"no more packages or limit reached"| finalize
+
+    subgraph FINALIZE["finalize"]
+        finalize["aggregate findings, capabilities, issues, and statistics"]
+        suppress["apply ignore rules and user-configured suppressions"]
+        finalize --> suppress
+    end
+
+    suppress --> render
+
+    subgraph OUTPUT["output"]
+        render["render the report as human, JSON, or SARIF"]
+        exit_code["compute exit code from issues and remaining findings"]
+        render --> exit_code
+    end
+
+    exit_code --> finish["return exit code to the shell"]
 ```
 
 `chainsec` never installs or executes package code. Acquisition and extraction are implemented in Rust; it does not launch `python`, package managers, Git, shell commands, or archive executables. See [`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md) for the precise trust model.
@@ -164,7 +220,7 @@ The action picks up `chainsec.toml` from `config-dir` and merges its `allowed_ho
 A human report summarizes the findings that meet the failure threshold and lists unique capabilities and alerts. Use `--verbose` to include findings below `--fail-on`.
 
 ```text
-chainsec 0.5.0 — 3 package(s), 42 source file(s), 81920 source byte(s), 2 finding(s), 2 capability type(s), 0 issue(s)
+chainsec 0.5.3 — 3 package(s), 42 source file(s), 81920 source byte(s), 2 finding(s), 2 capability type(s), 0 issue(s)
 High python:chainsec.py.detection.dynamic-code-execution:ArbitraryCodeExecution [root] src/main.py:12:5 — eval(user_input)
 
 Summary

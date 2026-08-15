@@ -8,12 +8,7 @@ async fn single_fetch_concurrency_uses_configured_analysis_threads() {
     let report = Engine::new(
         &[],
         &fetcher,
-        EngineLimits::default(),
-        true,
-        true,
-        vec![],
-        false,
-        false,
+        engine_policy(EngineLimits::default(), true, true, vec![], false, false),
     )
     .with_max_analysis_threads(2)
     .analyze(root.path())
@@ -33,12 +28,7 @@ async fn batch_fetch_concurrency_uses_configured_analysis_threads() {
     let reports = Engine::new(
         &[],
         &fetcher,
-        EngineLimits::default(),
-        true,
-        true,
-        vec![],
-        false,
-        false,
+        engine_policy(EngineLimits::default(), true, true, vec![], false, false),
     )
     .with_max_analysis_threads(3)
     .analyze_fetched_roots(vec![fetched_fixture_root(
@@ -100,12 +90,7 @@ async fn shared_frontier_dependency_is_fetched_once() {
     let report = Engine::new(
         &[],
         &fetcher,
-        EngineLimits::default(),
-        true,
-        true,
-        vec![],
-        false,
-        false,
+        engine_policy(EngineLimits::default(), true, true, vec![], false, false),
     )
     .analyze(root.path())
     .await

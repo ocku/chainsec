@@ -85,15 +85,17 @@ async fn distinct_local_sources_with_the_same_unverified_id_are_both_analyzed() 
     let report = Engine::new(
         &rules,
         &StableLocalFetcher,
-        EngineLimits {
-            max_findings: 1,
-            ..EngineLimits::default()
-        },
-        true,
-        true,
-        vec![],
-        false,
-        false,
+        engine_policy(
+            EngineLimits {
+                max_findings: 1,
+                ..EngineLimits::default()
+            },
+            true,
+            true,
+            vec![],
+            false,
+            false,
+        ),
     )
     .analyze(root.path())
     .await
@@ -171,12 +173,7 @@ async fn authenticated_packages_with_the_same_id_still_deduplicate_across_source
     let report = Engine::new(
         &[],
         &StableAuthenticatedFetcher,
-        EngineLimits::default(),
-        true,
-        true,
-        vec![],
-        false,
-        false,
+        engine_policy(EngineLimits::default(), true, true, vec![], false, false),
     )
     .analyze(root.path())
     .await
@@ -212,12 +209,7 @@ async fn unverified_local_cycle_terminates_when_a_source_is_revisited() {
     let report = Engine::new(
         &[],
         &StableLocalFetcher,
-        EngineLimits::default(),
-        true,
-        true,
-        vec![],
-        false,
-        false,
+        engine_policy(EngineLimits::default(), true, true, vec![], false, false),
     )
     .analyze(root.path())
     .await
@@ -291,15 +283,17 @@ async fn one_traversal_checks_distinct_urls_for_the_same_authenticated_package()
     let report = Engine::new(
         &[],
         &fetcher,
-        EngineLimits {
-            max_packages: 3,
-            ..EngineLimits::default()
-        },
-        true,
-        true,
-        vec![],
-        false,
-        false,
+        engine_policy(
+            EngineLimits {
+                max_packages: 3,
+                ..EngineLimits::default()
+            },
+            true,
+            true,
+            vec![],
+            false,
+            false,
+        ),
     )
     .analyze(root.path())
     .await
@@ -361,12 +355,7 @@ async fn fetched_roots_fetch_same_dependency_id_from_distinct_source_urls_indepe
     let reports = Engine::new(
         &[],
         &fetcher,
-        EngineLimits::default(),
-        true,
-        true,
-        vec![],
-        false,
-        false,
+        engine_policy(EngineLimits::default(), true, true, vec![], false, false),
     )
     .analyze_fetched_roots(vec![
         FetchMetadata {

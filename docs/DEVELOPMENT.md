@@ -25,4 +25,5 @@ Releases are source-only and are created manually from a clean, reviewed commit.
 - `src/engine/`: breadth-first dependency traversal, resolved-identity cycle detection, and partial structured reports.
 - `src/model/`: dependency, policy, finding, limits, provenance, and report types.
 - `src/app/`: CLI, configuration layering, remote-root selection, report rendering, and report-based exit-status selection.
+- `src/app/core/`: the application core that owns the engine+fetcher pipeline and suppression application; presentation modules adapt to it rather than coordinating subsystems directly.
 - `src/error.rs`: typed operational errors.

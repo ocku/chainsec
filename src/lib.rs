@@ -14,4 +14,4 @@ pub use error::{Error, Result};
 pub use fetcher::{
     ArtifactRepositories, FetchPolicy, Fetcher, RemoteVersionSelection, SourceFetcher, purge_cache,
 };
-pub use model::{EngineLimits, Report};
+pub use model::{EngineLimits, Report, parse_remote_package};

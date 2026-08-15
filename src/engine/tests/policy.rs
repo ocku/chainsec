@@ -11,12 +11,7 @@ async fn capability_rules_are_reported_separately_from_findings() {
     let report = Engine::new(
         &rules,
         &NeverFetch,
-        EngineLimits::default(),
-        false,
-        false,
-        vec![],
-        false,
-        false,
+        engine_policy(EngineLimits::default(), false, false, vec![], false, false),
     )
     .analyze(root.path())
     .await
@@ -53,12 +48,7 @@ async fn javascript_deno_listeners_are_reported_as_network_listen() {
     let report = Engine::new(
         &rules,
         &NeverFetch,
-        EngineLimits::default(),
-        false,
-        false,
-        vec![],
-        false,
-        false,
+        engine_policy(EngineLimits::default(), false, false, vec![], false, false),
     )
     .analyze(root.path())
     .await
@@ -106,12 +96,7 @@ async fn typescript_deno_listeners_are_reported_as_network_listen() {
     let report = Engine::new(
         &rules,
         &NeverFetch,
-        EngineLimits::default(),
-        false,
-        false,
-        vec![],
-        false,
-        false,
+        engine_policy(EngineLimits::default(), false, false, vec![], false, false),
     )
     .analyze(root.path())
     .await
@@ -161,12 +146,7 @@ async fn unlocked_dependencies_are_policy_issues() {
     let report = Engine::new(
         &rules,
         &NeverFetch,
-        EngineLimits::default(),
-        true,
-        true,
-        vec![],
-        false,
-        false,
+        engine_policy(EngineLimits::default(), true, true, vec![], false, false),
     )
     .analyze(root.path())
     .await
@@ -188,12 +168,7 @@ async fn fetched_packages_scan_vendored_node_modules() {
     let report = Engine::new(
         &rules,
         &NeverFetch,
-        EngineLimits::default(),
-        true,
-        true,
-        vec![],
-        false,
-        false,
+        engine_policy(EngineLimits::default(), true, true, vec![], false, false),
     )
     .analyze_fetched_root(FetchMetadata {
         source,
@@ -226,12 +201,7 @@ async fn fetched_root_bypasses_lockfile_policy_but_dependencies_do_not() {
     let report = Engine::new(
         &rules,
         &NeverFetch,
-        EngineLimits::default(),
-        true,
-        true,
-        vec![],
-        false,
-        false,
+        engine_policy(EngineLimits::default(), true, true, vec![], false, false),
     )
     .analyze_fetched_root(FetchMetadata {
         source: source.path().to_owned(),
