@@ -61,7 +61,7 @@ Defaults:
 | Limit | Scope | Default |
 | --- | --- | ---: |
 | Dependency depth | Entire traversal | 3 |
-| Packages and Deno URL modules | One traversal, the aggregate unique roots/acquisitions in a remote diff batch, or one Deno URL graph | 500 |
+| Packages and Deno URL modules | One traversal, the aggregate unique roots/acquisitions in a remote diff batch, or one Deno URL graph | 4096 |
 | Network requests | Each package acquisition, including redirects and JSR files | 1,000 |
 | Network acquisition duration | Each package acquisition end to end | 300 seconds |
 | Downloaded artifact | Each HTTP response/artifact | 100 MiB |

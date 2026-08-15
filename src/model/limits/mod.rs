@@ -3,7 +3,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_MAX_PACKAGE_DEPTH: usize = 3;
-pub const DEFAULT_MAX_PACKAGES: usize = 500;
+pub const DEFAULT_MAX_PACKAGES: usize = 4096;
 pub const DEFAULT_MAX_NETWORK_REQUESTS: usize = 1_000;
 pub const DEFAULT_MAX_REDIRECT_HOPS: usize = 5;
 pub const DEFAULT_REQUEST_TIMEOUT_SECONDS: u64 = 30;
