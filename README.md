@@ -50,24 +50,11 @@ How it works: Tree-sitter acts as a scalpel. Instead of blunt regex or substring
 ## How it works
 
 ```mermaid
-graph TD
-    CLI[CLI + config] -->|scan target| Engine[Engine]
-
-    Engine -->|discover| Manifests[Dependency manifests]
-    Engine -->|acquire| Fetcher[Fetch + verify + cache]
-    Engine -->|scan| Scanner[Tree-sitter scanner]
-    Engine -->|report| Reporting[Report builder]
-
-    Manifests -->|resolved deps| Engine
-    Manifests -->|lockfile data| Fetcher
-
-    Fetcher -->|extracted source| Engine
-
-    Scanner -->|findings| Engine
-    Rules[Rule catalog] -->|compiled queries| Scanner
-
-    Reporting --> Output[JSON / SARIF / human]
-    Output --> Exit[Exit code]
+graph LR
+    A[Project] --> B[Resolve dependencies]
+    B --> C[Fetch + verify source]
+    C --> D[Tree-sitter scan]
+    D --> E[JSON / SARIF / human report]
 ```
 
 `chainsec` never installs or executes package code. Acquisition and extraction are implemented in Rust; it does not launch `python`, package managers, Git, shell commands, or archive executables. See [`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md) for the precise trust model.
