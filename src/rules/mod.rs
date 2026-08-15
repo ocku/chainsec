@@ -1,10 +1,13 @@
 use std::{collections::HashSet, fs, path::Path};
 
+use regex::bytes::Regex;
 use serde::Deserialize;
 
 use crate::{
     error::{Error, Result},
-    model::{AnalysisPoint, Confidence, FindingType, Language, Risk, Rule, RuleGroup},
+    model::{
+        AnalysisPoint, CapabilityEvidence, Confidence, FindingType, Language, Risk, Rule, RuleGroup,
+    },
 };
 
 macro_rules! rule {
@@ -85,11 +88,20 @@ pub fn default_rules() -> Vec<Rule> {
     rules
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct RuleSelector {
     group: Option<RuleGroup>,
     rule_id_glob: String,
+    matcher: Regex,
 }
+
+impl PartialEq for RuleSelector {
+    fn eq(&self, other: &Self) -> bool {
+        self.group == other.group && self.rule_id_glob == other.rule_id_glob
+    }
+}
+
+impl Eq for RuleSelector {}
 
 impl RuleSelector {
     pub fn matches_rule(&self, rule: &Rule) -> bool {
@@ -100,10 +112,14 @@ impl RuleSelector {
         self.matches(finding.finding_type, &finding.rule_id)
     }
 
+    pub fn matches_capability_evidence(&self, evidence: &CapabilityEvidence) -> bool {
+        self.matches(evidence.finding_type, &evidence.rule_id)
+    }
+
     fn matches(&self, finding_type: FindingType, rule_id: &str) -> bool {
         self.group
             .is_none_or(|group| finding_type.rule_group() == group)
-            && glob_matches(&self.rule_id_glob, rule_id)
+            && self.matcher.is_match(rule_id.as_bytes())
     }
 }
 
@@ -128,40 +144,34 @@ pub fn parse_rule_selector(value: &str) -> Result<RuleSelector> {
         });
     }
 
+    let matcher =
+        Regex::new(&glob_regex(rule_id_glob)).map_err(|error| Error::InvalidConfiguration {
+            message: format!("invalid rule selector {value:?}: {error}"),
+        })?;
+
     Ok(RuleSelector {
         group,
         rule_id_glob: rule_id_glob.to_owned(),
+        matcher,
     })
 }
 
-fn glob_matches(pattern: &str, value: &str) -> bool {
-    let (pattern, value) = (pattern.as_bytes(), value.as_bytes());
-    let (mut pattern_index, mut value_index) = (0, 0);
-    let (mut star_index, mut star_value_index) = (None, 0);
-
-    while value_index < value.len() {
-        if pattern_index < pattern.len()
-            && (pattern[pattern_index] == b'?' || pattern[pattern_index] == value[value_index])
-        {
-            pattern_index += 1;
-            value_index += 1;
-        } else if pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
-            star_index = Some(pattern_index);
-            pattern_index += 1;
-            star_value_index = value_index;
-        } else if let Some(star) = star_index {
-            pattern_index = star + 1;
-            star_value_index += 1;
-            value_index = star_value_index;
-        } else {
-            return false;
+fn glob_regex(pattern: &str) -> String {
+    let mut regex = String::with_capacity(pattern.len() + 4);
+    regex.push_str(r"\A(?:");
+    for byte in pattern.bytes() {
+        match byte {
+            b'*' => regex.push_str(".*"),
+            b'?' => regex.push('.'),
+            byte if byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-') => {
+                regex.push(byte as char);
+            }
+            b'.' => regex.push_str(r"\."),
+            _ => unreachable!("rule selector syntax was validated before regex compilation"),
         }
     }
-
-    while pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
-        pattern_index += 1;
-    }
-    pattern_index == pattern.len()
+    regex.push_str(r")\z");
+    regex
 }
 
 #[derive(Deserialize)]
@@ -275,121 +285,4 @@ fn ensure_unique_rule_id(ids: &mut HashSet<String>, rule: &Rule) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::model::{Confidence, EntropyMatcher, FindingType, Language, Risk};
-
-    fn rule(entropy: Option<EntropyMatcher>) -> Rule {
-        Rule {
-            id: "CUSTOM".to_owned(),
-            version: 1,
-            language: Language::Python,
-            finding_type: FindingType::CodeObfuscation,
-            risk: Risk::Medium,
-            confidence: Confidence::Medium,
-            rationale: "rationale".to_owned(),
-            remediation: "remediation".to_owned(),
-            capability: None,
-            query: "(string) @match".to_owned(),
-            entropy,
-        }
-    }
-
-    #[test]
-    fn default_catalog_preserves_the_rule_group_boundaries() {
-        let built_in = built_in_rules();
-        let capabilities = capability_rules();
-        let default = default_rules();
-
-        assert!(!built_in.is_empty());
-        assert!(
-            built_in
-                .iter()
-                .any(|rule| rule.id.starts_with("chainsec.py.detection.guarddog."))
-        );
-        assert!(!capabilities.is_empty());
-        assert!(capabilities.iter().all(|rule| rule.capability.is_some()));
-        assert!(
-            default
-                .iter()
-                .all(|rule| !rule.id.bytes().any(|byte| byte.is_ascii_uppercase()))
-        );
-        assert_eq!(default.len(), built_in.len() + capabilities.len());
-        validate_rules(&default).unwrap();
-    }
-
-    #[test]
-    fn rejects_invalid_entropy_limits() {
-        for entropy in [
-            EntropyMatcher {
-                minimum_length: 0,
-                minimum_entropy: 4.0,
-                maximum_whitespace_ratio: 0.05,
-            },
-            EntropyMatcher {
-                minimum_length: 1,
-                minimum_entropy: -1.0,
-                maximum_whitespace_ratio: 0.05,
-            },
-            EntropyMatcher {
-                minimum_length: 1,
-                minimum_entropy: 8.1,
-                maximum_whitespace_ratio: 0.05,
-            },
-            EntropyMatcher {
-                minimum_length: 1,
-                minimum_entropy: f64::NAN,
-                maximum_whitespace_ratio: 0.05,
-            },
-        ] {
-            assert!(validate_rules(&[rule(Some(entropy))]).is_err());
-        }
-    }
-
-    #[test]
-    fn accepts_entropy_limits_at_shannon_bounds() {
-        assert!(
-            validate_rules(&[rule(Some(EntropyMatcher {
-                minimum_length: 1,
-                minimum_entropy: 8.0,
-                maximum_whitespace_ratio: 0.05,
-            }))])
-            .is_ok()
-        );
-    }
-
-    #[test]
-    fn rule_selectors_match_grouped_globs() {
-        let filesystem = Rule {
-            id: "chainsec.py.capability.filesystem-read".to_owned(),
-            finding_type: FindingType::FilesystemAccess,
-            ..rule(None)
-        };
-        let network = Rule {
-            id: "chainsec.py.capability.network-download".to_owned(),
-            finding_type: FindingType::NetworkAccess,
-            ..rule(None)
-        };
-
-        let selector = parse_rule_selector("filesystem:chainsec.py.capability.*").unwrap();
-        assert!(selector.matches_rule(&filesystem));
-        assert!(!selector.matches_rule(&network));
-        assert!(
-            parse_rule_selector("network:*")
-                .unwrap()
-                .matches_rule(&network)
-        );
-        assert!(
-            parse_rule_selector("CUSTOM")
-                .unwrap()
-                .matches_rule(&rule(None))
-        );
-    }
-
-    #[test]
-    fn rule_selectors_reject_unknown_groups_and_invalid_globs() {
-        assert!(parse_rule_selector("unknown:*").is_err());
-        assert!(parse_rule_selector("network:").is_err());
-        assert!(parse_rule_selector("network:bad/id").is_err());
-    }
-}
+mod tests;

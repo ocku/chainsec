@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://chainsec.dev/schema/version-diff-1.0.0.json",
+  "title": "chainsec version diff report",
+  "description": "A comparison of detection and capability evidence counts across selected package versions. Versions are ordered newest first and each diff compares adjacent versions from older to newer.",
+  "type": "object",
+  "required": ["schema_version", "report_type", "tool_version", "package", "resolved_version", "versions", "issues", "diffs"],
+  "properties": {
+    "schema_version": { "const": "1.0.0" },
+    "report_type": { "const": "version_diff" },
+    "tool_version": { "type": "string" },
+    "package": { "type": "string", "minLength": 1 },
+    "resolved_version": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The resolved newest version, equal to the first item in versions."
+    },
+    "versions": {
+      "type": "array",
+      "description": "Selected versions ordered from newest to oldest.",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "issues": {
+      "type": "array",
+      "description": "Operational issues grouped by affected version. Versions without issues are omitted.",
+      "items": { "$ref": "#/$defs/version_issues" }
+    },
+    "diffs": {
+      "type": "array",
+      "description": "Adjacent comparisons ordered newest pair first. Each comparison proceeds from the older version to the newer version.",
+      "items": { "$ref": "#/$defs/version_comparison" }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "version_issues": {
+      "type": "object",
+      "required": ["version", "issues"],
+      "properties": {
+        "version": { "type": "string", "minLength": 1 },
+        "issues": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/issue" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "issue": {
+      "type": "object",
+      "required": ["code", "message", "package", "operation", "fatal"],
+      "properties": {
+        "code": { "type": "string" },
+        "message": { "type": "string" },
+        "package": { "type": ["string", "null"] },
+        "operation": { "type": "string" },
+        "fatal": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "version_comparison": {
+      "type": "object",
+      "required": ["from_version", "to_version", "from_complete", "to_complete", "detections", "capabilities"],
+      "properties": {
+        "from_version": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The older version in this comparison."
+        },
+        "to_version": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The newer version in this comparison."
+        },
+        "from_complete": {
+          "type": "boolean",
+          "description": "Whether the older version report has no operational issues."
+        },
+        "to_complete": {
+          "type": "boolean",
+          "description": "Whether the newer version report has no operational issues."
+        },
+        "detections": { "$ref": "#/$defs/detection_changes" },
+        "capabilities": { "$ref": "#/$defs/capability_changes" }
+      },
+      "additionalProperties": false
+    },
+    "detection_changes": {
+      "type": "object",
+      "required": ["added", "removed"],
+      "properties": {
+        "added": {
+          "type": "array",
+          "description": "Detection groups whose count increased; after is greater than before.",
+          "items": { "$ref": "#/$defs/detection_change" }
+        },
+        "removed": {
+          "type": "array",
+          "description": "Detection groups whose count decreased; before is greater than after.",
+          "items": { "$ref": "#/$defs/detection_change" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "detection_change": {
+      "type": "object",
+      "required": ["group", "rule_id", "risk", "before", "after"],
+      "properties": {
+        "group": {
+          "enum": ["execution", "obfuscation", "process", "network", "filesystem", "secret", "loading", "deserialization", "install", "file"]
+        },
+        "rule_id": { "type": "string", "minLength": 1 },
+        "risk": { "enum": ["low", "medium", "high", "critical"] },
+        "before": { "type": "integer", "minimum": 0 },
+        "after": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "capability_changes": {
+      "type": "object",
+      "required": ["added", "removed"],
+      "properties": {
+        "added": {
+          "type": "array",
+          "description": "Capabilities whose evidence count increased; after is greater than before.",
+          "items": { "$ref": "#/$defs/capability_change" }
+        },
+        "removed": {
+          "type": "array",
+          "description": "Capabilities whose evidence count decreased; before is greater than after.",
+          "items": { "$ref": "#/$defs/capability_change" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "capability_change": {
+      "type": "object",
+      "required": ["name", "before", "after"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "before": { "type": "integer", "minimum": 0 },
+        "after": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    }
+  }
+}

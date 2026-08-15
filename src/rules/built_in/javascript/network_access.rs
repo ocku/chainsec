@@ -14,9 +14,23 @@ pub(super) fn rules() -> Vec<Rule> {
                     (call_expression function: (identifier) @callee (#eq? @callee "fetch")) @match
                     (call_expression function: (member_expression object: (identifier) @deno property: (property_identifier) @method)
                       (#eq? @deno "Deno")
-                      (#match? @method "^(http|serve|serveHttp|listen|listenTls|connect|connectTls|createHttpClient|resolveDns|upgradeWebSocket)$")) @match
+                      (#match? @method "^(http|connect|connectTls|createHttpClient|resolveDns|upgradeWebSocket)$")) @match
                     "#
         ).with_capability(Capability::NetworkConnect),
+        rule!(
+            "chainsec.js.detection.network-listen",
+            Language::JavaScript,
+            FindingType::NetworkAccess,
+            Risk::Low,
+            Confidence::High,
+            "The code can create a network listener.",
+            super::super::ACCESS_REMEDIATION,
+            r#"
+                    (call_expression function: (member_expression object: (identifier) @deno property: (property_identifier) @method)
+                      (#eq? @deno "Deno")
+                      (#match? @method "^(serve|serveHttp|listen|listenTls)$")) @match
+                    "#
+        ).with_capability(Capability::NetworkListen),
         rule!(
             "chainsec.js.detection.guarddog.messenger-exfiltration",
             Language::JavaScript,

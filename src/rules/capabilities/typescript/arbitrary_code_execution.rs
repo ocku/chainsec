@@ -10,7 +10,10 @@ pub(super) fn rules() -> Vec<Rule> {
                     Confidence::High,
                     "The code invokes a JavaScript or TypeScript dynamic-code execution API.",
                     super::super::REMOVE_EXECUTION,
-                    r#"(call_expression function: (identifier) @callee (#match? @callee "^(eval|Function)$")) @match"#
+                    r#"
+                (call_expression function: (identifier) @callee (#match? @callee "^(eval|Function)$")) @match
+                (new_expression constructor: (identifier) @callee (#eq? @callee "Function")) @match
+                "#
                 ).with_capability(Capability::CodeDynamicExecution),
     ]
 }

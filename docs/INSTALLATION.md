@@ -8,7 +8,8 @@
   ```sh
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   ```
-- **C toolchain**: a C compiler and linker are required to build the Tree-sitter grammars (`cc`/`clang` on Linux and macOS, MSVC on Windows).
+- **Unix platform**: ChainSec compiles only for Unix targets. Fetching, extraction, cache, and workspace operations require descriptor-relative no-follow filesystem primitives.
+- **C toolchain**: a C compiler and linker are required to build the Tree-sitter grammars (`cc`/`clang` on Linux and macOS).
 - **Docker** (optional): only needed for the container image.
 
 ## Build from source
@@ -52,7 +53,7 @@ docker build -t chainsec .
 The image runs as a non-root user with `/scan` as the working directory and `/cache` for the package cache. Mount the project you want to scan at `/scan`:
 
 ```sh
-docker run --rm -v /path/to/project:/scan chainsec --max-depth 0
+docker run --rm -v /path/to/project:/scan chainsec scan --max-package-depth 0
 ```
 
 For online scans, also mount a cache directory and pass your network policy:
@@ -61,7 +62,7 @@ For online scans, also mount a cache directory and pass your network policy:
 docker run --rm \
   -v /path/to/project:/scan \
   -v chainsec-cache:/cache \
-  chainsec --online --allow-host pypi.org --allow-host files.pythonhosted.org
+  chainsec scan --online --allow-host pypi.org --allow-host files.pythonhosted.org
 ```
 
 Note that the container has no network restrictions of its own; `chainsec`'s `--online`/`--allow-host` policy still governs outbound access.
@@ -77,7 +78,7 @@ chainsec --help
 Then run a local offline scan to confirm everything works:
 
 ```sh
-chainsec --max-depth 0
+chainsec scan --max-package-depth 0
 ```
 
 ## Next steps

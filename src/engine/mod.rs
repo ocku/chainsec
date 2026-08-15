@@ -10,6 +10,18 @@ use crate::{
 mod reporting;
 mod traversal;
 
+/// Default concurrent package downloads and analyses.
+pub const DEFAULT_ANALYSIS_THREADS: usize = 16;
+
+/// Maximum configurable concurrent package downloads and analyses.
+pub const MAX_ANALYSIS_THREADS: usize = 64;
+
+/// Returns a safe package-work concurrency value.
+#[must_use]
+pub fn effective_analysis_threads(threads: usize) -> usize {
+    threads.clamp(1, MAX_ANALYSIS_THREADS)
+}
+
 pub struct Engine<'a> {
     rules: &'a [Rule],
     fetcher: &'a dyn Fetcher,
@@ -23,6 +35,7 @@ pub struct Engine<'a> {
 }
 
 impl<'a> Engine<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         rules: &'a [Rule],
         fetcher: &'a dyn Fetcher,
@@ -31,11 +44,13 @@ impl<'a> Engine<'a> {
         offline: bool,
         allowed_hosts: Vec<String>,
         trust_local_input: bool,
+        allow_insecure_http: bool,
     ) -> Self {
         let policy = PolicySummary {
             require_lockfile,
             offline,
             trust_local_input,
+            allow_insecure_http,
             allowed_hosts,
             limits: SerializableLimits::from(&limits),
         };
@@ -49,16 +64,16 @@ impl<'a> Engine<'a> {
             ignored_rule_selectors: Vec::new(),
             ignored_packages: HashSet::new(),
             ignored_root_paths: Vec::new(),
-            max_analysis_threads: 16,
+            max_analysis_threads: DEFAULT_ANALYSIS_THREADS,
         }
     }
 
     /// Limits the number of packages analyzed concurrently.
     ///
-    /// Values below one are clamped to one.
+    /// Values below one are clamped to one, and larger values are capped at 64.
     #[must_use]
     pub fn with_max_analysis_threads(mut self, threads: usize) -> Self {
-        self.max_analysis_threads = threads.max(1);
+        self.max_analysis_threads = effective_analysis_threads(threads);
         self
     }
 
@@ -91,6 +106,16 @@ impl<'a> Engine<'a> {
     pub async fn analyze_fetched_root(&self, fetched: FetchMetadata) -> Result<Report> {
         let source = fetched.source.clone();
         self.analyze_with_root(&source, Some(fetched)).await
+    }
+
+    /// Analyzes multiple fetched roots in one acquisition and scan batch.
+    ///
+    /// Dependencies and source scans shared by multiple roots are performed once,
+    /// while the returned reports retain each root's independent dependency closure.
+    /// Aggregate unique roots and dependency fetch attempts are bounded by
+    /// `EngineLimits::max_packages`. Reports are returned in the same order as `fetched`.
+    pub async fn analyze_fetched_roots(&self, fetched: Vec<FetchMetadata>) -> Result<Vec<Report>> {
+        self.analyze_with_fetched_roots(fetched).await
     }
 }
 

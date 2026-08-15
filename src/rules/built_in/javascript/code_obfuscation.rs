@@ -262,7 +262,7 @@ pub(super) fn rules() -> Vec<Rule> {
                 Confidence::Medium,
                 "A string literal has unusually high Shannon entropy and may contain encrypted or packed data.",
                 "Inspect and decode the value, document its origin, and avoid embedding opaque executable payloads.",
-                r#"(string) @match"#
+                r#"[(string) (template_string)] @match"#
             );
             rule.entropy = Some(crate::model::EntropyMatcher {
                 minimum_length: 32,

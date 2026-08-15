@@ -198,6 +198,7 @@ impl Rule {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Location {
     pub start_line: usize,
     pub start_column: usize,
@@ -206,11 +207,13 @@ pub struct Location {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Suppression {
     pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AnalysisPoint {
     pub id: String,
     pub rule_id: String,
@@ -231,6 +234,11 @@ pub struct AnalysisPoint {
     pub suppression: Option<Suppression>,
 }
 
+fn append_string(input: &mut Vec<u8>, value: &str) {
+    input.extend_from_slice(&(value.len() as u64).to_be_bytes());
+    input.extend_from_slice(value.as_bytes());
+}
+
 impl AnalysisPoint {
     pub fn stable_id(
         rule_id: &str,
@@ -240,10 +248,39 @@ impl AnalysisPoint {
         location: &Location,
         matched_code: &str,
     ) -> String {
-        let input = format!(
-            "{rule_id}\0{rule_version}\0{package}\0{file}\0{}:{}-{}:{}\0{matched_code}",
-            location.start_line, location.start_column, location.end_line, location.end_column
-        );
-        format!("sha256:{}", hex::encode(Sha256::digest(input.as_bytes())))
+        // Length-prefix every variable-length field so embedded delimiters cannot
+        // make distinct tuples share the same hash preimage.
+        let mut input = Vec::new();
+        input.extend_from_slice(b"chainsec-finding-id-v2");
+        append_string(&mut input, rule_id);
+        input.extend_from_slice(&rule_version.to_be_bytes());
+        append_string(&mut input, package);
+        append_string(&mut input, file);
+        input.extend_from_slice(&(location.start_line as u64).to_be_bytes());
+        input.extend_from_slice(&(location.start_column as u64).to_be_bytes());
+        input.extend_from_slice(&(location.end_line as u64).to_be_bytes());
+        input.extend_from_slice(&(location.end_column as u64).to_be_bytes());
+        append_string(&mut input, matched_code);
+
+        format!("sha256:{}", hex::encode(Sha256::digest(input)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AnalysisPoint, Location};
+
+    #[test]
+    fn stable_id_distinguishes_embedded_nul_from_field_boundary() {
+        let location = Location {
+            start_line: 1,
+            start_column: 1,
+            end_line: 1,
+            end_column: 1,
+        };
+        let first = AnalysisPoint::stable_id("rule", 1, "a\0b", "c", &location, "code");
+        let second = AnalysisPoint::stable_id("rule", 1, "a", "b\0c", &location, "code");
+
+        assert_ne!(first, second);
     }
 }
