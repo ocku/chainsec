@@ -292,14 +292,28 @@ fn absolute_lexical(path: &Path) -> io::Result<PathBuf> {
 
 #[cfg(unix)]
 fn open_directory(path: &Path) -> Result<File> {
-    let mut directory = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NONBLOCK)
-        .open(Path::new("/"))
-        .map_err(|source| io_error(path, source))?;
+    // macOS exposes `/var` and `/tmp` as symlinks, so a lexical component-by-
+    // component `O_NOFOLLOW` walk rejects otherwise valid absolute directories
+    // (for example every `tempfile::tempdir()` under `/var/folders/.../T`).
+    // Resolve only the first path component (a root-owned top-level directory)
+    // and then walk the remainder with `O_NOFOLLOW`, preserving rejection of
+    // any attacker-controllable intermediate symlink deeper in the path.
+    let resolved = resolve_root_symlink(path).map_err(|source| io_error(path, source))?;
+    open_directory_no_follow(&resolved, path)
+}
 
-    // `O_NOFOLLOW` protects only the final component passed to `open`. Traverse from the
-    // filesystem root with descriptor-relative opens so no ancestor can redirect the root.
+#[cfg(unix)]
+fn open_directory_no_follow(path: &Path, original: &Path) -> Result<File> {
+    let mut directory = open_at(
+        libc::AT_FDCWD,
+        Path::new("/"),
+        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NONBLOCK,
+    )
+    .map_err(|source| io_error(original, source))?;
+
+    // `O_NOFOLLOW` protects only the final component passed to `open`. Traverse
+    // from the filesystem root with descriptor-relative opens so no ancestor can
+    // redirect the resolved root.
     for component in path.components() {
         match component {
             Component::RootDir | Component::CurDir => {}
@@ -309,17 +323,43 @@ fn open_directory(path: &Path) -> Result<File> {
                     Path::new(name),
                     libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_NONBLOCK,
                 )
-                .map_err(|source| io_error(path, source))?;
+                .map_err(|source| io_error(original, source))?;
             }
             Component::ParentDir | Component::Prefix(_) => {
                 return Err(manifest_error(
-                    path,
+                    original,
                     "manifest root must be an absolute directory",
                 ));
             }
         }
     }
     Ok(directory)
+}
+
+/// Resolves only the first normal component of an absolute path through
+/// `fs::canonicalize`.
+///
+/// The first component of an absolute path is a top-level directory owned by
+/// root, so following its symlink cannot be influenced by an untrusted party.
+/// This is what makes macOS temp directories (`/var/folders/.../T`, `/tmp/...`)
+/// usable while every deeper component is still checked with `O_NOFOLLOW`.
+#[cfg(unix)]
+fn resolve_root_symlink(path: &Path) -> io::Result<PathBuf> {
+    if !path.is_absolute() {
+        return Ok(path.to_owned());
+    }
+    let mut components = path.components().filter_map(|component| match component {
+        Component::Normal(name) => Some(name.to_os_string()),
+        _ => None,
+    });
+    let Some(first) = components.next() else {
+        return Ok(path.to_owned());
+    };
+    let mut resolved = std::fs::canonicalize(Path::new("/").join(&first))?;
+    for remaining in components {
+        resolved.push(remaining);
+    }
+    Ok(resolved)
 }
 
 #[cfg(not(unix))]

@@ -205,7 +205,14 @@ fn unique_child_name(prefix: &Path) -> PathBuf {
 }
 
 fn open_directory_path_no_follow(path: &Path) -> io::Result<File> {
-    let mut current = if path.is_absolute() {
+    // macOS exposes `/var` and `/tmp` as symlinks, so a lexical component-by-
+    // component `O_NOFOLLOW` walk rejects otherwise valid absolute directories
+    // (for example every `tempfile::tempdir()` under `/var/folders/.../T`).
+    // Resolve only the first path component (a root-owned top-level directory)
+    // and then walk the remainder with `O_NOFOLLOW`, preserving rejection of
+    // any attacker-controllable intermediate symlink deeper in the path.
+    let resolved = resolve_root_symlink(path)?;
+    let mut current = if resolved.is_absolute() {
         open_at(
             libc::AT_FDCWD,
             Path::new("/"),
@@ -221,7 +228,7 @@ fn open_directory_path_no_follow(path: &Path) -> io::Result<File> {
         )?
     };
 
-    for component in path.components() {
+    for component in resolved.components() {
         match component {
             Component::RootDir | Component::CurDir => continue,
             Component::Normal(name) => {
@@ -242,6 +249,31 @@ fn open_directory_path_no_follow(path: &Path) -> io::Result<File> {
     }
 
     Ok(current)
+}
+
+/// Resolves only the first normal component of an absolute path through
+/// `fs::canonicalize`.
+///
+/// The first component of an absolute path is a top-level directory owned by
+/// root, so following its symlink cannot be influenced by an untrusted party.
+/// This is what makes macOS temp directories (`/var/folders/.../T`, `/tmp/...`)
+/// usable while every deeper component is still checked with `O_NOFOLLOW`.
+fn resolve_root_symlink(path: &Path) -> io::Result<PathBuf> {
+    if !path.is_absolute() {
+        return Ok(path.to_owned());
+    }
+    let mut components = path.components().filter_map(|component| match component {
+        Component::Normal(name) => Some(name.to_os_string()),
+        _ => None,
+    });
+    let Some(first) = components.next() else {
+        return Ok(path.to_owned());
+    };
+    let mut resolved = std::fs::canonicalize(Path::new("/").join(&first))?;
+    for remaining in components {
+        resolved.push(remaining);
+    }
+    Ok(resolved)
 }
 
 fn c_path(path: &Path) -> io::Result<CString> {
