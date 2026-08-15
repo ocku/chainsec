@@ -50,11 +50,13 @@ How it works: Tree-sitter acts as a scalpel. Instead of blunt regex or substring
 ## How it works
 
 ```mermaid
-graph LR
-    A[Project] --> B[Resolve dependencies]
-    B --> C[Fetch + verify source]
+graph TD
+    A[Project + lockfiles] --> B[Resolve dependencies]
+    B -->|locked version + integrity| C[Fetch + verify source]
     C --> D[Tree-sitter scan]
-    D --> E[JSON / SARIF / human report]
+    D --> E[Report]
+    E --> F[JSON / SARIF / human]
+    E --> G[Exit code]
 ```
 
 `chainsec` never installs or executes package code. Acquisition and extraction are implemented in Rust; it does not launch `python`, package managers, Git, shell commands, or archive executables. See [`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md) for the precise trust model.
