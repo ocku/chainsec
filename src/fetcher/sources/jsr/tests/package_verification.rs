@@ -176,7 +176,10 @@ async fn jsr_file_loop_enforces_an_end_to_end_acquisition_deadline() {
         error.to_string().contains("package acquisition seconds"),
         "{error}"
     );
-    assert_eq!(requests.lock().unwrap().len(), 2);
+    // The deadline can fire after the metadata request alone or after the first
+    // file request has also been accepted, depending on scheduling. Only the
+    // upper bound is deterministic.
+    assert!(requests.lock().unwrap().len() <= 2);
 }
 
 #[test]
