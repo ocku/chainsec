@@ -174,8 +174,9 @@ fn human_report_includes_rule_group_and_dependency() {
         .output()
         .unwrap();
 
-    assert!(
-        output.status.success(),
+    assert_eq!(
+        output.status.code(),
+        Some(1),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
