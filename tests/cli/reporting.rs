@@ -149,7 +149,7 @@ fn human_report_filters_below_threshold_unless_verbose() {
 
     assert!(verbose.status.success());
     let report = String::from_utf8(verbose.stdout).unwrap();
-    assert!(report.contains("High execution:chainsec.py.detection.dynamic-code-execution"));
+    assert!(report.contains("execution:chainsec.py.detection.dynamic-code-execution"));
 }
 #[test]
 fn human_report_includes_rule_group_and_dependency() {
@@ -181,7 +181,7 @@ fn human_report_includes_rule_group_and_dependency() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("filesystem:chainsec.py.detection.filesystem-open"));
-    assert!(stdout.contains("[root]"));
+    assert!(stdout.contains("root"));
 }
 #[test]
 fn output_file_contains_analysis_and_leaves_stdout_empty() {

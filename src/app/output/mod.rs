@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use chainsec::model::{AnalysisPoint, Report, Risk};
 use serde_json::json;
 
-use super::style::{paint, risk_color};
+use super::style::{display_package, paint, risk_color};
 
 const HEURISTICS_URL: &str = "github.com/ocku/chainsec/docs/HEURISTICS.md";
 
@@ -136,19 +136,21 @@ fn human_report_header(report: &Report, color: bool) -> String {
 }
 
 fn human_finding(finding: &AnalysisPoint, color: bool) -> String {
-    format!(
-        "{} {} [{}] {}:{}:{} — {}\n",
-        paint(
-            &format!("{:?}", finding.risk),
-            risk_color(finding.risk),
-            color
-        ),
-        display_rule_id(finding),
-        finding.package,
+    let risk_label = format!("{:<8}", format!("{:?}", finding.risk));
+    let code = finding.matched_code.trim();
+    let location = format!(
+        "{}:{}:{}",
         finding.file.display(),
         finding.location.start_line,
-        finding.location.start_column,
-        finding.matched_code.replace('\n', " ")
+        finding.location.start_column
+    );
+    format!(
+        "{} {} {}\n          {}\n          {}\n",
+        paint(&risk_label, risk_color(finding.risk), color),
+        paint(&display_rule_id(finding), "36", color),
+        paint(display_package(&finding.package), "1", color),
+        paint(&location, "2", color),
+        paint(code, "2", color),
     )
 }
 

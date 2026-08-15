@@ -61,6 +61,10 @@ struct VersionComparison {
     to_complete: bool,
     detections: Changes<DetectionChange>,
     capabilities: Changes<CapabilityChange>,
+    #[serde(skip)]
+    added_findings: Vec<AnalysisPoint>,
+    #[serde(skip)]
+    removed_findings: Vec<AnalysisPoint>,
 }
 
 #[derive(Debug, Serialize)]
@@ -212,6 +216,7 @@ fn compare_versions(
         &capability_counts(&older.report),
         &capability_counts(&newer.report),
     );
+    let (added_findings, removed_findings) = finding_changes(&older.report, &newer.report, filter);
 
     VersionComparison {
         from_version: older.version.clone(),
@@ -258,6 +263,8 @@ fn compare_versions(
                 })
                 .collect(),
         },
+        added_findings,
+        removed_findings,
     }
 }
 
@@ -303,6 +310,60 @@ fn finding_identity_counts(
         *counts.entry(identity).or_default() += 1;
     }
     counts
+}
+
+fn finding_changes(
+    older: &Report,
+    newer: &Report,
+    filter: DetectionFilter,
+) -> (Vec<AnalysisPoint>, Vec<AnalysisPoint>) {
+    let before = finding_identity_counts(older, filter);
+    let after = finding_identity_counts(newer, filter);
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+
+    for finding in &newer.findings {
+        if !include_detection(finding, filter) {
+            continue;
+        }
+        let identity = finding_identity(newer, finding);
+        if after.get(&identity).copied().unwrap_or_default()
+            > before.get(&identity).copied().unwrap_or_default()
+        {
+            added.push(finding.clone());
+        }
+    }
+
+    for finding in &older.findings {
+        if !include_detection(finding, filter) {
+            continue;
+        }
+        let identity = finding_identity(older, finding);
+        if before.get(&identity).copied().unwrap_or_default()
+            > after.get(&identity).copied().unwrap_or_default()
+        {
+            removed.push(finding.clone());
+        }
+    }
+
+    (added, removed)
+}
+
+fn finding_identity(report: &Report, finding: &AnalysisPoint) -> FindingIdentity {
+    let location = &finding.location;
+    FindingIdentity {
+        package: normalized_package_identity(report, &finding.package),
+        rule_id: finding.rule_id.clone(),
+        rule_version: finding.rule_version,
+        file: finding.file.clone(),
+        location: (
+            location.start_line,
+            location.start_column,
+            location.end_line,
+            location.end_column,
+        ),
+        matched_code: finding.matched_code.clone(),
+    }
 }
 
 fn normalized_package_identity(report: &Report, package_id: &str) -> String {

@@ -16,3 +16,9 @@ pub(super) const fn risk_color(risk: Risk) -> &'static str {
         Risk::Critical => "1;31",
     }
 }
+
+pub(super) fn display_package(package: &str) -> &str {
+    package
+        .split_once('#')
+        .map_or(package, |(identity, _)| identity)
+}

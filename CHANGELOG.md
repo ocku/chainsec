@@ -3,6 +3,14 @@
 All notable changes are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Before the `chainsec` tool reaches `1.0.0`, minor releases and minor report schema revisions may contain documented breaking changes. Each report schema version is an exact contract: consumers must check the full `schema_version` rather than assume versions with the same major number are compatible. Every schema revision requires explicit changelog and migration notes.
 
 
+## [0.5.1]
+
+### Changed
+
+- Human scan output now presents each finding across multiple lines with its risk, rule group and ID, package, file location, and full matched code snippet.
+- Remote version-diff human output now lists individual added and removed findings with their locations and code snippets before the aggregate summary. Removed findings are shown before added findings, and package names are displayed without their integrity digest.
+
+
 ## [0.5.0]
 
 ### Breaking changes

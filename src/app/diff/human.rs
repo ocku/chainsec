@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use crate::app::style::{paint, risk_color};
+use chainsec::model::AnalysisPoint;
+
+use crate::app::style::{display_package, paint, risk_color};
 
 use super::{DetectionKey, DiffReport};
 
@@ -11,6 +13,12 @@ struct VersionEvent<'a> {
 }
 
 type VersionEvents<'a> = Vec<VersionEvent<'a>>;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChangeKind {
+    Added,
+    Removed,
+}
 
 pub(super) fn render(report: &DiffReport<'_>, color: bool) -> String {
     let mut output = format!(
@@ -57,6 +65,11 @@ fn render_issues(output: &mut String, report: &DiffReport<'_>, color: bool) {
 }
 
 fn render_changes(output: &mut String, report: &DiffReport<'_>, color: bool) {
+    render_detection_details(output, report, color);
+    render_summary(output, report, color);
+}
+
+fn render_summary(output: &mut String, report: &DiffReport<'_>, color: bool) {
     let oldest_version = report
         .versions
         .last()
@@ -104,6 +117,61 @@ fn render_changes(output: &mut String, report: &DiffReport<'_>, color: bool) {
         output.push('\n');
         render_capability_changes(output, &capabilities, color);
     }
+}
+
+fn render_detection_details(output: &mut String, report: &DiffReport<'_>, color: bool) {
+    let comparisons = report
+        .diffs
+        .iter()
+        .filter(|comparison| {
+            !comparison.added_findings.is_empty() || !comparison.removed_findings.is_empty()
+        })
+        .collect::<Vec<_>>();
+
+    if comparisons.is_empty() {
+        return;
+    }
+
+    output.push_str(&format!("\n{}", paint("Finding details", "1", color)));
+    output.push('\n');
+
+    for comparison in comparisons {
+        for finding in &comparison.removed_findings {
+            output.push_str(&finding_line(finding, ChangeKind::Removed, color));
+        }
+        for finding in &comparison.added_findings {
+            output.push_str(&finding_line(finding, ChangeKind::Added, color));
+        }
+    }
+}
+
+fn finding_line(finding: &AnalysisPoint, kind: ChangeKind, color: bool) -> String {
+    let (sign, sign_color) = match kind {
+        ChangeKind::Added => ("+", "32"),
+        ChangeKind::Removed => ("-", "31"),
+    };
+    let group = finding.finding_type.rule_group().name();
+    let code = finding.matched_code.trim();
+    let location = format!(
+        "{}:{}:{}",
+        finding.file.display(),
+        finding.location.start_line,
+        finding.location.start_column
+    );
+
+    format!(
+        "{} {} {} {} {}\n      {}\n\n",
+        paint(sign, sign_color, color),
+        paint(
+            &format!("{:?}", finding.risk),
+            risk_color(finding.risk),
+            color
+        ),
+        paint(&format!("{group}:{}", finding.rule_id), "36", color),
+        paint(display_package(&finding.package), "1", color),
+        paint(&location, "2", color),
+        paint(code, sign_color, color),
+    )
 }
 
 fn aggregate_changes<'a>(
