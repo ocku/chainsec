@@ -1,44 +1,60 @@
 use std::time::Duration;
 
 use chainsec::{
-    Engine, EngineLimits, FetchPolicy, SourceFetcher,
+    Engine, EngineLimits, FetchPolicy, RemoteVersionSelection, SourceFetcher,
+    engine::effective_analysis_threads,
     model::{Report, Risk, Suppression},
     rules,
 };
+use futures::{StreamExt, TryStreamExt, stream};
 use tracing::info;
 
 use super::{
-    cli::{Cli, OutputFormat},
+    cli::{AnalysisOptions, OutputFormat},
     config::SuppressionConfig,
+    diff::{self, VersionReport},
     output::{human_report, sarif_report},
     remote,
 };
 
-pub(super) fn engine_limits(cli: &Cli) -> EngineLimits {
+const GENERATED_FINDING_SELECTORS: [&str; 2] = [
+    "install:chainsec.*.detection.manifest.install-hook",
+    "file:chainsec.detection.file.*",
+];
+
+fn engine_limits(cli: &AnalysisOptions) -> EngineLimits {
     EngineLimits {
-        max_depth: cli.max_depth,
+        max_package_depth: cli.max_package_depth,
         max_packages: cli.max_packages,
-        max_archive_bytes: cli.max_archive_bytes,
-        max_extracted_bytes: cli.max_extracted_bytes,
+        max_network_requests: cli.max_network_requests,
+        max_redirect_hops: cli.max_redirect_hops,
+        request_timeout: Duration::from_secs(cli.request_timeout_seconds),
+        max_acquisition_duration: Duration::from_secs(cli.max_acquisition_seconds),
+        max_archive_size: cli.max_archive_size,
+        max_extracted_size: cli.max_extracted_size,
         max_extracted_files: cli.max_extracted_files,
-        max_source_file_bytes: cli.max_source_file_bytes,
+        max_file_depth: cli.max_file_depth,
+        max_manifest_file_size: cli.max_manifest_file_size,
+        max_source_file_size: cli.max_source_file_size,
+        max_source_files: cli.max_source_files,
+        max_findings: cli.max_findings,
         max_scan_duration: Duration::from_secs(cli.max_scan_seconds),
-        ..EngineLimits::default()
+        fail_on_parse_error: cli.fail_on_parse_error,
     }
 }
 
-fn fetch_policy(cli: &Cli) -> FetchPolicy {
+fn fetch_policy(cli: &AnalysisOptions) -> FetchPolicy {
     FetchPolicy {
         offline: !cli.online,
         allow_unlocked: cli.allow_unlocked,
         allowed_hosts: cli.allowed_hosts.clone(),
         repositories: cli.artifactories.clone(),
         trust_local_input: cli.trust_local_input,
-        ..FetchPolicy::default()
+        allow_insecure_http: cli.allow_insecure_http,
     }
 }
 
-fn rule_selectors(cli: &Cli) -> chainsec::Result<Vec<chainsec::rules::RuleSelector>> {
+fn rule_selectors(cli: &AnalysisOptions) -> chainsec::Result<Vec<chainsec::rules::RuleSelector>> {
     cli.ignored_rules
         .iter()
         .map(|selector| rules::parse_rule_selector(selector))
@@ -66,6 +82,23 @@ fn configured_suppressions(
         .collect()
 }
 
+fn package_without_integrity(package: &str) -> &str {
+    package
+        .split_once('#')
+        .map_or(package, |(identity, _)| identity)
+}
+
+fn suppression_package_matches(configured: &str, reported: &str) -> bool {
+    if configured == reported {
+        return true;
+    }
+    if configured == "root" || reported == "root" || configured.contains('#') {
+        return false;
+    }
+
+    configured == package_without_integrity(reported)
+}
+
 fn apply_suppressions(report: &mut Report, suppressions: &[ConfiguredSuppression]) {
     for finding in &mut report.findings {
         if let Some(suppression) = suppressions.iter().find(|suppression| {
@@ -73,7 +106,7 @@ fn apply_suppressions(report: &mut Report, suppressions: &[ConfiguredSuppression
                 && suppression
                     .package
                     .as_deref()
-                    .is_none_or(|package| package == finding.package)
+                    .is_none_or(|package| suppression_package_matches(package, &finding.package))
         }) {
             finding.suppressed = true;
             finding.suppression = Some(Suppression {
@@ -81,10 +114,28 @@ fn apply_suppressions(report: &mut Report, suppressions: &[ConfiguredSuppression
             });
         }
     }
+
+    for capability in &mut report.capabilities {
+        for evidence in &mut capability.evidence {
+            if let Some(suppression) = suppressions.iter().find(|suppression| {
+                suppression.selector.matches_capability_evidence(evidence)
+                    && suppression.package.as_deref().is_none_or(|package| {
+                        suppression_package_matches(package, &evidence.package)
+                    })
+            }) {
+                evidence.suppressed = true;
+                evidence.suppression = Some(Suppression {
+                    reason: suppression.reason.clone(),
+                });
+            }
+        }
+    }
 }
 
-fn configured_rules(cli: &Cli) -> chainsec::Result<Vec<chainsec::model::Rule>> {
-    let selectors = rule_selectors(cli)?;
+fn configured_rules(
+    cli: &AnalysisOptions,
+    ignored_rule_selectors: &[chainsec::rules::RuleSelector],
+) -> chainsec::Result<Vec<chainsec::model::Rule>> {
     let mut configured_rules = if cli.no_default_rules {
         Vec::new()
     } else {
@@ -92,11 +143,21 @@ fn configured_rules(cli: &Cli) -> chainsec::Result<Vec<chainsec::model::Rule>> {
     };
 
     for path in &cli.rule_packs {
-        configured_rules.extend(rules::load_rule_pack(path)?);
+        let pack = rules::load_rule_pack(path).map_err(|error| match error {
+            error @ chainsec::Error::Io { .. } => chainsec::Error::InvalidConfiguration {
+                message: error.to_string(),
+            },
+            error => error,
+        })?;
+        configured_rules.extend(pack);
     }
 
     rules::validate_rules(&configured_rules)?;
-    configured_rules.retain(|rule| !selectors.iter().any(|selector| selector.matches_rule(rule)));
+    configured_rules.retain(|rule| {
+        !ignored_rule_selectors
+            .iter()
+            .any(|selector| selector.matches_rule(rule))
+    });
 
     if configured_rules.is_empty() {
         return Err(chainsec::Error::InvalidConfiguration {
@@ -107,38 +168,81 @@ fn configured_rules(cli: &Cli) -> chainsec::Result<Vec<chainsec::model::Rule>> {
     Ok(configured_rules)
 }
 
-async fn analyze(
-    cli: &Cli,
-    configured_rules: &[chainsec::model::Rule],
-    fetcher: &SourceFetcher,
+struct AnalysisContext {
     limits: EngineLimits,
-    ignored_packages: &[String],
-    ignored_paths: &[String],
-    suppressions: &[ConfiguredSuppression],
-) -> chainsec::Result<Report> {
-    let engine = Engine::new(
-        configured_rules,
-        fetcher,
-        limits,
-        !cli.allow_unlocked,
-        !cli.online,
-        cli.allowed_hosts.clone(),
-        cli.trust_local_input,
-    )
-    .with_max_analysis_threads(cli.threads)
-    .with_ignored_packages(ignored_packages.iter().cloned())
-    .with_ignored_root_paths(ignored_paths.iter().cloned());
+    fetcher: SourceFetcher,
+    rules: Vec<chainsec::model::Rule>,
+    ignored_rule_selectors: Vec<chainsec::rules::RuleSelector>,
+    suppressions: Vec<ConfiguredSuppression>,
+}
 
-    let mut report = if let Some(remote) = &cli.remote {
-        let fetched = fetcher
-            .fetch_remote_root(remote::dependency(remote)?)
-            .await?;
-        engine.analyze_fetched_root(fetched).await?
-    } else {
-        engine.analyze(&cli.path).await?
-    };
-    apply_suppressions(&mut report, suppressions);
-    Ok(report)
+impl AnalysisContext {
+    fn new(
+        options: &AnalysisOptions,
+        suppressions: &[SuppressionConfig],
+    ) -> chainsec::Result<Self> {
+        let mut ignored_rule_selectors = rule_selectors(options)?;
+        let rules = configured_rules(options, &ignored_rule_selectors)?;
+        let configured_suppressions = configured_suppressions(suppressions)?;
+        if options.no_default_rules {
+            ignored_rule_selectors.extend(
+                GENERATED_FINDING_SELECTORS
+                    .into_iter()
+                    .map(rules::parse_rule_selector)
+                    .collect::<chainsec::Result<Vec<_>>>()?,
+            );
+        }
+
+        let limits = engine_limits(options);
+        let fetcher = SourceFetcher::new(
+            options
+                .cache
+                .clone()
+                .expect("cache path is resolved before analysis"),
+            fetch_policy(options),
+            limits.clone(),
+        )?;
+
+        Ok(Self {
+            limits,
+            fetcher,
+            rules,
+            ignored_rule_selectors,
+            suppressions: configured_suppressions,
+        })
+    }
+
+    fn engine<'a>(
+        &'a self,
+        options: &AnalysisOptions,
+        ignored_packages: &[String],
+        ignored_paths: &[String],
+    ) -> Engine<'a> {
+        Engine::new(
+            &self.rules,
+            &self.fetcher,
+            self.limits.clone(),
+            !options.allow_unlocked,
+            !options.online,
+            options.allowed_hosts.clone(),
+            options.trust_local_input,
+            options.allow_insecure_http,
+        )
+        .with_max_analysis_threads(options.threads)
+        .with_ignored_rule_selectors(self.ignored_rule_selectors.iter().cloned())
+        .with_ignored_packages(ignored_packages.iter().cloned())
+        .with_ignored_root_paths(ignored_paths.iter().cloned())
+    }
+
+    fn suppress(&self, report: &mut Report) {
+        apply_suppressions(report, &self.suppressions);
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum ScanTarget<'a> {
+    Local(&'a std::path::Path),
+    Remote(&'a str),
 }
 
 fn render_report(
@@ -151,13 +255,7 @@ fn render_report(
 ) -> chainsec::Result<String> {
     match format {
         OutputFormat::Json => serde_json::to_string_pretty(report).map_err(rendering_error),
-        OutputFormat::Human => Ok(human_report(
-            report,
-            configured_rules,
-            threshold,
-            verbose,
-            color,
-        )),
+        OutputFormat::Human => Ok(human_report(report, threshold, verbose, color)),
         OutputFormat::Sarif => {
             serde_json::to_string_pretty(&sarif_report(report, configured_rules))
                 .map_err(rendering_error)
@@ -171,37 +269,96 @@ fn rendering_error(error: serde_json::Error) -> chainsec::Error {
     }
 }
 
+pub(super) async fn run_diff(
+    cli: &AnalysisOptions,
+    package: &str,
+    selection: RemoteVersionSelection,
+    ignored_packages: &[String],
+    ignored_paths: &[String],
+    suppressions: &[SuppressionConfig],
+    color: bool,
+) -> chainsec::Result<(Vec<VersionReport>, String)> {
+    let format = diff::Format::try_from(cli.format)?;
+    let analysis = AnalysisContext::new(cli, suppressions)?;
+    let dependencies = analysis
+        .fetcher
+        .resolve_remote_version_selection(remote::dependency(package)?, selection)
+        .await?;
+    let downloads = stream::iter(dependencies).map(|dependency| async {
+        let version = dependency
+            .resolved_version
+            .clone()
+            .expect("historical remote roots are resolved");
+        info!(package, version, "downloading version for batch analysis");
+        let fetched = analysis.fetcher.fetch_remote_root(dependency).await?;
+        Ok::<_, chainsec::Error>((version, fetched))
+    });
+    let downloaded = downloads
+        .buffered(effective_analysis_threads(cli.threads))
+        .try_collect::<Vec<_>>()
+        .await?;
+    let (versions, fetched): (Vec<_>, Vec<_>) = downloaded.into_iter().unzip();
+    let engine = analysis.engine(cli, ignored_packages, ignored_paths);
+    let analyzed = engine.analyze_fetched_roots(fetched).await?;
+    let mut reports = Vec::with_capacity(analyzed.len());
+
+    for (version, mut report) in versions.into_iter().zip(analyzed) {
+        analysis.suppress(&mut report);
+        info!(
+            package,
+            version,
+            packages = report.statistics.packages,
+            files = report.statistics.source_files,
+            bytes = report.statistics.source_bytes,
+            findings = report.statistics.findings,
+            capabilities = report.capabilities.len(),
+            issues = report.issues.len(),
+            "version analysis complete"
+        );
+        reports.push(VersionReport { version, report });
+    }
+
+    let rendered = diff::render(
+        package,
+        &reports,
+        format,
+        cli.fail_on.into(),
+        cli.verbose,
+        color,
+    )?;
+    Ok((reports, rendered))
+}
+
 pub(super) async fn run(
-    cli: &Cli,
+    cli: &AnalysisOptions,
+    target: ScanTarget<'_>,
     ignored_packages: &[String],
     ignored_paths: &[String],
     suppressions: &[SuppressionConfig],
     color: bool,
 ) -> chainsec::Result<(Report, String)> {
-    let limits = engine_limits(cli);
-    let fetcher = SourceFetcher::new(
-        cli.cache
-            .clone()
-            .expect("cache path is resolved before analysis"),
-        fetch_policy(cli),
-        limits.clone(),
-    )?;
-    let configured_rules = configured_rules(cli)?;
-    let suppressions = configured_suppressions(suppressions)?;
+    let analysis = AnalysisContext::new(cli, suppressions)?;
 
-    info!(path = %cli.path.display(), "starting analysis");
-    let report = analyze(
-        cli,
-        &configured_rules,
-        &fetcher,
-        limits,
-        ignored_packages,
-        ignored_paths,
-        &suppressions,
-    )
-    .await?;
+    match target {
+        ScanTarget::Local(path) => info!(path = %path.display(), "starting analysis"),
+        ScanTarget::Remote(package) => info!(package, "starting analysis"),
+    }
+    let engine = analysis.engine(cli, ignored_packages, ignored_paths);
+    let mut report = match target {
+        ScanTarget::Remote(package) => {
+            let fetched = analysis
+                .fetcher
+                .fetch_remote_root(remote::dependency(package)?)
+                .await?;
+            engine.analyze_fetched_root(fetched).await?
+        }
+        ScanTarget::Local(path) => engine.analyze(path).await?,
+    };
+    analysis.suppress(&mut report);
     info!(
         packages = report.statistics.packages,
+        files = report.statistics.source_files,
+        bytes = report.statistics.source_bytes,
         findings = report.statistics.findings,
         issues = report.issues.len(),
         "analysis complete"
@@ -209,11 +366,41 @@ pub(super) async fn run(
     let rendered = render_report(
         cli.format,
         &report,
-        &configured_rules,
+        &analysis.rules,
         cli.fail_on.into(),
         cli.verbose,
         color,
     )?;
 
     Ok((report, rendered))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::suppression_package_matches;
+
+    #[test]
+    fn suppression_package_matching_uses_digest_free_canonical_ids() {
+        assert!(suppression_package_matches(
+            "npm:example@1.2.3",
+            "npm:example@1.2.3#sha512-abcdef"
+        ));
+        assert!(suppression_package_matches(
+            "npm:example@1.2.3#sha512-configured",
+            "npm:example@1.2.3#sha512-configured"
+        ));
+        assert!(!suppression_package_matches(
+            "npm:example@1.2.3#sha512-configured",
+            "npm:example@1.2.3#sha512-reported"
+        ));
+        assert!(suppression_package_matches("root", "root"));
+        assert!(!suppression_package_matches(
+            "root",
+            "npm:root@1.0.0#sha512-abcdef"
+        ));
+        assert!(!suppression_package_matches(
+            "npm:example@1.2.3",
+            "npm:example@1.2.30#sha512-abcdef"
+        ));
+    }
 }

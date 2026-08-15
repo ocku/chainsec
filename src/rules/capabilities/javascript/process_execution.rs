@@ -29,14 +29,13 @@ pub(super) fn rules() -> Vec<Rule> {
                     super::super::REMOVE_EXECUTION,
                     r#"
                 (call_expression function: (identifier) @callee
-                  (#match? @callee "^(execSync|execFileSync|spawnSync)$")) @match
+                  (#match? @callee "^(exec|execSync|execFile|execFileSync|spawn|spawnSync|fork)$")) @match
                 (call_expression function: (member_expression object: (identifier) @module property: (property_identifier) @callee)
                   (#match? @module "^(child_process|cp)$")
                   (#match? @callee "^(exec|execSync|execFile|execFileSync|spawn|spawnSync|fork)$")) @match
                 (call_expression function: (member_expression object: (new_expression constructor: (member_expression object: (identifier) @deno property: (property_identifier) @command)) property: (property_identifier) @method)
                   (#eq? @deno "Deno") (#eq? @command "Command")
                   (#match? @method "^(spawn|output|outputSync)$")) @match
-                (new_expression constructor: (identifier) @callee (#eq? @callee "Function")) @match
                 "#
                 ).with_capability(Capability::ProcessSpawn),
     ]

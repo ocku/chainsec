@@ -18,7 +18,7 @@ Risk is about the consequence of the behavior, not merely how broad the API matc
 - **High:** arbitrary code execution, credential or secret access, persistence, destructive filesystem operations, and suspicious exfiltration/download behavior require immediate review.
 - **Critical:** highly specific compromise indicators such as reverse shells or encoded command cradles.
 
-Use `--fail-on high` (the default) to fail CI on the high-impact classes while retaining lower-risk detections in JSON/SARIF. Use `--verbose` when reviewing medium findings in human output.
+Use `--fail-on high` (the default) to fail on the high-impact classes while retaining lower-risk detections in JSON/SARIF, for example when running in CI. Use `--verbose` when reviewing medium findings in human output.
 
 All source rules are Tree-sitter queries. They match parsed syntax only and do not perform cross-file data-flow analysis.
 
@@ -97,7 +97,7 @@ These checks are not Tree-sitter source rules.
 | `chainsec.detection.file.binary` | High / High | Unrecognized non-UTF-8 data or NUL bytes when it is not a recognized static asset or native artifact. |
 | `chainsec.detection.file.high-entropy-file` | Medium / Medium | An unrecognized file of at least 256 bytes with Shannon entropy at least 7.0 bits/byte. |
 
-File checks examine all scanned files. Supported source files are read in full within `--max-source-file`; other files are analyzed from a bounded prefix of up to 1 MiB. Compression and native executable/library formats are recognized before unknown binary and entropy classification. Known static assets with a matching signature, including macOS icon files, are skipped to reduce noise.
+File checks examine all scanned files. Supported source files are read in full within `--max-source-file-size`; other files are analyzed from a bounded prefix of up to 1 MiB. Compression and native executable/library formats are recognized before unknown binary and entropy classification. Known static assets with a matching signature, including macOS icon files, are skipped to reduce noise.
 
 ## Capability rules
 

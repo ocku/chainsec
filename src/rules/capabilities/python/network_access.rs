@@ -87,7 +87,7 @@ pub(super) fn rules() -> Vec<Rule> {
                 "A process API launches a command containing a common transfer or tunneling utility.",
                 super::super::REMOVE_EXECUTION,
                 r#"(call function: (attribute object: (identifier) @module attribute: (identifier) @method)
-                  arguments: (argument_list [(string) @command (list (string) @command)])
+                  arguments: (argument_list [(string) @command (list (string) @command) (tuple (string) @command)])
                   (#match? @module "^(os|subprocess)$")
                   (#match? @method "^(system|popen|run|call|check_call|check_output|Popen)$")
                   (#match? @command "(?i)(curl|wget|certutil|bitsadmin|Invoke-WebRequest|Invoke-RestMethod|socat|ncat|nc)([^A-Za-z0-9_]|$)")) @match"#

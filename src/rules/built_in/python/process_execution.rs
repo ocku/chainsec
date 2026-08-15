@@ -41,7 +41,7 @@ pub(super) fn rules() -> Vec<Rule> {
             super::super::REMOVE_EXECUTION,
             r#"
                 (call function: (attribute object: (identifier) @module attribute: (identifier) @method)
-                  arguments: (argument_list [(string) @command (list) @command] . (_)* )
+                  arguments: (argument_list [(string) @command (list) @command (tuple) @command] . (_)* )
                   (#match? @module "^(os|subprocess)$")
                   (#match? @method "^(system|popen|run|call|check_call|Popen)$")
                   (#match? @command "(?i)(curl([^A-Za-z0-9_]|$)|wget([^A-Za-z0-9_]|$)|pip[[:space:]]+install|powershell(\\.exe)?.*(Invoke-WebRequest|iwr|Start-BitsTransfer|Download(String|File)|IEX|Invoke-Expression|Install-(Package|Module|Script))|curl[^\"']*\\|[[:space:]]*(bash|sh|python|node)|wget[^\"']*-O[[:space:]]+-[^\"']*\\|)")) @match
@@ -60,7 +60,7 @@ pub(super) fn rules() -> Vec<Rule> {
             "A process API receives an encoded, hidden, or download-cradle PowerShell command.",
             "Remove the PowerShell payload and investigate the package as potentially compromised.",
             r#"(call function: (attribute object: (identifier) @module attribute: (identifier) @method)
-                  arguments: (argument_list [(string) @command (list (string) @command)] . (_)* )
+                  arguments: (argument_list [(string) @command (list (string) @command) (tuple (string) @command)] . (_)* )
                   (#match? @module "^(os|subprocess)$")
                   (#match? @method "^(system|popen|run|call|Popen)$")
                   (#match? @command "(?i)(powershell.*-(EncodedCommand|enc)[[:space:]]+[A-Za-z0-9+/=]{20,}|powershell.*-WindowStyle[[:space:]]+Hidden|Download(String|File)|Invoke-WebRequest|IEX[[:space:]]*\\()")) @match"#

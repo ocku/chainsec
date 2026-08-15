@@ -12,4 +12,4 @@ dependencies = [{ name = "httpx" }]
 name = "httpx"
 version = "0.27.2"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/httpx-0.27.2.tar.gz", hash = "sha256:uv-fixture", size = 1 }
+sdist = { url = "https://files.pythonhosted.org/packages/httpx-0.27.2.tar.gz", hash = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", size = 1 }

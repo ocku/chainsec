@@ -8,5 +8,5 @@ version = "0.27.2"
 summary = "The next generation HTTP client."
 groups = ["default"]
 files = [
-  { file = "httpx-0.27.2.tar.gz", hash = "sha256:pdm-fixture" },
+  { file = "httpx-0.27.2.tar.gz", hash = "sha256:3333333333333333333333333333333333333333333333333333333333333333" },
 ]

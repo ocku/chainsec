@@ -29,6 +29,7 @@ fn positive_and_negative_language_fixtures_are_scanned() {
             .iter()
             .any(|finding| finding.file.ends_with("positive.ts"))
     );
+
     assert!(
         !outcome
             .findings
@@ -211,7 +212,7 @@ fn lzma_fixture_is_not_detected_as_javascript_obfuscator() {
 #[test]
 fn source_size_limit_is_enforced_before_reading() {
     let limits = EngineLimits {
-        max_source_file_bytes: 1,
+        max_source_file_size: 1,
         ..EngineLimits::default()
     };
     let error = scanner::scan(

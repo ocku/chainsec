@@ -1,0 +1,81 @@
+name: chainsec — dependency chain supply audit
+description: Audit dependency chain supply with chainsec remote version diffs
+author: ocku
+branding:
+  icon: shield
+  color: orange
+
+inputs:
+  package:
+    description: >
+      Package selector in source:name format (npm:express, pypi:urllib3, jsr:@std/fs).
+      Required.
+    required: true
+  last:
+    description: "Number of latest releases to compare (minimum 2)"
+    required: false
+    default: "2"
+  max-package-depth:
+    description: "Maximum dependency traversal depth"
+    required: false
+    default: "2"
+  fail-on:
+    description: "Finding threshold for exit code 1 (low, medium, high, critical)"
+    required: false
+    default: "high"
+  format:
+    description: "Report format (human, json)"
+    required: false
+    default: "human"
+  allow-host:
+    description: >
+      Additional hosts to allow, space-separated.
+      Example: "pypi.org files.pythonhosted.org registry.npmjs.org"
+    required: false
+    default: ""
+  config-dir:
+    description: >
+      Directory containing chainsec.toml, relative to the repository root.
+      Defaults to the repository root.
+    required: false
+    default: "."
+  cache:
+    description: "Cache directory for dependency source"
+    required: false
+    default: ".chainsec-cache"
+  threads:
+    description: "Maximum concurrency for downloads and analysis"
+    required: false
+    default: "16"
+
+runs:
+  using: docker
+  image: docker://ghcr.io/ocku/chainsec:latest
+  entrypoint: /bin/sh
+  args:
+    - -c
+    - |
+      set -e
+
+      CONFIG_DIR="$GITHUB_WORKSPACE/${{ inputs.config-dir }}"
+      if [ ! -f "$CONFIG_DIR/chainsec.toml" ]; then
+        echo "::warning::No chainsec.toml found in $CONFIG_DIR. Running with CLI defaults only."
+      fi
+
+      cd "$CONFIG_DIR"
+
+      ALLOW_HOST_ARGS=""
+      if [ -n "${{ inputs.allow-host }}" ]; then
+        for host in ${{ inputs.allow-host }}; do
+          ALLOW_HOST_ARGS="$ALLOW_HOST_ARGS --allow-host $host"
+        done
+      fi
+
+      chainsec remote diff "${{ inputs.package }}" \
+        --last "${{ inputs.last }}" \
+        --max-package-depth "${{ inputs.max-package-depth }}" \
+        --fail-on "${{ inputs.fail-on }}" \
+        --format "${{ inputs.format }}" \
+        --threads "${{ inputs.threads }}" \
+        --cache "${{ inputs.cache }}" \
+        $ALLOW_HOST_ARGS

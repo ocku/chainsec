@@ -10,7 +10,10 @@ pub(super) fn rules() -> Vec<Rule> {
             Confidence::High,
             super::super::EXECUTION_RATIONALE,
             super::super::EXECUTION_REMEDIATION,
-            r#"(call_expression function: (identifier) @callee (#match? @callee "^(eval|Function)$")) @match"#
+            r#"
+                (call_expression function: (identifier) @callee (#match? @callee "^(eval|Function)$")) @match
+                (new_expression constructor: (identifier) @callee (#eq? @callee "Function")) @match
+                "#
         ),
         rule!(
             "chainsec.js.detection.heuristic.computed-global-execution",

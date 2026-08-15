@@ -1,10 +1,11 @@
 # chainsec
 
-`chainsec` is a recursive static source scanner for Python, JavaScript, and TypeScript projects. It discovers dependency declarations, enriches them from supported lockfiles, safely acquires verified source artifacts, scans source with versioned Tree-sitter rules, and emits JSON, SARIF, or terminal reports.
+`chainsec` is a dependency chain supply auditing tool for Python, JavaScript, and TypeScript projects. It discovers dependency declarations, enriches them from supported lockfiles, safely acquires verified source artifacts, scans source with versioned Tree-sitter rules, and emits JSON, SARIF, or terminal reports. It can also be used as a CI component with documented exit codes.
 
 Package source is parsed, never installed or executed. Acquisition and extraction are implemented in Rust; `chainsec` does not launch `python`, package managers, Git, shell commands, or archive executables.
 
-See the [AI Assistance Notice](AI_NOTICE.md).
+> [!WARNING]
+> **Pre-release software:** `chainsec` is not yet stable and may change incompatibly. It is developed with AI assistance; see the [AI Assistance Notice](AI_NOTICE.md).
 
 ![chainsec demo](docs/assets/demo.gif)
 
@@ -24,7 +25,7 @@ See the [AI Assistance Notice](AI_NOTICE.md).
 - **Lockfile-aware resolution** — enriches declarations from Poetry, Pipfile, uv, PDM, npm/Yarn/pnpm, and Deno lockfiles so dependencies are identified by exact version and integrity, not by name alone.
 - **Tree-sitter precision** — parses source into concrete syntax trees and runs versioned queries, so `eval(...)` is matched as a call expression rather than the letters "eval" appearing anywhere in text.
 - **Safe by default** — network is off unless you opt in, nothing is installed or executed, and acquisition/extraction are confined and bounded.
-- **Multiple report formats** — a human-readable terminal report by default, plus JSON (schema-versioned) and SARIF for automation, with documented CI exit codes.
+- **Multiple report formats** — a human-readable terminal report by default, plus JSON (schema-versioned) and SARIF for automation and CI integration.
 - **Extensible rules** — a versioned built-in catalog plus custom JSON/YAML rule packs and per-rule ignore selectors.
 
 ## What it scans for, and how
@@ -50,16 +51,31 @@ How it works: Tree-sitter acts as a scalpel. Instead of blunt regex or substring
 
 ```mermaid
 graph TD
-    A[Project root] --> B[Scan source + discover manifests]
-    B --> C[Resolve dependencies from lockfiles]
-    C --> D{Network needed?}
-    D -->|No| E[Scan local source only]
-    D -->|Yes, with online mode + allowed host| F[Fetch verified source artifacts]
-    F --> G[Verify integrity + safe extraction]
-    E --> H[Parse with Tree-sitter + run versioned rules]
-    G --> H
-    H --> I[Emit JSON / SARIF / human report]
-    I --> J[Exit code by finding threshold]
+    CLI["app/ CLI + config"] -->|scan target| Engine
+
+    Engine["engine/ traversal"] -->|discover| Manifests
+    Engine -->|acquire| Fetcher
+    Engine -->|scan source| Scanner
+    Engine -->|build report| Reporting["engine/ reporting"]
+
+    Manifests["manifests/ discovery + lockfiles"] -->|resolved deps| Engine
+    Manifests -->|lockfile data| Fetcher
+
+    Fetcher["fetcher/ network + integrity + cache"] -->|extracted source| Engine
+
+    Scanner["scanner/ Tree-sitter + file checks"] -->|findings| Engine
+    Scanner -->|queries| Rules
+
+    Rules["rules/ built-in + capability catalog"] -->|compiled queries| Scanner
+
+    Model["model/ shared types"] -.-> Manifests
+    Model -.-> Fetcher
+    Model -.-> Scanner
+    Model -.-> Rules
+    Model -.-> Reporting
+
+    Reporting -->|report| Output["app/ output JSON / SARIF / human"]
+    Output --> Exit["exit code by threshold"]
 ```
 
 `chainsec` never installs or executes package code. Acquisition and extraction are implemented in Rust; it does not launch `python`, package managers, Git, shell commands, or archive executables. See [`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md) for the precise trust model.
@@ -67,13 +83,13 @@ graph TD
 ## Safe defaults
 
 - Network access is off unless online mode is enabled with `--online` or `online = true` in configuration.
-- Every outbound host must be allowed by the merged `allowed_hosts` configuration and `--allow-host` values, unless a `--remote` selector or configured Artifactory metadata endpoint supplies its metadata host; redirects and artifact hosts are checked against the same policy.
+- Every outbound host must be allowed by the merged `allowed_hosts` configuration and `--allow-host` values. `--allow-host` adds hosts rather than replacing configured entries, so it cannot narrow a configured allowlist. A `chainsec remote` subcommand can additionally supply the selected package's metadata host, and a configured Artifactory metadata endpoint can supply its own host; redirects and artifact hosts are checked against the same policy.
 - Dependencies must have a resolved version and integrity from a supported lockfile unless `--allow-unlocked` is supplied.
-- HTTP and HTTPS are accepted for remote acquisition; other URL schemes are rejected. Prefer HTTPS because HTTP is plaintext.
+- Configured npm, PyPI, and JSR repositories must use HTTPS. A local `localhost`/loopback development registry may use HTTP only with the explicit `--allow-insecure-http`/`allow_insecure_http = true` opt-in, which is recorded in JSON report policy. Locked artifact URLs remain subject to the normal HTTP(S) and host policy.
 - Supported registry and Deno artifact/module integrity values are checked before extraction or analysis. GitHub full-commit archives use the commit as their immutable identity; their downloaded SHA-256 is recorded for provenance but is not lockfile-supplied and cannot be independently checked against a declared artifact digest.
-- Archive paths are confined beneath extraction roots; links, special files, and duplicate entries are rejected. Tar-family paths are limited to 128 components; ZIP/wheel paths are traversal-checked but do not have the same explicit component-depth limit.
+- Archive paths are confined beneath extraction roots; links, special files, and duplicate entries are rejected. Tar-family, ZIP/wheel, JSR, and local dependency snapshot paths share the configured path-component depth limit (128 by default).
 - Downloads, extraction, source files, package count, graph depth, Deno graph size, redirects, requests, and per-package scan duration are bounded.
-- Cache entries use resolved identities, are published atomically, and validate their package identity and extracted-tree digest on every hit.
+- Cache entries use resolved identities and pinned source URLs, retain valid publication winners, safely replace invalid entries under per-entry locks, and reconstruct scan-private source from integrity-bound retained artifacts on every hit.
 
 For the precise trust model and remaining limitations, see [`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md). To report a vulnerability, see [`SECURITY.md`](SECURITY.md).
 
@@ -82,13 +98,13 @@ For the precise trust model and remaining limitations, see [`docs/SECURITY_MODEL
 Local/offline scan:
 
 ```sh
-chainsec --max-depth 0
+chainsec scan --max-package-depth 0
 ```
 
 Locked dependency scan with an explicit network policy:
 
 ```sh
-chainsec /path/to/project \
+chainsec scan /path/to/project \
   --online \
   --allow-host pypi.org \
   --allow-host files.pythonhosted.org \
@@ -100,20 +116,74 @@ chainsec /path/to/project \
   --output report.sarif
 ```
 
+Compare detections and capability evidence across remote package releases:
+
+```sh
+# The latest three pullable published releases, with adjacent diffs
+chainsec remote diff npm:express --last 3
+
+# Exactly these two published versions; intermediate releases are not scanned
+chainsec remote diff npm:express --compare 0.1.1 0.5.4
+
+# Every pullable published version in the inclusive interval, with adjacent diffs
+chainsec remote diff npm:express --range 0.1.1 0.5.4
+```
+
+Exactly one of `--last`, `--compare`, or `--range` is required, and `--last`/the `--diff` convenience form require at least two releases so an oldest baseline exists. Remote version diffs support npm, PyPI, and JSR registry selectors and produce human output by default; use `--format json` for structured adjacent older → newer comparisons. SARIF represents a single scan and is not available for version diffs. `--max-packages` bounds both selected roots before download and the aggregate unique roots/dependency acquisitions retained by the batch. The convenience form `chainsec remote scan PACKAGE --diff N` is equivalent to `remote diff PACKAGE --last N`.
+
 Create a starter project configuration (and add the project cache to `.gitignore`):
 
 ```sh
-chainsec --init
+chainsec init
 ```
 
-Without a project `chainsec.toml`, ChainSec uses a centralized cache (`$XDG_CACHE_HOME/chainsec` or `$HOME/.cache/chainsec`) instead of creating `.chainsec-cache` in the current directory. Use `chainsec --cache-purge` to remove the resolved cache, or pass `--cache <dir>` to select one explicitly.
+Without a project `chainsec.toml`, ChainSec uses a centralized cache (`$XDG_CACHE_HOME/chainsec` or `$HOME/.cache/chainsec`) instead of creating `.chainsec-cache` in the current directory. Use `chainsec cache purge` to clear the regular directory it opens at the configured cache path while retaining the cache directory and sibling `<cache>.locks/lifecycle.lock`, or pass `--cache <dir>` to select one explicitly. An existing fetcher remains confined to its pinned open cache directory if that pathname is renamed or replaced; a later purge targets the directory it opens at the configured path. Locks coordinate only cooperating ChainSec processes.
+
+## GitHub Action
+
+`chainsec` ships a GitHub Action that diffs the latest releases of a remote package against your `chainsec.toml` policy:
+
+```yaml
+name: Dependency audit
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"  # every Monday at 06:00 UTC
+  workflow_dispatch:
+
+jobs:
+  chainsec:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ocku/chainsec@main
+        with:
+          package: npm:express
+          last: 2
+          max-package-depth: 2
+          allow-host: "registry.npmjs.org"
+```
+
+| Input | Required | Default | Description |
+| --- | --- | --- | --- |
+| `package` | yes | — | Package selector (`npm:express`, `pypi:urllib3`, `jsr:@std/fs`) |
+| `last` | no | `2` | Number of latest releases to compare (minimum 2) |
+| `max-package-depth` | no | `2` | Maximum dependency traversal depth |
+| `fail-on` | no | `high` | Finding threshold (`low`, `medium`, `high`, `critical`) |
+| `format` | no | `human` | Report format (`human`, `json`) |
+| `allow-host` | no | — | Space-separated additional hosts to allow |
+| `config-dir` | no | `.` | Directory containing `chainsec.toml` |
+| `cache` | no | `.chainsec-cache` | Cache directory for dependency source |
+| `threads` | no | `16` | Maximum concurrency for downloads and analysis |
+
+The action picks up `chainsec.toml` from `config-dir` and merges its `allowed_hosts`, `fail_on`, and other settings with the action inputs. Hosts configured in `chainsec.toml` are automatically allowed; use `allow-host` for hosts not already in configuration. See [`docs/GITHUB_ACTION.md`](docs/GITHUB_ACTION.md) for the full action reference.
 
 ## Example output
 
 A human report summarizes the findings that meet the failure threshold and lists unique capabilities and alerts. Use `--verbose` to include findings below `--fail-on`.
 
 ```text
-chainsec 0.4.0 — 3 package(s), 42 source file(s), 81920 source byte(s), 2 finding(s), 2 capability type(s), 0 issue(s)
+chainsec 0.5.0 — 3 package(s), 42 source file(s), 81920 source byte(s), 2 finding(s), 2 capability type(s), 0 issue(s)
 High python:chainsec.py.detection.dynamic-code-execution:ArbitraryCodeExecution [root] src/main.py:12:5 — eval(user_input)
 
 Summary
@@ -125,12 +195,13 @@ Alerts (1)
   High       1  python:chainsec.py.detection.dynamic-code-execution:ArbitraryCodeExecution
 ```
 
-JSON reports use schema version `1.1.0` and include stable finding IDs, provenance, structured issues, informational capability evidence, and configured suppression reasons. See [`docs/RULES_AND_REPORTS.md`](docs/RULES_AND_REPORTS.md) and the [report schema](docs/schema/report.schema.json).
+JSON reports use schema version `1.2.0` and include stable finding IDs, provenance, structured issues, informational capability evidence, and configured suppression reasons. See [`docs/RULES_AND_REPORTS.md`](docs/RULES_AND_REPORTS.md) and the [report schema](docs/schema/report.schema.json).
 
 ## Documentation
 
 - [Installation](docs/INSTALLATION.md)
-- [Configuration and CLI reference](docs/CONFIGURATION.md)
+- [Configuration and CLI/CI reference](docs/CONFIGURATION.md)
+- [GitHub Action](docs/GITHUB_ACTION.md)
 - [Dependency resolution and acquisition](docs/RESOLUTION.md)
 - [Rules, reports, and exit status](docs/RULES_AND_REPORTS.md)
 - [Heuristics and capability reference](docs/HEURISTICS.md)
