@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     fmt,
     hash::{Hash, Hasher},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
@@ -10,6 +10,9 @@ use sha2::{Digest, Sha256};
 
 use serde::{Deserialize, Serialize};
 use url::Url;
+
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -33,6 +36,7 @@ impl fmt::Display for Ecosystem {
 pub struct DenoLockfileSnapshot {
     identity: String,
     remote_integrities: Arc<HashMap<String, String>>,
+    redirects: Arc<HashMap<String, String>>,
 }
 
 impl Hash for DenoLockfileSnapshot {
@@ -41,6 +45,9 @@ impl Hash for DenoLockfileSnapshot {
         let mut entries = self.remote_integrities.iter().collect::<Vec<_>>();
         entries.sort_unstable();
         entries.hash(state);
+        let mut redirects = self.redirects.iter().collect::<Vec<_>>();
+        redirects.sort_unstable();
+        redirects.hash(state);
     }
 }
 
@@ -59,9 +66,23 @@ impl DenoLockfileSnapshot {
                     .collect()
             })
             .unwrap_or_default();
+        let redirects = deno_remote_redirect_entries(value)
+            .map(|redirects| {
+                redirects
+                    .iter()
+                    .filter_map(|(requested, effective)| {
+                        Some((
+                            canonical_http_url(requested)?,
+                            canonical_http_url(effective.as_str()?)?,
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         Self {
             identity: format!("sha256:{}", hex::encode(Sha256::digest(bytes))),
             remote_integrities: Arc::new(remote_integrities),
+            redirects: Arc::new(redirects),
         }
     }
 
@@ -70,9 +91,19 @@ impl DenoLockfileSnapshot {
         identity: impl Into<String>,
         remote_integrities: HashMap<String, String>,
     ) -> Self {
+        Self::from_remote_integrities_and_redirects(identity, remote_integrities, HashMap::new())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_remote_integrities_and_redirects(
+        identity: impl Into<String>,
+        remote_integrities: HashMap<String, String>,
+        redirects: HashMap<String, String>,
+    ) -> Self {
         Self {
             identity: identity.into(),
             remote_integrities: Arc::new(remote_integrities),
+            redirects: Arc::new(redirects),
         }
     }
 
@@ -84,9 +115,18 @@ impl DenoLockfileSnapshot {
         &self.remote_integrities
     }
 
+    pub(crate) fn redirects(&self) -> &HashMap<String, String> {
+        &self.redirects
+    }
+
     #[cfg(test)]
     pub(crate) fn shares_remote_integrities_with(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.remote_integrities, &other.remote_integrities)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shares_redirects_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.redirects, &other.redirects)
     }
 }
 
@@ -104,6 +144,17 @@ fn deno_remote_integrity_entries(
             .iter()
             .all(|(url, integrity)| canonical_http_url(url).is_some() && integrity.is_string()))
     .then_some(root)
+}
+
+fn deno_remote_redirect_entries(
+    value: &serde_json::Value,
+) -> Option<&serde_json::Map<String, serde_json::Value>> {
+    // Redirects are lockfile topology only in v5. A similarly named field in an
+    // older or unknown format must not become an authenticated graph binding.
+    if value.get("version").and_then(serde_json::Value::as_str) != Some("5") {
+        return None;
+    }
+    value.get("redirects")?.as_object()
 }
 
 pub(crate) fn canonical_http_url(value: &str) -> Option<String> {
@@ -246,6 +297,30 @@ impl Dependency {
             version,
             integrity
         )
+    }
+
+    /// Identifies an unverified local source by its confined canonical location.
+    /// The locator hash is deliberately not exposed as artifact integrity.
+    pub(crate) fn local_source_id(&self, canonical_source: &Path) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(b"chainsec.local-source.identity.v1");
+        #[cfg(unix)]
+        let source_bytes = canonical_source.as_os_str().as_bytes();
+        #[cfg(not(unix))]
+        let source_bytes = canonical_source.to_string_lossy().as_bytes();
+        hasher.update((source_bytes.len() as u64).to_be_bytes());
+        hasher.update(source_bytes);
+        format!(
+            "{}@local-source:sha256:{}",
+            self.id(),
+            hex::encode(hasher.finalize())
+        )
+    }
+
+    pub(crate) fn npm_declaration_key(&self) -> String {
+        let id = self.id();
+        let source_url = self.source_url.as_deref().unwrap_or_default();
+        format!("{}:{id}{}:{source_url}", id.len(), source_url.len())
     }
 }
 

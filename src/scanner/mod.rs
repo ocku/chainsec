@@ -1,7 +1,8 @@
 use std::{
-    collections::HashSet,
+    cmp::Ordering,
+    collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
-    sync::{Arc, atomic::AtomicU64},
+    sync::Arc,
     time::Instant,
 };
 
@@ -13,16 +14,12 @@ mod file_analyzer;
 mod filesystem;
 mod source_analyzer;
 
-#[cfg(test)]
-use entropy::is_structured_literal;
-#[cfg(test)]
-use filesystem::MAX_NON_SOURCE_ANALYSIS_BYTES;
 use filesystem::{
     ScannedFileOpener, compile_ignored_paths, included, is_test_fixture, language_for,
     read_entry_with_opener,
 };
 use source_analyzer::{
-    CompiledRuleSet, SourceScanInput, SourceScanWorker, compile_rules, reserve_finding, scan_file,
+    CompiledRuleSet, SourceScanInput, SourceScanWorker, compile_rules, scan_file,
 };
 
 pub use source_analyzer::validate_rules;
@@ -48,7 +45,7 @@ impl AnalysisResources {
 
 use crate::{
     error::{Error, Result},
-    model::{AnalysisPoint, EngineLimits, Language, OperationalIssue, Rule},
+    model::{AnalysisPoint, EngineLimits, Language, OperationalIssue, Risk, Rule},
 };
 
 #[derive(Debug, Default)]
@@ -72,7 +69,117 @@ struct SourceBatch<'a> {
     package: &'a str,
     limits: &'a EngineLimits,
     started: Instant,
-    finding_budget: &'a AtomicU64,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+struct FindingPriority {
+    risk: Risk,
+    id: String,
+}
+
+impl Ord for FindingPriority {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.risk
+            .cmp(&other.risk)
+            .then_with(|| other.id.cmp(&self.id))
+    }
+}
+
+impl PartialOrd for FindingPriority {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Clone)]
+struct RetainedFinding {
+    priority: FindingPriority,
+    is_capability: bool,
+}
+
+#[derive(Default)]
+pub(super) struct BoundedFindings {
+    findings: BTreeMap<FindingPriority, AnalysisPoint>,
+    capabilities: BTreeMap<FindingPriority, AnalysisPoint>,
+    retained_by_id: HashMap<String, RetainedFinding>,
+    finding_limit_exceeded: bool,
+    capability_limit_exceeded: bool,
+}
+
+impl BoundedFindings {
+    pub(super) fn insert(&mut self, finding: AnalysisPoint, limit: u64) {
+        let id = finding.id.clone();
+        let is_capability = finding.capability.is_some();
+        let priority = FindingPriority {
+            risk: finding.risk,
+            id: id.clone(),
+        };
+
+        if let Some(existing) = self.retained_by_id.get(&id).cloned() {
+            let new_is_better = priority
+                .cmp(&existing.priority)
+                .then_with(|| (!is_capability).cmp(&(!existing.is_capability)))
+                .is_gt();
+            if !new_is_better {
+                return;
+            }
+            let existing_map = if existing.is_capability {
+                &mut self.capabilities
+            } else {
+                &mut self.findings
+            };
+            existing_map.remove(&existing.priority);
+            self.retained_by_id.remove(&id);
+        }
+
+        let evicted_id = {
+            let retained = if is_capability {
+                &mut self.capabilities
+            } else {
+                &mut self.findings
+            };
+            retained.insert(priority.clone(), finding);
+            if u64::try_from(retained.len()).unwrap_or(u64::MAX) <= limit {
+                None
+            } else {
+                retained.pop_first().map(|(_, finding)| finding.id)
+            }
+        };
+        self.retained_by_id.insert(
+            id,
+            RetainedFinding {
+                priority,
+                is_capability,
+            },
+        );
+        let Some(evicted_id) = evicted_id else {
+            return;
+        };
+        self.retained_by_id.remove(&evicted_id);
+        if is_capability {
+            self.capability_limit_exceeded = true;
+        } else {
+            self.finding_limit_exceeded = true;
+        }
+    }
+
+    fn note_exceeded(&mut self, findings: bool, capabilities: bool) {
+        self.finding_limit_exceeded |= findings;
+        self.capability_limit_exceeded |= capabilities;
+    }
+
+    pub(super) fn into_parts(self) -> (Vec<AnalysisPoint>, bool, bool) {
+        let findings = self
+            .findings
+            .into_values()
+            .chain(self.capabilities.into_values())
+            .collect();
+        (
+            findings,
+            self.finding_limit_exceeded,
+            self.capability_limit_exceeded,
+        )
+    }
 }
 
 /// Runs the blocking filesystem and parser scan on Tokio's blocking worker pool.
@@ -150,23 +257,19 @@ fn scan_with_resources(
     let ignored_paths = compile_ignored_paths(ignored_paths)?;
     let started = Instant::now();
     let mut outcome = ScanOutcome::default();
-    let mut deduplicated = HashSet::new();
-    let finding_budget = Arc::new(AtomicU64::new(0));
-    let batch_size = resources
-        .pool
-        .current_num_threads()
-        .max(1)
-        .saturating_mul(8);
+    let mut finding_budget = BoundedFindings::default();
+    let batch_size = resources.pool.current_num_threads().max(1);
     let batch = SourceBatch {
         resources,
         package,
         limits,
         started,
-        finding_budget: &finding_budget,
     };
     let mut pending_sources = Vec::with_capacity(batch_size);
+    let mut pending_source_bytes = 0_u64;
     let mut file_opener = ScannedFileOpener::new(root)?;
     let walker = WalkDir::new(root)
+        .max_depth(limits.max_file_depth)
         .follow_links(false)
         .into_iter()
         .filter_entry(|entry| included(entry, root, ignored_paths.as_ref(), exclude_node_modules));
@@ -210,18 +313,27 @@ fn scan_with_resources(
         ensure_within_duration(started, limits)?;
         let relative = relative_path(entry.path(), root);
         record_file_analysis(
-            &mut outcome,
-            &mut deduplicated,
             &relative,
             package,
             &source,
             file_size,
-            &finding_budget,
+            &mut finding_budget,
             limits.max_findings,
-        )?;
+        );
         ensure_within_duration(started, limits)?;
 
         if let Some(language) = language {
+            let next_batch_bytes = pending_source_bytes.saturating_add(file_size);
+            if !pending_sources.is_empty()
+                && (pending_sources.len() >= batch_size
+                    || next_batch_bytes > limits.max_source_file_size)
+            {
+                record_source_batch(&batch, &mut outcome, &pending_sources, &mut finding_budget)?;
+                pending_sources.clear();
+                pending_source_bytes = 0;
+            }
+
+            pending_source_bytes = pending_source_bytes.saturating_add(file_size);
             pending_sources.push(PendingSourceFile {
                 path: relative.to_owned(),
                 is_tsx: entry
@@ -233,14 +345,19 @@ fn scan_with_resources(
                 source,
                 size: file_size,
             });
-            if pending_sources.len() >= batch_size {
-                record_source_batch(&batch, &mut outcome, &mut deduplicated, &pending_sources)?;
+            if pending_sources.len() >= batch_size
+                || pending_source_bytes >= limits.max_source_file_size
+            {
+                record_source_batch(&batch, &mut outcome, &pending_sources, &mut finding_budget)?;
                 pending_sources.clear();
+                pending_source_bytes = 0;
             }
         }
     }
 
-    record_source_batch(&batch, &mut outcome, &mut deduplicated, &pending_sources)?;
+    record_source_batch(&batch, &mut outcome, &pending_sources, &mut finding_budget)?;
+    record_finding_limit_issues(&mut outcome, &finding_budget, package, limits.max_findings);
+    outcome.findings = finding_budget.into_parts().0;
     outcome.findings.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(outcome)
 }
@@ -265,33 +382,27 @@ fn ensure_within_duration(started: Instant, limits: &EngineLimits) -> Result<()>
 
 #[allow(clippy::too_many_arguments)]
 fn record_file_analysis(
-    outcome: &mut ScanOutcome,
-    deduplicated: &mut HashSet<String>,
     path: &Path,
     package: &str,
     source: &[u8],
     file_size: u64,
-    finding_budget: &AtomicU64,
+    finding_budget: &mut BoundedFindings,
     max_findings: u64,
-) -> Result<()> {
+) {
     let Some(analysis) = file_analyzer::analyze_with_size(path, package, source, file_size) else {
-        return Ok(());
+        return;
     };
 
-    if !(is_test_fixture(path) && analysis.is_exempt_in_test_fixture)
-        && deduplicated.insert(analysis.finding.id.clone())
-    {
-        reserve_finding(finding_budget, max_findings)?;
-        outcome.findings.push(analysis.finding);
+    if !(is_test_fixture(path) && analysis.is_exempt_in_test_fixture) {
+        finding_budget.insert(analysis.finding, max_findings);
     }
-    Ok(())
 }
 
 fn record_source_batch(
     batch: &SourceBatch,
     outcome: &mut ScanOutcome,
-    deduplicated: &mut HashSet<String>,
     files: &[PendingSourceFile],
+    finding_budget: &mut BoundedFindings,
 ) -> Result<()> {
     if files.is_empty() {
         return Ok(());
@@ -311,6 +422,7 @@ fn record_source_batch(
                         source: &file.source,
                         rule_sets: &batch.resources.rules,
                         fail_on_parse_error: batch.limits.fail_on_parse_error,
+                        max_findings: batch.limits.max_findings,
                         started: batch.started,
                         max_scan_duration: batch.limits.max_scan_duration,
                     },
@@ -329,14 +441,45 @@ fn record_source_batch(
         }
         outcome.scanned_bytes = outcome.scanned_bytes.saturating_add(file.size);
         outcome.issues.extend(findings.issues);
+        finding_budget.note_exceeded(
+            findings.finding_limit_exceeded,
+            findings.capability_limit_exceeded,
+        );
         for finding in findings.findings {
-            if deduplicated.insert(finding.id.clone()) {
-                reserve_finding(batch.finding_budget, batch.limits.max_findings)?;
-                outcome.findings.push(finding);
-            }
+            finding_budget.insert(finding, batch.limits.max_findings);
         }
     }
     ensure_within_duration(batch.started, batch.limits)
+}
+
+fn record_finding_limit_issues(
+    outcome: &mut ScanOutcome,
+    budget: &BoundedFindings,
+    package: &str,
+    limit: u64,
+) {
+    for (exceeded, resource) in [
+        (budget.finding_limit_exceeded, "findings"),
+        (
+            budget.capability_limit_exceeded,
+            "capability evidence records",
+        ),
+    ] {
+        if !exceeded {
+            continue;
+        }
+        let error = Error::LimitExceeded {
+            resource: resource.to_owned(),
+            limit,
+        };
+        outcome.issues.push(OperationalIssue {
+            code: error.code().to_owned(),
+            message: error.to_string(),
+            package: Some(package.to_owned()),
+            operation: "source scanning".to_owned(),
+            fatal: false,
+        });
+    }
 }
 
 #[cfg(test)]

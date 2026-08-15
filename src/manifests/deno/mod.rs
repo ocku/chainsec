@@ -36,6 +36,7 @@ pub(super) enum LockfileSelection {
 #[derive(Debug)]
 pub(super) struct ParsedDeno {
     pub(super) dependencies: Vec<Dependency>,
+    pub(super) local_declarations: Vec<(String, PathBuf)>,
     pub(super) lockfile: LockfileSelection,
 }
 
@@ -93,6 +94,7 @@ pub(super) fn parse_with_limits(
         .unwrap_or(&root_document.catalogs);
 
     let mut dependencies = Vec::new();
+    let mut local_declarations = Vec::new();
     extend_dependencies_bounded(
         &mut dependencies,
         import_map::mappings_to_dependencies(&root_document.mappings),
@@ -101,6 +103,7 @@ pub(super) fn parse_with_limits(
     let Some(workspace_patterns) = root_document.workspace.as_deref() else {
         return Ok(ParsedDeno {
             dependencies,
+            local_declarations,
             lockfile: root_document.lockfile,
         });
     };
@@ -123,6 +126,15 @@ pub(super) fn parse_with_limits(
             limits.max_package_depth,
             limits.max_packages,
         )?;
+        if let Some(manifest) = member.package_manifest.as_ref() {
+            local_declarations.extend(
+                member
+                    .dependencies
+                    .iter()
+                    .filter(|dependency| dependency.is_local())
+                    .map(|dependency| (dependency.npm_declaration_key(), manifest.clone())),
+            );
+        }
         extend_dependencies_bounded(
             &mut dependencies,
             import_map::mappings_to_dependencies(&member.mappings),
@@ -132,6 +144,7 @@ pub(super) fn parse_with_limits(
     }
     Ok(ParsedDeno {
         dependencies,
+        local_declarations,
         lockfile: root_document.lockfile,
     })
 }

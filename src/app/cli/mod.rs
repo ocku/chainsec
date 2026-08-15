@@ -2,9 +2,13 @@ use std::path::PathBuf;
 
 use chainsec::{
     ArtifactRepositories,
-    engine::MAX_ANALYSIS_THREADS,
+    engine::{DEFAULT_ANALYSIS_THREADS, MAX_ANALYSIS_THREADS},
     model::{
-        DEFAULT_MAX_FILE_DEPTH, DEFAULT_MAX_MANIFEST_FILE_SIZE, DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        DEFAULT_MAX_ACQUISITION_SECONDS, DEFAULT_MAX_ARCHIVE_SIZE, DEFAULT_MAX_EXTRACTED_FILES,
+        DEFAULT_MAX_EXTRACTED_SIZE, DEFAULT_MAX_FILE_DEPTH, DEFAULT_MAX_FINDINGS,
+        DEFAULT_MAX_MANIFEST_FILE_SIZE, DEFAULT_MAX_NETWORK_REQUESTS, DEFAULT_MAX_PACKAGE_DEPTH,
+        DEFAULT_MAX_PACKAGES, DEFAULT_MAX_REDIRECT_HOPS, DEFAULT_MAX_SCAN_SECONDS,
+        DEFAULT_MAX_SOURCE_FILE_SIZE, DEFAULT_MAX_SOURCE_FILES, DEFAULT_REQUEST_TIMEOUT_SECONDS,
         Risk,
     },
 };
@@ -203,30 +207,30 @@ pub(crate) struct CachePurge {
 #[derive(Debug, Args)]
 pub(crate) struct AnalysisOptions {
     /// Maximum dependency depth to acquire and analyze.
-    #[arg(long, default_value_t = 3)]
+    #[arg(long, default_value_t = DEFAULT_MAX_PACKAGE_DEPTH)]
     pub(crate) max_package_depth: usize,
     /// Maximum packages per traversal and aggregate unique work in a remote diff batch.
-    #[arg(long, default_value_t = 16_384)]
+    #[arg(long, default_value_t = DEFAULT_MAX_PACKAGES)]
     pub(crate) max_packages: usize,
     /// Maximum HTTP requests during one package acquisition, including redirects.
-    #[arg(long, default_value_t = 1_000, value_parser = parse_positive_usize)]
+    #[arg(long, default_value_t = DEFAULT_MAX_NETWORK_REQUESTS, value_parser = parse_positive_usize)]
     pub(crate) max_network_requests: usize,
     /// Maximum redirects followed in an HTTP request or Deno lockfile alias chain.
-    #[arg(long, default_value_t = 5)]
+    #[arg(long, default_value_t = DEFAULT_MAX_REDIRECT_HOPS)]
     pub(crate) max_redirect_hops: usize,
     /// Maximum duration of each HTTP request.
     #[arg(long, default_value_t = DEFAULT_REQUEST_TIMEOUT_SECONDS)]
     pub(crate) request_timeout_seconds: u64,
     /// Maximum end-to-end network acquisition time for one package.
-    #[arg(long, default_value_t = 300)]
+    #[arg(long, default_value_t = DEFAULT_MAX_ACQUISITION_SECONDS)]
     pub(crate) max_acquisition_seconds: u64,
     /// Maximum downloaded archive size (for example, `100MiB`, `100M`, or `100m`).
-    #[arg(long = "max-archive-size", default_value = "100MiB", value_parser = parse_human_size)]
+    #[arg(long = "max-archive-size", default_value_t = DEFAULT_MAX_ARCHIVE_SIZE, value_parser = parse_human_size)]
     pub(crate) max_archive_size: u64,
     /// Maximum expanded dependency size (for example, `500MiB`, `500M`, or `500m`).
-    #[arg(long = "max-extracted-size", default_value = "500MiB", value_parser = parse_human_size)]
+    #[arg(long = "max-extracted-size", default_value_t = DEFAULT_MAX_EXTRACTED_SIZE, value_parser = parse_human_size)]
     pub(crate) max_extracted_size: u64,
-    #[arg(long, default_value_t = 50_000)]
+    #[arg(long, default_value_t = DEFAULT_MAX_EXTRACTED_FILES)]
     pub(crate) max_extracted_files: u64,
     /// Maximum path components in acquired package files.
     #[arg(long, default_value_t = DEFAULT_MAX_FILE_DEPTH)]
@@ -234,22 +238,22 @@ pub(crate) struct AnalysisOptions {
     /// Maximum individual manifest or lockfile size.
     #[arg(long = "max-manifest-file-size", default_value_t = DEFAULT_MAX_MANIFEST_FILE_SIZE, value_parser = parse_human_size)]
     pub(crate) max_manifest_file_size: u64,
-    /// Maximum individual source file size (for example, `512MiB`, `512M`, or `512m`).
-    #[arg(long = "max-source-file-size", default_value = "512MiB", value_parser = parse_human_size)]
+    /// Maximum individual source file size (for example, `2MiB`, `2M`, or `2m`).
+    #[arg(long = "max-source-file-size", default_value_t = DEFAULT_MAX_SOURCE_FILE_SIZE, value_parser = parse_human_size)]
     pub(crate) max_source_file_size: u64,
     /// Maximum source files scanned during one package scan.
-    #[arg(long, default_value_t = 100_000)]
+    #[arg(long, default_value_t = DEFAULT_MAX_SOURCE_FILES)]
     pub(crate) max_source_files: u64,
     /// Maximum findings emitted during one package scan.
-    #[arg(long, default_value_t = 100_000)]
+    #[arg(long, default_value_t = DEFAULT_MAX_FINDINGS)]
     pub(crate) max_findings: u64,
-    #[arg(long, default_value_t = 300)]
+    #[arg(long, default_value_t = DEFAULT_MAX_SCAN_SECONDS)]
     pub(crate) max_scan_seconds: u64,
-    /// Treat Tree-sitter-recovered syntax errors as fatal without skipping analysis.
+    /// Report recovered syntax errors as fatal instead of logging them at debug level.
     #[arg(long)]
     pub(crate) fail_on_parse_error: bool,
-    /// Maximum concurrent package downloads and analyses (1-64).
-    #[arg(long, value_name = "THREADS", default_value_t = 16, value_parser = parse_analysis_threads)]
+    /// Maximum concurrent package downloads and analyses.
+    #[arg(long, value_name = "THREADS", default_value_t = DEFAULT_ANALYSIS_THREADS, value_parser = parse_analysis_threads)]
     pub(crate) threads: usize,
     /// Directory used for content-identified dependency source.
     #[arg(long)]

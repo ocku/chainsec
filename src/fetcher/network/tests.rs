@@ -33,6 +33,37 @@ fn diagnostic_urls_redact_queries_and_fragments() {
 }
 
 #[test]
+fn diagnostic_urls_redact_path_embedded_credentials() {
+    let token = "a".repeat(64);
+    let github_token = "ghp_".to_owned() + &"b".repeat(36);
+    let url = Url::parse(&format!(
+        "https://user:password@artifacts.example/artifactory/api/npm/{token}/package.tgz"
+    ))
+    .unwrap();
+    let github_url = Url::parse(&format!(
+        "https://github.example/artifactory/{github_token}/package.tgz?query=ignored"
+    ))
+    .unwrap();
+
+    let diagnostic = diagnostic_url(&url);
+    let github_diagnostic = diagnostic_url(&github_url);
+
+    assert_eq!(
+        diagnostic,
+        "https://artifacts.example/artifactory/api/npm/[redacted]/package.tgz"
+    );
+    assert!(!diagnostic.contains(&token));
+    assert!(!diagnostic.contains("user"));
+    assert!(!diagnostic.contains("password"));
+
+    assert_eq!(
+        github_diagnostic,
+        "https://github.example/artifactory/[redacted]/package.tgz"
+    );
+    assert!(!github_diagnostic.contains(&github_token));
+}
+
+#[test]
 fn preserves_the_scope_when_parsing_an_unversioned_jsr_package() {
     assert_eq!(jsr_package_name("jsr:@std/fs"), "@std/fs");
     assert_eq!(jsr_package_name("jsr:@std/fs@1.0.0"), "@std/fs");

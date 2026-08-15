@@ -149,3 +149,48 @@ fn recognizes_shebang_languages_without_source_extensions() {
         );
     }
 }
+
+#[test]
+fn recognizes_env_shebang_with_flags() {
+    // Python with env -S
+    for shebang in [
+        b"#!/usr/bin/env -S python\n".as_slice(),
+        b"#!/usr/bin/env -S python3\n",
+        b"#!/usr/bin/env -S /usr/local/bin/python\n",
+        b"#!/usr/bin/env -v -S python\n",
+        b"#!/usr/bin/env -S python -E\n",
+    ] {
+        assert_eq!(
+            language_for(Path::new("script"), shebang),
+            Some(Language::Python)
+        );
+    }
+
+    // JavaScript with env -S
+    for shebang in [
+        b"#!/usr/bin/env -S node\n".as_slice(),
+        b"#!/usr/bin/env -S /usr/bin/node\n",
+        b"#!/usr/bin/env -i node\n",
+        b"#!/usr/bin/env --split-string deno\n",
+    ] {
+        assert_eq!(
+            language_for(Path::new("script"), shebang),
+            Some(Language::JavaScript)
+        );
+    }
+
+    // TypeScript with env -S (full path variant)
+    assert_eq!(
+        language_for(
+            Path::new("script"),
+            b"#!/usr/bin/env -S /usr/local/bin/tsx\n"
+        ),
+        Some(Language::TypeScript)
+    );
+
+    // env with environment variable assignment before the interpreter
+    assert_eq!(
+        language_for(Path::new("script"), b"#!/usr/bin/env FOO=bar python3\n"),
+        Some(Language::Python)
+    );
+}

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     error::Error,
@@ -123,16 +123,10 @@ pub(super) fn record_install_scripts(
 }
 
 fn push_finding(report: &mut Report, finding: AnalysisPoint) {
-    let package_findings = report
+    if report
         .findings
         .iter()
-        .filter(|existing| existing.package == finding.package)
-        .count() as u64;
-    if package_findings >= report.policy.limits.max_findings
-        || report
-            .findings
-            .iter()
-            .any(|existing| existing.id == finding.id)
+        .any(|existing| existing.id == finding.id)
     {
         return;
     }
@@ -207,6 +201,7 @@ pub(super) fn record_package(
 }
 
 pub(super) fn finalize_report(report: &mut Report) {
+    enforce_finding_limits(report);
     report
         .packages
         .sort_by(|a, b| a.package_id.cmp(&b.package_id));
@@ -217,6 +212,55 @@ pub(super) fn finalize_report(report: &mut Report) {
         .sort_by(|a, b| (&a.code, &a.package, &a.message).cmp(&(&b.code, &b.package, &b.message)));
     report.statistics.packages = report.packages.len() as u64;
     report.statistics.findings = report.findings.len() as u64;
+}
+
+fn enforce_finding_limits(report: &mut Report) {
+    // Install hooks are discovered outside the source scanner, while capability
+    // evidence is moved out of `findings` during finalization. Apply the visible
+    // finding budget only after that move so capabilities cannot consume slots
+    // that should remain available for install hooks.
+    report.findings.sort_by(|a, b| {
+        b.risk
+            .cmp(&a.risk)
+            .then_with(|| {
+                match (
+                    a.finding_type == FindingType::InstallScript,
+                    b.finding_type == FindingType::InstallScript,
+                ) {
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                    _ => std::cmp::Ordering::Equal,
+                }
+            })
+            .then_with(|| a.id.cmp(&b.id))
+    });
+
+    let max_findings = report.policy.limits.max_findings;
+    let mut package_findings = BTreeMap::<String, u64>::new();
+    let mut truncated_packages = BTreeSet::new();
+    report.findings.retain(|finding| {
+        let count = package_findings.entry(finding.package.clone()).or_default();
+        if *count >= max_findings {
+            truncated_packages.insert(finding.package.clone());
+            return false;
+        }
+        *count += 1;
+        true
+    });
+
+    for package in truncated_packages {
+        let error = Error::LimitExceeded {
+            resource: "findings".to_owned(),
+            limit: max_findings,
+        };
+        report.issues.push(OperationalIssue {
+            code: error.code().to_owned(),
+            message: error.to_string(),
+            package: Some(package),
+            operation: "report finalization".to_owned(),
+            fatal: false,
+        });
+    }
 }
 
 pub(super) fn push_issue(

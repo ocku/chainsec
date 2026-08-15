@@ -20,8 +20,10 @@ use super::{Acquisition, SourceFetcher};
 
 use self::storage::validate_cache_directory;
 
+#[cfg(test)]
+pub(in crate::fetcher) use storage::write_cached_artifact;
 pub(super) use storage::{CacheLock, prepare_cache, purge_cache};
-pub(in crate::fetcher) use storage::{is_unsafe_cache_open_error, write_cached_artifact};
+pub(in crate::fetcher) use storage::{is_unsafe_cache_open_error, write_cached_artifact_before};
 
 const CACHED_ARTIFACT: &str = ".artifact";
 const COMPLETION_MARKER: &str = ".complete.json";
@@ -43,6 +45,7 @@ pub(in crate::fetcher) struct CachePublication<'a> {
     pub(in crate::fetcher) digest: String,
     pub(in crate::fetcher) temporary: &'a Path,
     pub(in crate::fetcher) source_directory: &'a Path,
+    pub(in crate::fetcher) deadline: &'a crate::fetcher::budget::AcquisitionDeadline,
 }
 
 fn is_deno_graph(dependency: &Dependency) -> bool {
@@ -51,6 +54,14 @@ fn is_deno_graph(dependency: &Dependency) -> bool {
         && Url::parse(&dependency.requirement)
             .ok()
             .is_some_and(|url| !url.path().ends_with(".tgz"))
+}
+
+fn canonical_source_url(source_url: &str) -> Option<String> {
+    (!source_url.is_empty())
+        .then(|| Url::parse(source_url).ok())
+        .flatten()
+        .filter(|url| matches!(url.scheme(), "http" | "https"))
+        .map(|url| url.to_string())
 }
 
 fn hash_cache_identity_field(hasher: &mut Sha256, tag: u8, value: Option<&str>) {
@@ -69,7 +80,10 @@ fn cache_identity(dependency: &Dependency, deno_lockfile: Option<&str>) -> Strin
     let mut hasher = Sha256::new();
     hasher.update(CACHE_IDENTITY_FORMAT);
     hash_cache_identity_field(&mut hasher, 1, Some(&dependency.id()));
-    hash_cache_identity_field(&mut hasher, 2, dependency.source_url.as_deref());
+    let source_url = dependency.source_url.as_deref().map(|source_url| {
+        canonical_source_url(source_url).unwrap_or_else(|| source_url.to_owned())
+    });
+    hash_cache_identity_field(&mut hasher, 2, source_url.as_deref());
     hash_cache_identity_field(&mut hasher, 3, deno_lockfile);
     hex::encode(hasher.finalize())
 }

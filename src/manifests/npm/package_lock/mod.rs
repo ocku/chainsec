@@ -1,6 +1,5 @@
-use std::{collections::HashMap, str::FromStr};
+use std::collections::HashMap;
 
-use node_semver::{Range as NpmRange, Version as NpmVersion};
 use serde_json::Value as JsonValue;
 
 use crate::manifests::{
@@ -9,6 +8,10 @@ use crate::manifests::{
     shared::{github_archive, manifest_error, optional_json_string, read, strip_url_fragment},
 };
 use crate::{error::Result, model::Dependency};
+
+mod version;
+
+use version::locked_version_compatible;
 
 pub(super) fn enrich(
     context: &NpmLockContext,
@@ -254,25 +257,6 @@ fn resolved_artifact_package(resolved: &str) -> Option<String> {
         .map(|(package, _)| package.to_owned())
 }
 
-fn locked_version_compatible(dependency: &Dependency, package: &JsonValue, local: bool) -> bool {
-    if local || dependency.is_local() || github_archive(&dependency.requirement).is_some() {
-        return true;
-    }
-    let requirement = dependency
-        .requirement
-        .strip_prefix("npm:")
-        .and_then(|alias| alias.rsplit_once('@').map(|(_, requirement)| requirement))
-        .unwrap_or(&dependency.requirement);
-    let Ok(range) = NpmRange::from_str(requirement) else {
-        return false;
-    };
-    package
-        .get("version")
-        .and_then(JsonValue::as_str)
-        .and_then(|version| NpmVersion::from_str(version).ok())
-        .is_some_and(|version| range.satisfies(&version))
-}
-
 fn validate_package_entries(
     path: &std::path::Path,
     entries: &serde_json::Map<String, JsonValue>,
@@ -452,15 +436,10 @@ fn legacy_requirement_matches(
             });
     }
 
-    let Some((range, version)) = NpmRange::from_str(&dependency.requirement).ok().zip(
-        package
-            .get("version")
-            .and_then(JsonValue::as_str)
-            .and_then(|version| NpmVersion::from_str(version).ok()),
-    ) else {
-        return false;
-    };
-    range.satisfies(&version)
+    package
+        .get("version")
+        .and_then(JsonValue::as_str)
+        .is_some_and(|version| version::semver_satisfies(&dependency.requirement, version))
 }
 
 fn resolve_package_path(

@@ -8,7 +8,7 @@ use node_semver::{Range as NpmRange, Version as NpmVersion};
 use serde_json::Value as JsonValue;
 
 use super::{
-    super::shared::{is_file_beneath, manifest_error, read_beneath},
+    super::shared::{is_file_beneath, is_npm_dist_tag, manifest_error, read_beneath},
     LockfileSelection,
     import_map::{normalize_jsr_subpath, normalize_npm_subpath},
 };
@@ -184,7 +184,7 @@ fn enrich_npm(lockfile: &JsonValue, version: LockVersion, dependency: &mut Depen
         Some(specifiers) => specifiers,
         None => return false,
     };
-    let Some(locked) = registry_specifier(
+    let Some(mapping) = registry_specifier(
         specifiers,
         &dependency.requirement,
         &normalized_requirement,
@@ -192,13 +192,14 @@ fn enrich_npm(lockfile: &JsonValue, version: LockVersion, dependency: &mut Depen
     ) else {
         return false;
     };
+    let locked = mapping.locked;
     let normalized_locked = normalize_npm_subpath(locked);
     let locked_key = normalized_locked.strip_prefix("npm:").unwrap_or(locked);
     let resolved = locked_key
         .strip_prefix(name)
         .and_then(|suffix| suffix.strip_prefix('@'))
         .unwrap_or(locked);
-    if resolved.is_empty() || !locked_version_compatible(specifier, name, resolved) {
+    if resolved.is_empty() || !locked_version_compatible(specifier, name, resolved, mapping.exact) {
         return false;
     }
 
@@ -219,7 +220,7 @@ fn enrich_npm(lockfile: &JsonValue, version: LockVersion, dependency: &mut Depen
 
 fn enrich_jsr(lockfile: &JsonValue, version: LockVersion, dependency: &mut Dependency) -> bool {
     let normalized_requirement = normalize_jsr_subpath(&dependency.requirement);
-    let Some(locked) = specifiers(lockfile, version).and_then(|specifiers| {
+    let Some(mapping) = specifiers(lockfile, version).and_then(|specifiers| {
         registry_specifier(
             specifiers,
             &dependency.requirement,
@@ -229,6 +230,7 @@ fn enrich_jsr(lockfile: &JsonValue, version: LockVersion, dependency: &mut Depen
     }) else {
         return false;
     };
+    let locked = mapping.locked;
     let Some(package) = jsr_package_name(&normalized_requirement) else {
         return false;
     };
@@ -244,6 +246,7 @@ fn enrich_jsr(lockfile: &JsonValue, version: LockVersion, dependency: &mut Depen
                 .unwrap_or(&normalized_requirement),
             package,
             resolved,
+            false,
         )
     {
         return false;
@@ -349,18 +352,32 @@ fn canonical_string_entries<'a>(
     Ok(indexed)
 }
 
+struct RegistrySpecifier<'a> {
+    locked: &'a str,
+    exact: bool,
+}
+
 fn registry_specifier<'a>(
     specifiers: &'a JsonValue,
     declared: &str,
     normalized: &str,
     scheme: &str,
-) -> Option<&'a str> {
-    specifiers
+) -> Option<RegistrySpecifier<'a>> {
+    let exact = specifiers
         .get(declared)
         .or_else(|| specifiers.get(normalized))
         .or_else(|| specifiers.get(normalized.strip_prefix(scheme).unwrap_or(normalized)))
-        .and_then(JsonValue::as_str)
-        .or_else(|| unique_normalized_specifier(specifiers, normalized, scheme))
+        .and_then(JsonValue::as_str);
+    if let Some(locked) = exact {
+        return Some(RegistrySpecifier {
+            locked,
+            exact: true,
+        });
+    }
+    unique_normalized_specifier(specifiers, normalized, scheme).map(|locked| RegistrySpecifier {
+        locked,
+        exact: false,
+    })
 }
 
 fn unique_normalized_specifier<'a>(
@@ -395,20 +412,25 @@ fn is_sha256_digest(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-fn locked_version_compatible(specifier: &str, package: &str, resolved: &str) -> bool {
+fn locked_version_compatible(
+    specifier: &str,
+    package: &str,
+    resolved: &str,
+    exact_mapping: bool,
+) -> bool {
     let Ok(version) = NpmVersion::from_str(resolved) else {
         return false;
     };
-    let Some(range) = specifier
+    let Some(requirement) = specifier
         .strip_prefix(package)
         .and_then(|suffix| suffix.strip_prefix('@'))
     else {
         return true;
     };
-    let Ok(range) = NpmRange::from_str(range) else {
-        return false;
-    };
-    range.satisfies(&version)
+    match NpmRange::from_str(requirement) {
+        Ok(range) => range.satisfies(&version),
+        Err(_) => exact_mapping && is_npm_dist_tag(requirement),
+    }
 }
 
 fn jsr_package_name(requirement: &str) -> Option<&str> {

@@ -17,6 +17,11 @@ use super::{
     remote,
 };
 
+const GENERATED_FINDING_SELECTORS: [&str; 2] = [
+    "install:chainsec.*.detection.manifest.install-hook",
+    "file:chainsec.detection.file.*",
+];
+
 fn engine_limits(cli: &AnalysisOptions) -> EngineLimits {
     EngineLimits {
         max_package_depth: cli.max_package_depth,
@@ -77,6 +82,23 @@ fn configured_suppressions(
         .collect()
 }
 
+fn package_without_integrity(package: &str) -> &str {
+    package
+        .split_once('#')
+        .map_or(package, |(identity, _)| identity)
+}
+
+fn suppression_package_matches(configured: &str, reported: &str) -> bool {
+    if configured == reported {
+        return true;
+    }
+    if configured == "root" || reported == "root" || configured.contains('#') {
+        return false;
+    }
+
+    configured == package_without_integrity(reported)
+}
+
 fn apply_suppressions(report: &mut Report, suppressions: &[ConfiguredSuppression]) {
     for finding in &mut report.findings {
         if let Some(suppression) = suppressions.iter().find(|suppression| {
@@ -84,7 +106,7 @@ fn apply_suppressions(report: &mut Report, suppressions: &[ConfiguredSuppression
                 && suppression
                     .package
                     .as_deref()
-                    .is_none_or(|package| package == finding.package)
+                    .is_none_or(|package| suppression_package_matches(package, &finding.package))
         }) {
             finding.suppressed = true;
             finding.suppression = Some(Suppression {
@@ -97,10 +119,9 @@ fn apply_suppressions(report: &mut Report, suppressions: &[ConfiguredSuppression
         for evidence in &mut capability.evidence {
             if let Some(suppression) = suppressions.iter().find(|suppression| {
                 suppression.selector.matches_capability_evidence(evidence)
-                    && suppression
-                        .package
-                        .as_deref()
-                        .is_none_or(|package| package == evidence.package)
+                    && suppression.package.as_deref().is_none_or(|package| {
+                        suppression_package_matches(package, &evidence.package)
+                    })
             }) {
                 evidence.suppressed = true;
                 evidence.suppression = Some(Suppression {
@@ -111,8 +132,10 @@ fn apply_suppressions(report: &mut Report, suppressions: &[ConfiguredSuppression
     }
 }
 
-fn configured_rules(cli: &AnalysisOptions) -> chainsec::Result<Vec<chainsec::model::Rule>> {
-    let selectors = rule_selectors(cli)?;
+fn configured_rules(
+    cli: &AnalysisOptions,
+    ignored_rule_selectors: &[chainsec::rules::RuleSelector],
+) -> chainsec::Result<Vec<chainsec::model::Rule>> {
     let mut configured_rules = if cli.no_default_rules {
         Vec::new()
     } else {
@@ -120,11 +143,21 @@ fn configured_rules(cli: &AnalysisOptions) -> chainsec::Result<Vec<chainsec::mod
     };
 
     for path in &cli.rule_packs {
-        configured_rules.extend(rules::load_rule_pack(path)?);
+        let pack = rules::load_rule_pack(path).map_err(|error| match error {
+            error @ chainsec::Error::Io { .. } => chainsec::Error::InvalidConfiguration {
+                message: error.to_string(),
+            },
+            error => error,
+        })?;
+        configured_rules.extend(pack);
     }
 
     rules::validate_rules(&configured_rules)?;
-    configured_rules.retain(|rule| !selectors.iter().any(|selector| selector.matches_rule(rule)));
+    configured_rules.retain(|rule| {
+        !ignored_rule_selectors
+            .iter()
+            .any(|selector| selector.matches_rule(rule))
+    });
 
     if configured_rules.is_empty() {
         return Err(chainsec::Error::InvalidConfiguration {
@@ -139,6 +172,7 @@ struct AnalysisContext {
     limits: EngineLimits,
     fetcher: SourceFetcher,
     rules: Vec<chainsec::model::Rule>,
+    ignored_rule_selectors: Vec<chainsec::rules::RuleSelector>,
     suppressions: Vec<ConfiguredSuppression>,
 }
 
@@ -147,6 +181,18 @@ impl AnalysisContext {
         options: &AnalysisOptions,
         suppressions: &[SuppressionConfig],
     ) -> chainsec::Result<Self> {
+        let mut ignored_rule_selectors = rule_selectors(options)?;
+        let rules = configured_rules(options, &ignored_rule_selectors)?;
+        let configured_suppressions = configured_suppressions(suppressions)?;
+        if options.no_default_rules {
+            ignored_rule_selectors.extend(
+                GENERATED_FINDING_SELECTORS
+                    .into_iter()
+                    .map(rules::parse_rule_selector)
+                    .collect::<chainsec::Result<Vec<_>>>()?,
+            );
+        }
+
         let limits = engine_limits(options);
         let fetcher = SourceFetcher::new(
             options
@@ -160,8 +206,9 @@ impl AnalysisContext {
         Ok(Self {
             limits,
             fetcher,
-            rules: configured_rules(options)?,
-            suppressions: configured_suppressions(suppressions)?,
+            rules,
+            ignored_rule_selectors,
+            suppressions: configured_suppressions,
         })
     }
 
@@ -179,9 +226,10 @@ impl AnalysisContext {
             !options.online,
             options.allowed_hosts.clone(),
             options.trust_local_input,
+            options.allow_insecure_http,
         )
-        .with_allow_insecure_http(options.allow_insecure_http)
         .with_max_analysis_threads(options.threads)
+        .with_ignored_rule_selectors(self.ignored_rule_selectors.iter().cloned())
         .with_ignored_packages(ignored_packages.iter().cloned())
         .with_ignored_root_paths(ignored_paths.iter().cloned())
     }
@@ -325,4 +373,34 @@ pub(super) async fn run(
     )?;
 
     Ok((report, rendered))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::suppression_package_matches;
+
+    #[test]
+    fn suppression_package_matching_uses_digest_free_canonical_ids() {
+        assert!(suppression_package_matches(
+            "npm:example@1.2.3",
+            "npm:example@1.2.3#sha512-abcdef"
+        ));
+        assert!(suppression_package_matches(
+            "npm:example@1.2.3#sha512-configured",
+            "npm:example@1.2.3#sha512-configured"
+        ));
+        assert!(!suppression_package_matches(
+            "npm:example@1.2.3#sha512-configured",
+            "npm:example@1.2.3#sha512-reported"
+        ));
+        assert!(suppression_package_matches("root", "root"));
+        assert!(!suppression_package_matches(
+            "root",
+            "npm:root@1.0.0#sha512-abcdef"
+        ));
+        assert!(!suppression_package_matches(
+            "npm:example@1.2.3",
+            "npm:example@1.2.30#sha512-abcdef"
+        ));
+    }
 }

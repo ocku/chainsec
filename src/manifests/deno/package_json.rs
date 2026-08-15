@@ -80,7 +80,7 @@ pub(super) fn parse_package_json_dependencies(
         .ok_or_else(|| manifest_error(path, "package.json root must be an object"))?;
     package_json_dependencies(path, package, max_packages)?
         .into_iter()
-        .filter(|(_, requirement)| !is_local_package_requirement(requirement))
+        .filter(|(_, requirement)| !is_workspace_member_requirement(requirement))
         .map(|(name, requirement)| {
             let requirement = resolve_catalog_requirement(path, &name, &requirement, catalogs)?;
             Ok(package_dependency(&name, &requirement))
@@ -101,6 +101,7 @@ fn package_dependency(name: &str, requirement: &str) -> Dependency {
     }
     if requirement.starts_with("npm:")
         || requirement.starts_with("jsr:")
+        || is_local_package_requirement(requirement)
         || is_non_registry_package_requirement(requirement)
     {
         return dependency;
@@ -154,8 +155,12 @@ pub(super) fn resolve_catalog_requirement(
     Ok(version.to_owned())
 }
 
+fn is_workspace_member_requirement(requirement: &str) -> bool {
+    requirement.starts_with("workspace:")
+}
+
 fn is_local_package_requirement(requirement: &str) -> bool {
-    ["workspace:", "file:", "link:", "portal:", "./", "../"]
+    ["file:", "link:", "portal:", "./", "../"]
         .into_iter()
         .any(|prefix| requirement.starts_with(prefix))
         || Path::new(requirement).is_absolute()

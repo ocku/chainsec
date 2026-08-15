@@ -14,26 +14,40 @@ use super::{
     CACHED_ARTIFACT, COMPLETION_MARKER, CacheLookup, MAX_COMPLETION_MARKER_BYTES,
     UNVERIFIED_CACHE_SOURCE_URL,
     metadata::CacheMetadata,
-    storage::{lock_entry, lock_entry_shared, read_bounded_regular_file},
+    storage::{lock_entry_before, lock_entry_shared_before, read_bounded_regular_file},
 };
 use crate::fetcher::{
     Acquisition, SourceFetcher,
-    archive::{extract, single_root_or_self},
+    archive::{extract_before, single_root_or_self_before},
+    budget::AcquisitionDeadline,
     filesystem::TrustedDir,
-    integrity::verify_integrity_digest,
+    integrity::verify_integrity_digest_before,
 };
 
 fn cache_restoration_error_is_fatal(error: &Error) -> bool {
-    matches!(error, Error::Io { source, .. } if source.kind() != std::io::ErrorKind::NotFound)
+    matches!(error, Error::LimitExceeded { .. })
+        || matches!(error, Error::Io { source, .. } if source.kind() != std::io::ErrorKind::NotFound)
         || matches!(error, Error::Policy { operation, .. } if operation == "cache confinement")
 }
 
 impl SourceFetcher {
+    #[cfg(test)]
     pub(in crate::fetcher) fn cached(
         &self,
         dependency: &Dependency,
         acquisition: &Acquisition,
     ) -> Result<CacheLookup<FetchMetadata>> {
+        let deadline = self.network_budget().deadline_guard();
+        self.cached_before(dependency, acquisition, &deadline)
+    }
+
+    pub(in crate::fetcher) fn cached_before(
+        &self,
+        dependency: &Dependency,
+        acquisition: &Acquisition,
+        deadline: &AcquisitionDeadline,
+    ) -> Result<CacheLookup<FetchMetadata>> {
+        deadline.check()?;
         // A GitHub commit pins the codeload request, but it is not a digest of the
         // returned archive or tree. With no independently trusted digest, an
         // untrusted offline cache cannot authenticate a retained GitHub archive.
@@ -41,24 +55,28 @@ impl SourceFetcher {
             return Ok(CacheLookup::Miss);
         }
 
-        let shared_lock = lock_entry_shared(acquisition)?;
-        match self.restore_cached_entry(dependency, acquisition)? {
+        let shared_lock = lock_entry_shared_before(acquisition, deadline)?;
+        match self.restore_cached_entry(dependency, acquisition, deadline)? {
             CacheLookup::Hit((metadata, workspace)) => {
+                deadline.check()?;
                 self.retain_workspace(workspace);
                 Ok(CacheLookup::Hit(metadata))
             }
             CacheLookup::Miss => Ok(CacheLookup::Miss),
             CacheLookup::InvalidEntry => {
                 drop(shared_lock);
-                let _exclusive_lock = lock_entry(acquisition)?;
-                match self.restore_cached_entry(dependency, acquisition)? {
+                let _exclusive_lock = lock_entry_before(acquisition, deadline)?;
+                match self.restore_cached_entry(dependency, acquisition, deadline)? {
                     CacheLookup::Hit((metadata, workspace)) => {
+                        deadline.check()?;
                         self.retain_workspace(workspace);
                         Ok(CacheLookup::Hit(metadata))
                     }
                     CacheLookup::Miss => Ok(CacheLookup::Miss),
                     CacheLookup::InvalidEntry => {
-                        self.remove_invalid_cache_entry(acquisition)?;
+                        deadline.check()?;
+                        self.quarantine_invalid_cache_entry(acquisition)?;
+                        deadline.check()?;
                         Ok(CacheLookup::InvalidEntry)
                     }
                 }
@@ -66,26 +84,29 @@ impl SourceFetcher {
         }
     }
 
-    fn remove_invalid_cache_entry(&self, acquisition: &Acquisition) -> Result<()> {
-        match acquisition
+    fn quarantine_invalid_cache_entry(&self, acquisition: &Acquisition) -> Result<()> {
+        let quarantine = self.create_cache_staging_directory("invalid-cache-entry")?;
+        acquisition
             .ecosystem
-            .remove_child_all(Path::new(&acquisition.identity))
-        {
-            Ok(()) => Ok(()),
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(source) => Err(Error::Io {
-                operation: "remove invalid cache entry".to_owned(),
+            .rename_child(
+                Path::new(&acquisition.identity),
+                &self.cache_root,
+                &quarantine.name,
+            )
+            .map_err(|source| Error::Io {
+                operation: "quarantine invalid cache entry".to_owned(),
                 path: acquisition.destination.clone(),
                 source,
-            }),
-        }
+            })
     }
 
     pub(super) fn restore_cached_entry(
         &self,
         dependency: &Dependency,
         acquisition: &Acquisition,
+        deadline: &AcquisitionDeadline,
     ) -> Result<CacheLookup<(FetchMetadata, PathBuf)>> {
+        deadline.check()?;
         let destination = &acquisition.destination;
         let directory = match acquisition
             .ecosystem
@@ -111,10 +132,12 @@ impl SourceFetcher {
             Path::new(COMPLETION_MARKER),
             &destination.join(COMPLETION_MARKER),
             MAX_COMPLETION_MARKER_BYTES,
+            deadline,
         )?
         else {
             return Ok(CacheLookup::InvalidEntry);
         };
+        deadline.check()?;
         let Ok(metadata) = serde_json::from_slice::<CacheMetadata>(&marker) else {
             return Ok(CacheLookup::InvalidEntry);
         };
@@ -145,6 +168,7 @@ impl SourceFetcher {
                 &directory,
                 destination,
                 &temporary,
+                deadline,
             )
         } else if super::is_deno_graph(dependency) {
             self.restore_cached_deno_graph(
@@ -153,6 +177,7 @@ impl SourceFetcher {
                 &source_url,
                 destination,
                 &temporary,
+                deadline,
             )
         } else {
             self.restore_cached_archive(
@@ -161,13 +186,14 @@ impl SourceFetcher {
                 &directory,
                 destination,
                 &temporary,
+                deadline,
             )
         };
 
         match restored {
             Ok(metadata) => Ok(CacheLookup::Hit((metadata, temporary))),
             Err(error) => {
-                if temporary.exists() {
+                if temporary.exists() && deadline.check().is_ok() {
                     let _ = fs::remove_dir_all(&temporary);
                 }
                 if cache_restoration_error_is_fatal(&error) {
@@ -186,27 +212,34 @@ impl SourceFetcher {
         directory: &TrustedDir,
         destination: &Path,
         temporary: &Path,
+        deadline: &AcquisitionDeadline,
     ) -> Result<FetchMetadata> {
+        deadline.check()?;
         let bytes = read_bounded_regular_file(
             directory,
             Path::new(CACHED_ARTIFACT),
             &destination.join(CACHED_ARTIFACT),
             self.limits.max_archive_size,
+            deadline,
         )?
         .ok_or_else(|| Error::Policy {
             operation: "cache validation".to_owned(),
             message: "cached archive is missing, unsafe, or exceeds the archive limit".to_owned(),
         })?;
-        let digest =
-            verify_integrity_digest(&bytes, dependency.integrity.as_deref(), source_url.as_str())?;
+        let digest = verify_integrity_digest_before(
+            &bytes,
+            dependency.integrity.as_deref(),
+            source_url.as_str(),
+            deadline,
+        )?;
 
         let source = self.create_workspace_subdirectory(
             temporary,
             Path::new("source"),
             "create cache reconstruction directory",
         )?;
-        extract(&bytes, source_url.path(), &source, &self.limits)?;
-        let package_root = single_root_or_self(&source)?;
+        extract_before(&bytes, source_url.path(), &source, &self.limits, deadline)?;
+        let package_root = single_root_or_self_before(&source, deadline)?;
         self.reconstructed_metadata(dependency, source_url, digest, temporary, &package_root)
     }
 
@@ -217,24 +250,28 @@ impl SourceFetcher {
         directory: &TrustedDir,
         destination: &Path,
         temporary: &Path,
+        deadline: &AcquisitionDeadline,
     ) -> Result<FetchMetadata> {
+        deadline.check()?;
         let metadata_bytes = read_bounded_regular_file(
             directory,
             Path::new(CACHED_ARTIFACT),
             &destination.join(CACHED_ARTIFACT),
             self.limits.max_archive_size,
+            deadline,
         )?
         .ok_or_else(|| Error::Policy {
             operation: "cache validation".to_owned(),
             message: "cached JSR manifest is missing, unsafe, or exceeds the archive limit"
                 .to_owned(),
         })?;
-        let (source, digest, _) = self.rebuild_cached_jsr_package(
+        let (source, digest, _) = self.rebuild_cached_jsr_package_before(
             source_url,
             temporary,
             dependency.integrity.as_deref(),
             &metadata_bytes,
             &destination.join("source"),
+            deadline,
         )?;
         self.reconstructed_metadata(dependency, source_url, digest, temporary, &source)
     }
@@ -246,13 +283,16 @@ impl SourceFetcher {
         source_url: &Url,
         destination: &Path,
         temporary: &Path,
+        deadline: &AcquisitionDeadline,
     ) -> Result<FetchMetadata> {
-        let (source, digest, _) = self.rebuild_cached_deno_graph(
+        deadline.check()?;
+        let (source, digest, _) = self.rebuild_cached_deno_graph_before(
             source_url,
             temporary,
             dependency.integrity.as_deref(),
             acquisition.deno_lockfile.as_ref(),
             &destination.join("source"),
+            deadline,
         )?;
         self.reconstructed_metadata(dependency, source_url, digest, temporary, &source)
     }

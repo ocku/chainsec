@@ -186,6 +186,37 @@ __metadata:
 }
 
 #[test]
+fn local_references_are_relative_to_the_selected_workspace_member() {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("yarn.lock");
+    fs::write(
+        &path,
+        r#"
+__metadata:
+  version: 8
+
+"sibling@file:../sibling":
+  version: 0.0.0-use.local
+  resolution: "sibling@file:../sibling"
+  linkType: soft
+"#,
+    )
+    .unwrap();
+    let member = temporary.path().join("packages/member");
+    let mut dependencies = [Dependency::declared(
+        Ecosystem::Npm,
+        "sibling",
+        "file:../sibling",
+    )];
+
+    enrich_from_directory(&path, &member, &mut dependencies).unwrap();
+
+    let source = dependencies[0].source_url.as_deref().unwrap();
+    let resolved = url::Url::parse(source).unwrap().to_file_path().unwrap();
+    assert_eq!(resolved, temporary.path().join("packages/sibling"));
+}
+
+#[test]
 fn rejects_unknown_or_malformed_berry_versions() {
     for metadata in ["version: 99", "version: future"] {
         let temporary = tempfile::tempdir().unwrap();
@@ -198,6 +229,52 @@ fn rejects_unknown_or_malformed_berry_versions() {
         let mut dependencies = [Dependency::declared(Ecosystem::Npm, "example", "^1")];
         assert!(enrich(&path, &mut dependencies).is_err());
     }
+}
+
+#[test]
+fn mismatched_ordinary_berry_registry_targets_stay_unresolved() {
+    for (declared, locked) in [("target", "other"), ("@scope/target", "@scope/other")] {
+        let dependency = enrich_fixture(
+            &format!(
+                r#"
+__metadata:
+  version: 8
+
+"{declared}@npm:^1":
+  version: 1.2.0
+  resolution: "{locked}@npm:1.2.0"
+  integrity: sha512-wrong
+"#
+            ),
+            declared,
+            "^1",
+        );
+
+        assert!(dependency.resolved_version.is_none());
+        assert!(dependency.integrity.is_none());
+        assert!(dependency.lockfile.is_none());
+    }
+}
+
+#[test]
+fn scoped_ordinary_berry_registry_target_is_enriched() {
+    let dependency = enrich_fixture(
+        r#"
+__metadata:
+  version: 8
+
+"@scope/target@npm:^1":
+  version: 1.2.0
+  resolution: "@scope/target@npm:1.2.0"
+  integrity: sha512-scoped
+"#,
+        "@scope/target",
+        "^1",
+    );
+
+    assert_eq!(dependency.resolved_version.as_deref(), Some("1.2.0"));
+    assert_eq!(dependency.integrity.as_deref(), Some("sha512-scoped"));
+    assert!(dependency.lockfile.is_some());
 }
 
 #[test]

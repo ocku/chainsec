@@ -322,6 +322,34 @@ fn yarn_berry_npm_locks_pin_versions_for_registry_integrity_resolution() {
 }
 
 #[test]
+fn yarn_berry_registry_resolution_cannot_change_declared_identity() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("package.json"),
+        r#"{"dependencies":{"foo":"^1"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.path().join("yarn.lock"),
+        "__metadata:\n  version: 8\n\n\"foo@npm:^1\":\n  version: 1.2.0\n  resolution: \"bar@npm:1.2.0\"\n  checksum: 10c0/example\n",
+    )
+    .unwrap();
+
+    let discovery = manifests::discover(root.path()).unwrap();
+    let dependency = discovery
+        .dependencies
+        .iter()
+        .find(|dependency| dependency.name == "foo")
+        .unwrap();
+    assert!(dependency.resolved_version.is_none());
+    assert!(dependency.source_url.is_none());
+    assert!(dependency.integrity.is_none());
+    assert!(dependency.lockfile.is_none());
+    assert!(!dependency.requires_registry_integrity());
+    assert!(!dependency.is_resolved());
+}
+
+#[test]
 fn poetry_dependency_groups_are_discovered() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(

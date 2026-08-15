@@ -12,7 +12,7 @@ use super::{
     shared::{
         BoundedDependencyCollector, ManifestRoot, RootedFileType, github_archive, manifest_error,
         package_json_dependencies, push_workspace_member_bounded, read, walk_workspace_beneath,
-        workspace_depth_exceeded,
+        workspace_depth_exceeded, workspace_pattern_may_match_descendant,
     },
 };
 use crate::{
@@ -64,10 +64,16 @@ pub(super) fn parse_with_limit(
 pub(super) struct EnrichResult {
     pub(super) contexts: HashMap<String, NpmLockContext>,
     pub(super) package_lock_context: Option<NpmLockContext>,
+    pub(super) alternative_lock_context: Option<AlternativeLockContext>,
     /// True when this package directory selected any supported local npm lockfile.
     /// Callers must use this rather than `contexts.is_empty()`: a selected lockfile
     /// can validly produce no child contexts and must still suppress inheritance.
     pub(super) local_lockfile_selected: bool,
+}
+
+pub(super) enum AlternativeLockContext {
+    Pnpm(PathBuf),
+    Yarn(PathBuf),
 }
 
 pub(super) fn enrich(
@@ -84,11 +90,12 @@ pub(super) fn enrich(
         }
     }
     let Some(path) = selected else {
-        let local_lockfile_selected = enrich_alternative_lock(root, dependencies, lockfiles)?;
+        let alternative_lock_context = enrich_alternative_lock(root, dependencies, lockfiles)?;
         return Ok(EnrichResult {
             contexts: HashMap::new(),
             package_lock_context: None,
-            local_lockfile_selected,
+            local_lockfile_selected: alternative_lock_context.is_some(),
+            alternative_lock_context,
         });
     };
     let context = NpmLockContext {
@@ -100,6 +107,7 @@ pub(super) fn enrich(
     Ok(EnrichResult {
         contexts,
         package_lock_context: Some(context),
+        alternative_lock_context: None,
         local_lockfile_selected: true,
     })
 }
@@ -159,7 +167,8 @@ pub(super) fn workspace_members(
                 kind,
                 depth,
                 limits.max_package_depth,
-                includes.is_match(entry) && !excludes.is_match(entry),
+                (includes.is_match(entry) && !excludes.is_match(entry))
+                    || workspace_pattern_may_match_descendant(&patterns, entry),
             ) {
                 return Err(crate::error::Error::LimitExceeded {
                     resource: "workspace depth".to_owned(),
@@ -273,6 +282,10 @@ pub(super) fn github_archive_matches(dependency: &Dependency, reference: Option<
 }
 
 fn local_source_url(lockfile: &Path, reference: &str) -> Option<String> {
+    local_source_url_from_directory(lockfile.parent()?, reference)
+}
+
+fn local_source_url_from_directory(directory: &Path, reference: &str) -> Option<String> {
     let path = ["file:", "link:", "portal:", "workspace:"]
         .into_iter()
         .find_map(|prefix| reference.strip_prefix(prefix))?;
@@ -284,16 +297,51 @@ fn local_source_url(lockfile: &Path, reference: &str) -> Option<String> {
     let path = if path.is_absolute() {
         path.to_owned()
     } else {
-        lockfile.parent()?.join(path)
+        directory.join(path)
     };
     url::Url::from_file_path(path).ok().map(String::from)
+}
+
+pub(super) fn enrich_from_alternative_context(
+    context: &AlternativeLockContext,
+    member: &Path,
+    dependencies: &mut [Dependency],
+) -> Result<()> {
+    let Some(components) = member
+        .components()
+        .try_fold(Vec::new(), |mut components, component| match component {
+            Component::Normal(component) => {
+                components.push(component.to_str()?);
+                Some(components)
+            }
+            Component::CurDir => Some(components),
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => None,
+        })
+    else {
+        return Ok(());
+    };
+    let importer = if components.is_empty() {
+        ".".to_owned()
+    } else {
+        components.join("/")
+    };
+
+    match context {
+        AlternativeLockContext::Pnpm(path) => pnpm::enrich_importer(path, &importer, dependencies),
+        AlternativeLockContext::Yarn(path) => {
+            let Some(root) = path.parent() else {
+                return Ok(());
+            };
+            yarn::enrich_from_directory(path, &root.join(member), dependencies)
+        }
+    }
 }
 
 fn enrich_alternative_lock(
     root: &ManifestRoot,
     dependencies: &mut [Dependency],
     lockfiles: &mut Vec<PathBuf>,
-) -> Result<bool> {
+) -> Result<Option<AlternativeLockContext>> {
     let directory = root.path();
     let yarn_path = directory.join("yarn.lock");
     let pnpm_path = directory.join("pnpm-lock.yaml");
@@ -307,14 +355,14 @@ fn enrich_alternative_lock(
     }
     if has_pnpm {
         pnpm::enrich(&pnpm_path, dependencies)?;
-        lockfiles.push(pnpm_path);
-        Ok(true)
+        lockfiles.push(pnpm_path.clone());
+        Ok(Some(AlternativeLockContext::Pnpm(pnpm_path)))
     } else if has_yarn {
         yarn::enrich(&yarn_path, dependencies)?;
-        lockfiles.push(yarn_path);
-        Ok(true)
+        lockfiles.push(yarn_path.clone());
+        Ok(Some(AlternativeLockContext::Yarn(yarn_path)))
     } else {
-        Ok(false)
+        Ok(None)
     }
 }
 

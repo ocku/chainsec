@@ -17,6 +17,7 @@ use crate::{
     manifests::shared::{
         RootedFileType, is_file_beneath, manifest_error, push_workspace_member_bounded,
         read_beneath, walk_workspace_beneath, workspace_depth_exceeded,
+        workspace_pattern_may_match_descendant,
     },
 };
 
@@ -57,6 +58,7 @@ pub(super) fn parse_workspace(
 pub(super) struct WorkspaceMember {
     pub(super) mappings: ImportMappings,
     pub(super) dependencies: Vec<Dependency>,
+    pub(super) package_manifest: Option<PathBuf>,
 }
 
 pub(super) fn parse_workspace_member(
@@ -104,11 +106,11 @@ pub(super) fn parse_workspace_member(
     }
     let package_json = member.join("package.json");
     let has_package_json = is_file_beneath(root, &package_json)?;
-    if has_package_json {
-        let path = root.join(&package_json);
+    let package_manifest = has_package_json.then(|| root.join(&package_json));
+    if let Some(path) = package_manifest.as_ref() {
         let contents = read_beneath(root, &package_json)?;
         dependencies.extend(parse_package_json_dependencies(
-            &path,
+            path,
             &contents,
             catalogs,
             max_packages,
@@ -126,6 +128,7 @@ pub(super) fn parse_workspace_member(
     Ok(WorkspaceMember {
         mappings,
         dependencies,
+        package_manifest,
     })
 }
 
@@ -182,7 +185,8 @@ pub(super) fn expand_workspace_members(
                 kind,
                 depth,
                 max_package_depth,
-                includes.is_match(entry) && !excludes.is_match(entry),
+                (includes.is_match(entry) && !excludes.is_match(entry))
+                    || workspace_pattern_may_match_descendant(patterns, entry),
             ) {
                 return Err(crate::error::Error::LimitExceeded {
                     resource: "workspace depth".to_owned(),

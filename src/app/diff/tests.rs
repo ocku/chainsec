@@ -139,7 +139,7 @@ fn diff_exit_status_ignores_suppressed_new_occurrences() {
 }
 
 #[test]
-fn json_diff_excludes_suppressed_findings_from_detection_counts() {
+fn json_diff_includes_suppressed_findings_in_detection_counts() {
     let mut suppressed = finding("high", Risk::High);
     suppressed.suppressed = true;
     let reports = [
@@ -163,7 +163,7 @@ fn json_diff_excludes_suppressed_findings_from_detection_counts() {
     assert_eq!(added[0]["group"], "execution");
     assert_eq!(added[0]["rule_id"], "high");
     assert_eq!(added[0]["before"], 0);
-    assert_eq!(added[0]["after"], 1);
+    assert_eq!(added[0]["after"], 2);
 }
 
 #[test]

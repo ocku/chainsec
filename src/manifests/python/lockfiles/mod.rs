@@ -79,19 +79,59 @@ pub(in crate::manifests) fn enrich(
         Some(context) => vec![context],
         None => inherited_contexts.to_vec(),
     };
+    let declared = dependencies.clone();
+    let mut resolutions = vec![Vec::new(); declared.len()];
+    let mut merged_len = declared.len();
     for context in &contexts {
-        // Enrichment is fallible and may expand one declaration into multiple authorized
-        // artifacts. Work on a copy so malformed lock data cannot erase declarations, then apply
-        // the package budget before another inherited context can amplify the result again.
-        let mut enriched = dependencies.clone();
-        context.enrich(&mut enriched, max_packages)?;
-        let mut bounded = Vec::new();
-        extend_dependencies_bounded(&mut bounded, enriched, max_packages)?;
-        *dependencies = bounded;
+        // Each inherited lock represents an independent authorized resolution of the same
+        // declarations. Never feed one context's resolved artifacts into another context.
+        let mut contextual = declared.clone();
+        context.enrich(&mut contextual, max_packages)?;
+        for candidate in contextual {
+            let declaration_index = declared
+                .iter()
+                .position(|declaration| {
+                    declaration.ecosystem == candidate.ecosystem
+                        && declaration.name == candidate.name
+                        && declaration.requirement == candidate.requirement
+                })
+                .expect("Python lock enrichment preserves declaration identity");
+            let declaration = &declared[declaration_index];
+            if candidate == *declaration || candidate.resolved_version.is_none() {
+                continue;
+            }
+
+            let alternatives = &mut resolutions[declaration_index];
+            if alternatives.contains(&candidate) {
+                continue;
+            }
+            if !alternatives.is_empty() {
+                if merged_len >= max_packages {
+                    return Err(crate::error::Error::LimitExceeded {
+                        resource: "manifest dependencies".to_owned(),
+                        limit: u64::try_from(max_packages).unwrap_or(u64::MAX),
+                    });
+                }
+                merged_len += 1;
+            }
+            alternatives.push(candidate);
+        }
         let path = context.path();
         if !lockfiles.iter().any(|lockfile| lockfile == path) {
             lockfiles.push(path.to_owned());
         }
+    }
+
+    if !contexts.is_empty() {
+        let mut enriched = Vec::with_capacity(merged_len.min(max_packages));
+        for (declaration, alternatives) in declared.into_iter().zip(resolutions) {
+            if alternatives.is_empty() {
+                extend_dependencies_bounded(&mut enriched, [declaration], max_packages)?;
+            } else {
+                extend_dependencies_bounded(&mut enriched, alternatives, max_packages)?;
+            }
+        }
+        *dependencies = enriched;
     }
     Ok(contexts.into_iter().collect())
 }

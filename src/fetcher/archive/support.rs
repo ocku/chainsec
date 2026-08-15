@@ -1,12 +1,12 @@
 use std::{
-    collections::HashSet,
-    io::{self, Read, Write},
+    collections::{HashMap, hash_map::Entry},
+    io::{Read, Write},
     path::{Component, Path, PathBuf},
 };
 
 use crate::{
     error::{Error, Result},
-    fetcher::filesystem::TrustedDir,
+    fetcher::{budget::AcquisitionDeadline, filesystem::TrustedDir},
     model::EngineLimits,
 };
 
@@ -17,11 +17,27 @@ pub struct ExtractionStats {
 }
 
 pub fn safe_relative(path: &Path, max_file_depth: usize) -> bool {
-    !path.is_absolute()
-        && path.components().count() <= max_file_depth
-        && path
-            .components()
-            .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
+    normalize_relative(path, max_file_depth).is_some()
+}
+
+pub fn normalize_relative(path: &Path, max_file_depth: usize) -> Option<PathBuf> {
+    if path.is_absolute() {
+        return None;
+    }
+
+    let mut normalized = PathBuf::new();
+    let mut depth = 0;
+    for component in path.components() {
+        match component {
+            Component::Normal(component) if depth < max_file_depth => {
+                normalized.push(component);
+                depth += 1;
+            }
+            Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    Some(normalized)
 }
 
 pub fn check_extraction_limits(stats: &ExtractionStats, limits: &EngineLimits) -> Result<()> {
@@ -40,19 +56,143 @@ pub fn check_extraction_limits(stats: &ExtractionStats, limits: &EngineLimits) -
     Ok(())
 }
 
-pub fn reject_duplicate_path(
-    seen: &mut HashSet<PathBuf>,
-    path: &Path,
-    archive: &Path,
-) -> Result<()> {
-    if seen.insert(path.to_owned()) {
-        return Ok(());
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MaterializedPathKind {
+    File,
+    Directory,
+}
+
+impl MaterializedPathKind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::Directory => "directory",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct MaterializedPath {
+    kind: MaterializedPathKind,
+    explicit: bool,
+}
+
+#[derive(Debug, Default)]
+pub struct MaterializedPaths {
+    paths: HashMap<PathBuf, MaterializedPath>,
+}
+
+impl MaterializedPaths {
+    pub fn account(
+        &mut self,
+        stats: &mut ExtractionStats,
+        path: &Path,
+        kind: MaterializedPathKind,
+        limits: &EngineLimits,
+        archive: &Path,
+    ) -> Result<()> {
+        let components = path.iter().collect::<Vec<_>>();
+        let mut ancestor = PathBuf::new();
+        for component in components.iter().take(components.len().saturating_sub(1)) {
+            ancestor.push(component);
+            self.account_directory(stats, &ancestor, false, limits, archive)?;
+        }
+
+        match kind {
+            MaterializedPathKind::File => self.account_file(stats, path, limits, archive),
+            MaterializedPathKind::Directory => {
+                self.account_directory(stats, path, true, limits, archive)
+            }
+        }
     }
 
-    Err(Error::Extraction {
+    fn account_file(
+        &mut self,
+        stats: &mut ExtractionStats,
+        path: &Path,
+        limits: &EngineLimits,
+        archive: &Path,
+    ) -> Result<()> {
+        match self.paths.entry(path.to_owned()) {
+            Entry::Vacant(entry) => {
+                entry.insert(MaterializedPath {
+                    kind: MaterializedPathKind::File,
+                    explicit: true,
+                });
+                account_extracted_object(stats, limits)
+            }
+            Entry::Occupied(entry) if entry.get().kind == MaterializedPathKind::File => {
+                Err(duplicate_path(path, archive))
+            }
+            Entry::Occupied(entry) => Err(path_type_conflict(
+                path,
+                MaterializedPathKind::File,
+                entry.get().kind,
+                archive,
+            )),
+        }
+    }
+
+    fn account_directory(
+        &mut self,
+        stats: &mut ExtractionStats,
+        path: &Path,
+        explicit: bool,
+        limits: &EngineLimits,
+        archive: &Path,
+    ) -> Result<()> {
+        match self.paths.entry(path.to_owned()) {
+            Entry::Vacant(entry) => {
+                entry.insert(MaterializedPath {
+                    kind: MaterializedPathKind::Directory,
+                    explicit,
+                });
+                account_extracted_object(stats, limits)
+            }
+            Entry::Occupied(mut entry) if entry.get().kind == MaterializedPathKind::Directory => {
+                if explicit && entry.get().explicit {
+                    return Err(duplicate_path(path, archive));
+                }
+                entry.get_mut().explicit |= explicit;
+                Ok(())
+            }
+            Entry::Occupied(entry) => Err(path_type_conflict(
+                path,
+                MaterializedPathKind::Directory,
+                entry.get().kind,
+                archive,
+            )),
+        }
+    }
+}
+
+fn duplicate_path(path: &Path, archive: &Path) -> Error {
+    Error::Extraction {
         archive: archive.to_owned(),
         message: format!("duplicate path {}", path.display()),
-    })
+    }
+}
+
+fn path_type_conflict(
+    path: &Path,
+    expected: MaterializedPathKind,
+    actual: MaterializedPathKind,
+    archive: &Path,
+) -> Error {
+    Error::Extraction {
+        archive: archive.to_owned(),
+        message: format!(
+            "path type conflict at {}: expected {}, found {}",
+            path.display(),
+            expected.name(),
+            actual.name()
+        ),
+    }
+}
+
+fn account_extracted_object(stats: &mut ExtractionStats, limits: &EngineLimits) -> Result<()> {
+    stats.files = stats.files.saturating_add(1);
+    check_extraction_limits(stats, limits)
 }
 
 pub fn account_extracted_entry(
@@ -60,7 +200,7 @@ pub fn account_extracted_entry(
     declared_size: u64,
     limits: &EngineLimits,
 ) -> Result<()> {
-    stats.files = stats.files.saturating_add(1);
+    account_extracted_object(stats, limits)?;
     account_extracted_bytes(stats, declared_size, limits)
 }
 
@@ -95,7 +235,9 @@ pub fn write_extracted_file<R: Read>(
     destination: &Path,
     output: &Path,
     archive: &Path,
+    deadline: &AcquisitionDeadline,
 ) -> Result<()> {
+    deadline.check()?;
     let relative = output
         .strip_prefix(destination)
         .expect("extraction output is rooted");
@@ -104,12 +246,32 @@ pub fn write_extracted_file<R: Read>(
         path: output.to_owned(),
         source,
     })?;
-    let copied =
-        io::copy(&mut reader.take(declared_size), &mut file).map_err(|source| Error::Io {
-            operation: "write extracted file".to_owned(),
-            path: output.to_owned(),
-            source,
-        })?;
+    let mut copied = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    while copied < declared_size {
+        deadline.check()?;
+        let remaining = declared_size - copied;
+        let maximum = usize::try_from(remaining)
+            .unwrap_or(usize::MAX)
+            .min(buffer.len());
+        let read = reader
+            .read(&mut buffer[..maximum])
+            .map_err(|source| Error::Io {
+                operation: "read extracted file".to_owned(),
+                path: output.to_owned(),
+                source,
+            })?;
+        if read == 0 {
+            break;
+        }
+        file.write_all(&buffer[..read])
+            .map_err(|source| Error::Io {
+                operation: "write extracted file".to_owned(),
+                path: output.to_owned(),
+                source,
+            })?;
+        copied += read as u64;
+    }
     if copied != declared_size {
         return Err(Error::Extraction {
             archive: archive.to_owned(),
@@ -121,6 +283,7 @@ pub fn write_extracted_file<R: Read>(
             ),
         });
     }
+    deadline.check()?;
     file.flush().map_err(|source| Error::Io {
         operation: "flush extracted file".to_owned(),
         path: output.to_owned(),

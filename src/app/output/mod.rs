@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use chainsec::model::{AnalysisPoint, CapabilityEvidence, Report, Risk};
+use chainsec::model::{AnalysisPoint, Report, Risk};
 use serde_json::json;
 
 use super::style::{paint, risk_color};
@@ -170,13 +170,6 @@ pub(super) fn sarif_report(
         .iter()
         .filter(|finding| !finding.suppressed)
         .map(sarif_result)
-        .chain(report.capabilities.iter().flat_map(|capability| {
-            capability
-                .evidence
-                .iter()
-                .filter(|evidence| !evidence.suppressed)
-                .map(|evidence| sarif_capability_result(evidence, &capability.name))
-        }))
         .collect::<Vec<_>>();
     let notifications = report
         .issues
@@ -199,23 +192,18 @@ pub(super) fn sarif_report(
 }
 
 fn sarif_rule(rule: &chainsec::model::Rule) -> serde_json::Value {
-    let id = sarif_rule_id(rule.finding_type, &rule.id);
     json!({
-        "id": id,
-        "name": id,
+        "id": rule.id,
+        "name": rule.id,
         "shortDescription": { "text": rule.rationale },
         "help": { "text": rule.remediation },
         "properties": { "version": rule.version, "confidence": format!("{:?}", rule.confidence).to_lowercase() }
     })
 }
 
-fn sarif_rule_id(finding_type: chainsec::model::FindingType, rule_id: &str) -> String {
-    format!("{}:{rule_id}", finding_type.rule_group().name())
-}
-
 fn sarif_result(finding: &chainsec::model::AnalysisPoint) -> serde_json::Value {
     json!({
-        "ruleId": sarif_rule_id(finding.finding_type, &finding.rule_id),
+        "ruleId": finding.rule_id,
         "level": sarif_level(finding.risk),
         "message": { "text": finding.rationale },
         "locations": [{ "physicalLocation": {
@@ -223,22 +211,6 @@ fn sarif_result(finding: &chainsec::model::AnalysisPoint) -> serde_json::Value {
             "region": { "startLine": finding.location.start_line, "startColumn": finding.location.start_column, "endLine": finding.location.end_line, "endColumn": finding.location.end_column }
         }}],
         "partialFingerprints": { "chainsecFindingId": finding.id }
-    })
-}
-
-fn sarif_capability_result(
-    evidence: &CapabilityEvidence,
-    capability_name: &str,
-) -> serde_json::Value {
-    json!({
-        "ruleId": sarif_rule_id(evidence.finding_type, &evidence.rule_id),
-        "level": sarif_level(evidence.risk),
-        "message": { "text": format!("Detected {capability_name} capability evidence") },
-        "locations": [{ "physicalLocation": {
-            "artifactLocation": { "uri": sarif_uri(&evidence.file) },
-            "region": { "startLine": evidence.location.start_line, "startColumn": evidence.location.start_column, "endLine": evidence.location.end_line, "endColumn": evidence.location.end_column }
-        }}],
-        "partialFingerprints": { "chainsecFindingId": evidence.id }
     })
 }
 

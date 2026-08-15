@@ -2,7 +2,10 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use async_trait::async_trait;
@@ -54,6 +57,26 @@ struct CountingFixtureFetcher {
     fetches: Arc<Mutex<HashMap<String, usize>>>,
 }
 
+struct ConcurrencyTrackingFixtureFetcher {
+    packages: PathBuf,
+    active_fetches: AtomicUsize,
+    max_active_fetches: AtomicUsize,
+}
+
+impl ConcurrencyTrackingFixtureFetcher {
+    fn new(packages: PathBuf) -> Self {
+        Self {
+            packages,
+            active_fetches: AtomicUsize::new(0),
+            max_active_fetches: AtomicUsize::new(0),
+        }
+    }
+
+    fn max_active_fetches(&self) -> usize {
+        self.max_active_fetches.load(Ordering::SeqCst)
+    }
+}
+
 struct ContextFixtureFetcher {
     packages: PathBuf,
     fetches: Arc<Mutex<HashMap<String, usize>>>,
@@ -67,6 +90,14 @@ struct FailingFixtureFetcher {
 
 #[async_trait]
 impl Fetcher for CountingFixtureFetcher {
+    fn prepare_fetch(
+        &self,
+        dependency: Dependency,
+        declared_from: PathBuf,
+    ) -> Result<crate::fetcher::PreparedFetch> {
+        prepare_canonical_fixture_fetch(dependency, declared_from)
+    }
+
     async fn fetch(
         &self,
         dependency: Dependency,
@@ -78,6 +109,35 @@ impl Fetcher for CountingFixtureFetcher {
             .unwrap()
             .entry(dependency.id())
             .or_default() += 1;
+        Ok(FetchMetadata {
+            source: self.packages.join(&dependency.name),
+            package_id: dependency.id(),
+            resolved_version: dependency.resolved_version.clone().unwrap(),
+            digest: dependency.integrity.clone().unwrap(),
+            source_url: dependency
+                .source_url
+                .unwrap_or_else(|| "https://fixtures.example.test/package.tar.gz".to_owned()),
+            cache_hit: false,
+        })
+    }
+}
+
+#[async_trait]
+impl Fetcher for ConcurrencyTrackingFixtureFetcher {
+    async fn fetch(
+        &self,
+        dependency: Dependency,
+        _declared_from: PathBuf,
+    ) -> Result<FetchMetadata> {
+        let active_fetches = self.active_fetches.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_active_fetches
+            .fetch_max(active_fetches, Ordering::SeqCst);
+
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+
+        self.active_fetches.fetch_sub(1, Ordering::SeqCst);
         Ok(FetchMetadata {
             source: self.packages.join(&dependency.name),
             package_id: dependency.id(),
@@ -127,6 +187,14 @@ impl Fetcher for FailingFixtureFetcher {
 
 #[async_trait]
 impl Fetcher for ContextFixtureFetcher {
+    fn prepare_fetch(
+        &self,
+        dependency: Dependency,
+        declared_from: PathBuf,
+    ) -> Result<crate::fetcher::PreparedFetch> {
+        prepare_canonical_fixture_fetch(dependency, declared_from)
+    }
+
     async fn fetch(
         &self,
         dependency: Dependency,
@@ -185,8 +253,36 @@ fn fetched_fixture_root(source: PathBuf, package_id: &str) -> FetchMetadata {
     }
 }
 
+fn prepare_canonical_fixture_fetch(
+    dependency: Dependency,
+    declared_from: PathBuf,
+) -> Result<crate::fetcher::PreparedFetch> {
+    let deno_lockfile_identity = dependency
+        .deno_lockfile_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.identity())
+        .unwrap_or_default();
+    let acquisition_identity = format!(
+        "{}\0{}\0{deno_lockfile_identity}",
+        dependency.id(),
+        dependency.source_url.as_deref().unwrap_or_default(),
+    );
+    let mut prepared =
+        <NeverFetch as Fetcher>::prepare_fetch(&NeverFetch, dependency, declared_from)?;
+    prepared.acquisition_identity = Some(acquisition_identity);
+    Ok(prepared)
+}
+
 #[async_trait]
 impl Fetcher for SourceUrlPolicyFetcher {
+    fn prepare_fetch(
+        &self,
+        dependency: Dependency,
+        declared_from: PathBuf,
+    ) -> Result<crate::fetcher::PreparedFetch> {
+        prepare_canonical_fixture_fetch(dependency, declared_from)
+    }
+
     async fn fetch(
         &self,
         dependency: Dependency,
@@ -292,6 +388,7 @@ fn analysis_thread_count_is_clamped_to_safe_bounds() {
         true,
         true,
         Vec::new(),
+        false,
         false,
     )
     .with_max_analysis_threads(usize::MAX);

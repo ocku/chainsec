@@ -247,9 +247,62 @@ fn append_download_chunk(
 
 pub(in crate::fetcher) fn diagnostic_url(url: &Url) -> String {
     let mut redacted = url.clone();
+    // Strip userinfo as defense-in-depth; the policy layer already rejects
+    // URLs that carry credentials in userinfo, but redact here too so a
+    // future regression can't leak them through diagnostics.
+    redacted.set_username("").ok();
+    redacted.set_password(None).ok();
     redacted.set_query(None);
     redacted.set_fragment(None);
+    // Redact path segments that appear to carry embedded credentials. Some
+    // registries accept tokens as path components, for example
+    // /artifactory/api/npm/<token>/package-name.
+    if let Some(redacted_path) = redact_token_like_path_segments(redacted.path()) {
+        redacted.set_path(&redacted_path);
+    }
     redacted.to_string()
+}
+
+/// Returns a copy of `path` with token-like segments replaced by `[redacted]`,
+/// or `None` when no segment needs redaction.
+fn redact_token_like_path_segments(path: &str) -> Option<String> {
+    let mut changed = false;
+    let redacted: Vec<&str> = path
+        .split('/')
+        .map(|segment| {
+            if is_token_like_path_segment(segment) {
+                changed = true;
+                "[redacted]"
+            } else {
+                segment
+            }
+        })
+        .collect();
+    changed.then(|| redacted.join("/"))
+}
+
+/// Returns `true` when a URL path segment looks like it may carry an
+/// embedded credential (API key, bearer token, or similar secret).
+fn is_token_like_path_segment(segment: &str) -> bool {
+    // Long hex strings (>= 40 chars). SHA-1 hex is 40 characters; anything
+    // this long is essentially never a legitimate package-path component.
+    if segment.len() >= 40 && segment.chars().all(|c| c.is_ascii_hexdigit()) {
+        return true;
+    }
+    // Known GitHub token prefixes (ghp_*, gho_*, ghu_*, ghs_*, ghr_*,
+    // github_pat_*).  Require the remainder to be at least 20 characters
+    // to avoid false positives on short strings.
+    if let Some(rest) = segment
+        .strip_prefix("ghp_")
+        .or_else(|| segment.strip_prefix("gho_"))
+        .or_else(|| segment.strip_prefix("ghu_"))
+        .or_else(|| segment.strip_prefix("ghs_"))
+        .or_else(|| segment.strip_prefix("ghr_"))
+        .or_else(|| segment.strip_prefix("github_pat_"))
+    {
+        return rest.len() >= 20;
+    }
+    false
 }
 
 #[cfg(test)]

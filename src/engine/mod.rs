@@ -10,7 +10,10 @@ use crate::{
 mod reporting;
 mod traversal;
 
-/// Maximum concurrent package downloads and analyses.
+/// Default concurrent package downloads and analyses.
+pub const DEFAULT_ANALYSIS_THREADS: usize = 16;
+
+/// Maximum configurable concurrent package downloads and analyses.
 pub const MAX_ANALYSIS_THREADS: usize = 64;
 
 /// Returns a safe package-work concurrency value.
@@ -32,6 +35,7 @@ pub struct Engine<'a> {
 }
 
 impl<'a> Engine<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         rules: &'a [Rule],
         fetcher: &'a dyn Fetcher,
@@ -40,12 +44,13 @@ impl<'a> Engine<'a> {
         offline: bool,
         allowed_hosts: Vec<String>,
         trust_local_input: bool,
+        allow_insecure_http: bool,
     ) -> Self {
         let policy = PolicySummary {
             require_lockfile,
             offline,
             trust_local_input,
-            allow_insecure_http: false,
+            allow_insecure_http,
             allowed_hosts,
             limits: SerializableLimits::from(&limits),
         };
@@ -59,15 +64,8 @@ impl<'a> Engine<'a> {
             ignored_rule_selectors: Vec::new(),
             ignored_packages: HashSet::new(),
             ignored_root_paths: Vec::new(),
-            max_analysis_threads: 16,
+            max_analysis_threads: DEFAULT_ANALYSIS_THREADS,
         }
-    }
-
-    /// Records that the operator permitted plaintext loopback repository transport.
-    #[must_use]
-    pub fn with_allow_insecure_http(mut self, allow_insecure_http: bool) -> Self {
-        self.policy.allow_insecure_http = allow_insecure_http;
-        self
     }
 
     /// Limits the number of packages analyzed concurrently.

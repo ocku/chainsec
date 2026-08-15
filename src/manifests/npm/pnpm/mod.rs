@@ -1,10 +1,13 @@
-use std::{path::Path, str::FromStr};
+use std::{
+    path::{Component, Path, PathBuf},
+    str::FromStr,
+};
 
 use node_semver::{Range as NpmRange, Version as NpmVersion};
 use serde_json::{Map, Value as JsonValue};
 
 use crate::manifests::{
-    npm::{github_archive_matches, local_source_url, matching_github_archive},
+    npm::{github_archive_matches, local_source_url_from_directory, matching_github_archive},
     shared::{github_archive, manifest_error, optional_json_string, parse_bounded_yaml_json, read},
 };
 use crate::{
@@ -13,10 +16,23 @@ use crate::{
 };
 
 pub(super) fn enrich(path: &Path, dependencies: &mut [Dependency]) -> Result<()> {
+    enrich_importer(path, ".", dependencies)
+}
+
+pub(super) fn enrich_importer(
+    path: &Path,
+    importer_path: &str,
+    dependencies: &mut [Dependency],
+) -> Result<()> {
     let lockfile = yaml_json(path)?;
     let version = lockfile_version(path, &lockfile)?;
     validate_lock_fields(path, &lockfile)?;
-    let importer = importer(&lockfile);
+    let Some(importer) = importer(&lockfile, importer_path) else {
+        return Ok(());
+    };
+    let Some(importer_directory) = importer_directory(path, importer_path) else {
+        return Ok(());
+    };
     let packages = lockfile.get("packages").and_then(JsonValue::as_object);
 
     for dependency in dependencies {
@@ -27,7 +43,14 @@ pub(super) fn enrich(path: &Path, dependencies: &mut [Dependency]) -> Result<()>
             continue;
         }
 
-        enrich_dependency(dependency, reference, packages, &version, path);
+        enrich_dependency(
+            dependency,
+            reference,
+            packages,
+            &version,
+            path,
+            &importer_directory,
+        );
     }
     Ok(())
 }
@@ -141,11 +164,27 @@ fn validate_lock_fields(path: &Path, lockfile: &JsonValue) -> Result<()> {
     Ok(())
 }
 
-fn importer(lockfile: &JsonValue) -> &JsonValue {
-    lockfile
-        .get("importers")
-        .and_then(|importers| importers.get("."))
-        .unwrap_or(lockfile)
+fn importer<'a>(lockfile: &'a JsonValue, importer_path: &str) -> Option<&'a JsonValue> {
+    match lockfile.get("importers") {
+        Some(importers) => importers.get(importer_path),
+        None if importer_path == "." => Some(lockfile),
+        None => None,
+    }
+}
+
+fn importer_directory(lockfile: &Path, importer_path: &str) -> Option<PathBuf> {
+    let root = lockfile.parent()?;
+    if importer_path == "." {
+        return Some(root.to_owned());
+    }
+
+    let importer = Path::new(importer_path);
+    (!importer.as_os_str().is_empty()
+        && !importer.is_absolute()
+        && importer
+            .components()
+            .all(|component| matches!(component, Component::Normal(_))))
+    .then(|| root.join(importer))
 }
 
 fn locked_reference<'a>(
@@ -176,6 +215,7 @@ fn enrich_dependency(
     packages: Option<&Map<String, JsonValue>>,
     lockfile_version: &str,
     path: &Path,
+    importer_directory: &Path,
 ) {
     if !github_archive_matches(dependency, Some(reference)) {
         return;
@@ -189,7 +229,7 @@ fn enrich_dependency(
         return;
     }
     if is_local_reference(reference) {
-        if let Some(source_url) = local_source_url(path, reference) {
+        if let Some(source_url) = local_source_url_from_directory(importer_directory, reference) {
             dependency.source_url = Some(source_url);
             dependency.lockfile = Some(path.to_owned());
         }

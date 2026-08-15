@@ -187,8 +187,10 @@ impl SourceFetcher {
     pub async fn fetch_remote_root(&self, dependency: Dependency) -> Result<FetchMetadata> {
         let mut dependency = dependency;
         let mut budget = self.network_budget();
+        budget.check()?;
         self.resolve_remote_root_with_budget(&mut dependency, &mut budget)
             .await?;
+        budget.check()?;
 
         if !dependency.is_resolved() {
             return Err(Error::Resolution {
@@ -197,11 +199,32 @@ impl SourceFetcher {
             });
         }
         let acquisition = self.acquisition(&dependency)?;
-        if let CacheLookup::Hit(cached) = self.cached(&dependency, &acquisition)? {
+        budget.check()?;
+        let cache_fetcher = self.clone();
+        let cache_dependency = dependency.clone();
+        let cache_acquisition = acquisition.clone();
+        let cache_deadline = budget.deadline_guard();
+        let cached = tokio::task::spawn_blocking(move || {
+            cache_fetcher.cached_before(&cache_dependency, &cache_acquisition, &cache_deadline)
+        })
+        .await
+        .map_err(|error| Error::Fetch {
+            package: dependency.id(),
+            source_url: dependency
+                .source_url
+                .clone()
+                .unwrap_or_else(|| dependency.requirement.clone()),
+            message: format!("cache restoration worker failed: {error}"),
+        })??;
+        budget.check()?;
+        if let CacheLookup::Hit(cached) = cached {
             return Ok(cached);
         }
 
-        self.fetch_remote_dependency_with_budget(&dependency, &acquisition, &mut budget)
-            .await
+        let fetched = self
+            .fetch_remote_dependency_with_budget(&dependency, &acquisition, &mut budget)
+            .await?;
+        budget.check()?;
+        Ok(fetched)
     }
 }

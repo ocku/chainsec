@@ -2,6 +2,30 @@ use std::time::Duration;
 
 use crate::error::{Error, Result};
 
+/// Cloneable deadline passed into synchronous acquisition stages and workers.
+#[derive(Clone)]
+pub(in crate::fetcher) struct AcquisitionDeadline {
+    deadline: tokio::time::Instant,
+    duration_limit: Duration,
+}
+
+impl AcquisitionDeadline {
+    pub(in crate::fetcher) fn check(&self) -> Result<()> {
+        if tokio::time::Instant::now() >= self.deadline {
+            Err(self.exceeded())
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(in crate::fetcher) fn exceeded(&self) -> Error {
+        Error::LimitExceeded {
+            resource: "package acquisition seconds".to_owned(),
+            limit: self.duration_limit.as_secs(),
+        }
+    }
+}
+
 /// Shared policy state for one package acquisition.
 ///
 /// The deadline begins before resolution and is reused through cache restoration,
@@ -10,8 +34,7 @@ pub(in crate::fetcher) struct AcquisitionBudget {
     pub(in crate::fetcher) requests: usize,
     downloaded_bytes: u64,
     max_downloaded_bytes: u64,
-    deadline: tokio::time::Instant,
-    duration_limit: Duration,
+    deadline: AcquisitionDeadline,
 }
 
 impl AcquisitionBudget {
@@ -20,21 +43,23 @@ impl AcquisitionBudget {
             requests: 0,
             downloaded_bytes: 0,
             max_downloaded_bytes,
-            deadline: tokio::time::Instant::now() + duration_limit,
-            duration_limit,
+            deadline: AcquisitionDeadline {
+                deadline: tokio::time::Instant::now() + duration_limit,
+                duration_limit,
+            },
         }
     }
 
     pub(in crate::fetcher) fn deadline(&self) -> tokio::time::Instant {
-        self.deadline
+        self.deadline.deadline
+    }
+
+    pub(in crate::fetcher) fn deadline_guard(&self) -> AcquisitionDeadline {
+        self.deadline.clone()
     }
 
     pub(in crate::fetcher) fn check(&self) -> Result<()> {
-        if tokio::time::Instant::now() >= self.deadline {
-            Err(self.exceeded())
-        } else {
-            Ok(())
-        }
+        self.deadline.check()
     }
 
     pub(in crate::fetcher) fn account_downloaded_bytes(&mut self, bytes: usize) -> Result<()> {
@@ -52,10 +77,7 @@ impl AcquisitionBudget {
     }
 
     pub(in crate::fetcher) fn exceeded(&self) -> Error {
-        Error::LimitExceeded {
-            resource: "package acquisition seconds".to_owned(),
-            limit: self.duration_limit.as_secs(),
-        }
+        self.deadline.exceeded()
     }
 }
 

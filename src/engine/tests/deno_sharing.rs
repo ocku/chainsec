@@ -39,6 +39,7 @@ async fn fetched_roots_fetch_distinct_unlocked_deno_npm_requirements_independent
         false,
         vec![],
         false,
+        false,
     )
     .analyze_fetched_roots(vec![
         FetchMetadata {
@@ -117,6 +118,7 @@ async fn fetched_roots_verify_shared_deno_graphs_against_each_lockfile() {
         true,
         true,
         vec![],
+        false,
         false,
     )
     .analyze_fetched_roots(vec![

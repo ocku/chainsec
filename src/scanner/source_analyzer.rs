@@ -1,15 +1,14 @@
 use std::{
-    collections::HashSet,
     ops::ControlFlow,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
+    sync::atomic::{AtomicUsize, Ordering},
     time::Instant,
 };
 
 use rayon::prelude::*;
 use tree_sitter::{CaptureQuantifier, ParseOptions, Parser, Query, QueryCursor, StreamingIterator};
 
-use super::entropy::has_high_entropy;
+use super::{BoundedFindings, entropy::has_high_entropy};
 use crate::{
     error::{Error, Result},
     model::{AnalysisPoint, Language, Location, OperationalIssue, Rule},
@@ -119,6 +118,8 @@ fn rule_index_for_offset(rule_offsets: &[usize], offset: usize) -> usize {
 pub(super) struct SourceFileScan {
     pub(super) findings: Vec<AnalysisPoint>,
     pub(super) issues: Vec<OperationalIssue>,
+    pub(super) finding_limit_exceeded: bool,
+    pub(super) capability_limit_exceeded: bool,
 }
 
 pub(super) struct SourceScanInput<'a> {
@@ -129,6 +130,7 @@ pub(super) struct SourceScanInput<'a> {
     pub(super) source: &'a [u8],
     pub(super) rule_sets: &'a [CompiledRuleSet],
     pub(super) fail_on_parse_error: bool,
+    pub(super) max_findings: u64,
     pub(super) started: Instant,
     pub(super) max_scan_duration: std::time::Duration,
 }
@@ -161,6 +163,7 @@ pub(super) fn scan_file(
         source,
         rule_sets,
         fail_on_parse_error,
+        max_findings,
         started,
         max_scan_duration,
     } = input;
@@ -207,24 +210,35 @@ pub(super) fn scan_file(
 
     let mut issues = Vec::new();
     if tree.root_node().has_error() {
-        let message = format!("source contains syntax errors: {}", path.display());
-        issues.push(OperationalIssue {
-            code: "parse_error".to_owned(),
-            message,
-            package: Some(package.to_owned()),
-            operation: "source parsing".to_owned(),
-            fatal: fail_on_parse_error,
-        });
+        tracing::debug!(
+            package,
+            path = %path.display(),
+            "source contains syntax errors"
+        );
+        if fail_on_parse_error {
+            issues.push(OperationalIssue {
+                code: "parse_error".to_owned(),
+                message: format!("source contains syntax errors: {}", path.display()),
+                package: Some(package.to_owned()),
+                operation: "source parsing".to_owned(),
+                fatal: true,
+            });
+        }
     }
 
-    let mut findings = Vec::new();
+    let mut findings = BoundedFindings::default();
     let Some(compiled) = rule_sets
         .iter()
         .find(|compiled| compiled.language == language && compiled.is_tsx == is_tsx)
     else {
-        return Ok(SourceFileScan { findings, issues });
+        let (findings, finding_limit_exceeded, capability_limit_exceeded) = findings.into_parts();
+        return Ok(SourceFileScan {
+            findings,
+            issues,
+            finding_limit_exceeded,
+            capability_limit_exceeded,
+        });
     };
-    let mut deduplicated = HashSet::new();
     {
         let mut matches = worker
             .cursor
@@ -255,9 +269,7 @@ pub(super) fn scan_file(
                     capture.node.byte_range(),
                     location_for(capture.node.start_position(), capture.node.end_position()),
                 );
-                if deduplicated.insert(finding.id.clone()) {
-                    findings.push(finding);
-                }
+                findings.insert(finding, max_findings);
             }
         }
     }
@@ -268,7 +280,13 @@ pub(super) fn scan_file(
             limit: 65_536,
         });
     }
-    Ok(SourceFileScan { findings, issues })
+    let (findings, finding_limit_exceeded, capability_limit_exceeded) = findings.into_parts();
+    Ok(SourceFileScan {
+        findings,
+        issues,
+        finding_limit_exceeded,
+        capability_limit_exceeded,
+    })
 }
 
 pub(crate) fn ensure_within_duration(
@@ -283,27 +301,6 @@ pub(crate) fn ensure_within_duration(
         resource: format!("scan duration for {}", path.display()),
         limit: limit.as_secs(),
     })
-}
-
-pub(crate) fn reserve_finding(finding_budget: &AtomicU64, max_findings: u64) -> Result<()> {
-    let mut claimed = finding_budget.load(Ordering::Relaxed);
-    loop {
-        if claimed >= max_findings {
-            return Err(Error::LimitExceeded {
-                resource: "findings".to_owned(),
-                limit: max_findings,
-            });
-        }
-        match finding_budget.compare_exchange_weak(
-            claimed,
-            claimed + 1,
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        ) {
-            Ok(_) => return Ok(()),
-            Err(current) => claimed = current,
-        }
-    }
 }
 
 fn make_finding(

@@ -1,7 +1,5 @@
 use std::path::Path;
 
-use sha2::{Digest, Sha256};
-
 use crate::{
     error::Result,
     model::{Dependency, FetchMetadata},
@@ -9,7 +7,8 @@ use crate::{
 
 use crate::fetcher::{
     SourceFetcher,
-    archive::{extract, single_root_or_self},
+    archive::{extract_before, single_root_or_self_before},
+    integrity::sha256_digest_before,
 };
 
 impl SourceFetcher {
@@ -23,14 +22,22 @@ impl SourceFetcher {
             .github_archive_url()
             .expect("GitHub archive fetch requires a validated GitHub commit pin");
         let bytes = self.download_with_budget(&url, false, budget).await?;
-        let digest = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));
+        let deadline = budget.deadline_guard();
+        let digest = sha256_digest_before(&bytes, &deadline)?;
         let source = self.create_workspace_subdirectory(
             temporary,
             Path::new("source"),
             "create extraction directory",
         )?;
-        extract(&bytes, "git.tar.gz", &source, &self.limits)?;
-        let package_root = single_root_or_self(&source)?;
-        self.complete_without_cache(dependency, &url, digest, temporary, &package_root)
+        extract_before(&bytes, "git.tar.gz", &source, &self.limits, &deadline)?;
+        let package_root = single_root_or_self_before(&source, &deadline)?;
+        self.complete_without_cache_before(
+            dependency,
+            &url,
+            digest,
+            temporary,
+            &package_root,
+            &deadline,
+        )
     }
 }

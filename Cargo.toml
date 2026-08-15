@@ -1,7 +1,7 @@
 [package]
 name = "chainsec"
 version = "0.5.0"
-description = "Recursive static source scanner for dependency security analysis"
+description = "Dependency chain supply auditing tool for Python, JavaScript, and TypeScript"
 license-file = "LICENSE"
 edition = "2024"
 rust-version = "1.89"

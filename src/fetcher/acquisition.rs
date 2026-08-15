@@ -134,7 +134,10 @@ impl SourceFetcher {
             .entry(fetch_key.clone())
             .or_default()
             .clone();
-        let _fetch_guard = fetch_lock.lock().await;
+        let _fetch_guard = tokio::time::timeout_at(budget.deadline(), fetch_lock.lock())
+            .await
+            .map_err(|_| budget.exceeded())?;
+        budget.check()?;
         if let Some(fetched) = self
             .completed_fetches
             .lock()
@@ -142,14 +145,16 @@ impl SourceFetcher {
             .get(&fetch_key)
             .cloned()
         {
+            budget.check()?;
             return Ok(fetched);
         }
 
         let cache_fetcher = self.clone();
         let cache_dependency = dependency.clone();
         let cache_acquisition = acquisition.clone();
+        let cache_deadline = budget.deadline_guard();
         let cached = tokio::task::spawn_blocking(move || {
-            cache_fetcher.cached(&cache_dependency, &cache_acquisition)
+            cache_fetcher.cached_before(&cache_dependency, &cache_acquisition, &cache_deadline)
         })
         .await
         .map_err(|error| Error::Fetch {
@@ -230,12 +235,21 @@ impl SourceFetcher {
                 self.resolve_unlocked_npm_with_budget(dependency, budget)
                     .await
             }
-            Ecosystem::Deno if dependency.requirement.starts_with("jsr:") => {
-                self.resolve_unlocked_jsr_with_budget(dependency, budget)
-                    .await
-            }
             Ecosystem::Deno => Ok(()),
         }
+    }
+
+    pub(in crate::fetcher) fn effective_artifact_repository_request(
+        &self,
+        dependency: &Dependency,
+        url: &url::Url,
+        repository_request: bool,
+    ) -> bool {
+        // An allowlisted metadata-provided CDN is a direct request; only the configured
+        // PyPI artifact base receives repository provenance and credentials.
+        repository_request
+            && (dependency.ecosystem != Ecosystem::Python
+                || self.policy.repositories.pypi_artifact_url_is_permitted(url))
     }
 
     pub(super) async fn fetch_remote_dependency_with_budget(
@@ -247,6 +261,8 @@ impl SourceFetcher {
         let (url, repository_request, source_repository) = self
             .artifact_request_with_budget(dependency, budget)
             .await?;
+        let repository_request =
+            self.effective_artifact_repository_request(dependency, &url, repository_request);
         budget.check()?;
         let temporary = self.create_workspace_directory()?;
         budget.check()?;
@@ -262,7 +278,7 @@ impl SourceFetcher {
                 budget.check()?;
                 Ok(metadata)
             });
-        if result.is_err() && temporary.exists() {
+        if result.is_err() && temporary.exists() && budget.check().is_ok() {
             let _ = fs::remove_dir_all(&temporary);
         }
         result

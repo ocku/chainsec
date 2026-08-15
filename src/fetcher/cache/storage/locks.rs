@@ -3,6 +3,8 @@ use std::{
     fs::{self, File},
     path::{Path, PathBuf},
     sync::Arc,
+    thread,
+    time::Duration,
 };
 
 #[cfg(unix)]
@@ -10,7 +12,7 @@ use std::os::unix::fs::MetadataExt;
 
 use crate::{
     error::{Error, Result},
-    fetcher::filesystem::TrustedDir,
+    fetcher::{budget::AcquisitionDeadline, filesystem::TrustedDir},
 };
 
 use super::{super::Acquisition, files::is_unsafe_cache_open_error};
@@ -68,14 +70,26 @@ pub(in crate::fetcher::cache) fn open_lock_directory(cache: &Path) -> Result<Arc
     Ok(Arc::new(directory))
 }
 
+#[cfg(test)]
 pub(in crate::fetcher::cache) fn lock_entry(acquisition: &Acquisition) -> Result<CacheLock> {
     lock_entry_with_mode(acquisition, LockMode::Exclusive)
 }
 
-pub(in crate::fetcher::cache) fn lock_entry_shared(acquisition: &Acquisition) -> Result<CacheLock> {
-    lock_entry_with_mode(acquisition, LockMode::Shared)
+pub(in crate::fetcher::cache) fn lock_entry_before(
+    acquisition: &Acquisition,
+    deadline: &AcquisitionDeadline,
+) -> Result<CacheLock> {
+    lock_entry_with_mode_before(acquisition, LockMode::Exclusive, deadline)
 }
 
+pub(in crate::fetcher::cache) fn lock_entry_shared_before(
+    acquisition: &Acquisition,
+    deadline: &AcquisitionDeadline,
+) -> Result<CacheLock> {
+    lock_entry_with_mode_before(acquisition, LockMode::Shared, deadline)
+}
+
+#[cfg(test)]
 fn lock_entry_with_mode(acquisition: &Acquisition, mode: LockMode) -> Result<CacheLock> {
     lock_child_file(
         &acquisition.locks,
@@ -88,6 +102,23 @@ fn lock_entry_with_mode(acquisition: &Acquisition, mode: LockMode) -> Result<Cac
     )
 }
 
+fn lock_entry_with_mode_before(
+    acquisition: &Acquisition,
+    mode: LockMode,
+    deadline: &AcquisitionDeadline,
+) -> Result<CacheLock> {
+    lock_child_file_before(
+        &acquisition.locks,
+        Path::new(&format!("{}.lock", acquisition.identity)),
+        &acquisition
+            .lock_directory
+            .join(format!("{}.lock", acquisition.identity)),
+        "cache entry",
+        mode,
+        deadline,
+    )
+}
+
 pub(in crate::fetcher::cache) fn lock_child_file(
     directory: &TrustedDir,
     name: &Path,
@@ -95,6 +126,50 @@ pub(in crate::fetcher::cache) fn lock_child_file(
     operation: &str,
     mode: LockMode,
 ) -> Result<CacheLock> {
+    let file = open_lock_file(directory, name, path, operation)?;
+    let result = match mode {
+        LockMode::Shared => file.lock_shared(),
+        LockMode::Exclusive => file.lock(),
+    };
+    result.map_err(|source| lock_error(source, path, operation))?;
+    Ok(CacheLock { file })
+}
+
+fn lock_child_file_before(
+    directory: &TrustedDir,
+    name: &Path,
+    path: &Path,
+    operation: &str,
+    mode: LockMode,
+    deadline: &AcquisitionDeadline,
+) -> Result<CacheLock> {
+    let file = open_lock_file(directory, name, path, operation)?;
+    loop {
+        deadline.check()?;
+        let result = match mode {
+            LockMode::Shared => file.try_lock_shared(),
+            LockMode::Exclusive => file.try_lock(),
+        };
+        match result {
+            Ok(()) => return Ok(CacheLock { file }),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(std::fs::TryLockError::Error(error))
+                if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(std::fs::TryLockError::Error(source)) => {
+                return Err(lock_error(source, path, operation));
+            }
+        }
+    }
+}
+
+fn open_lock_file(
+    directory: &TrustedDir,
+    name: &Path,
+    path: &Path,
+    operation: &str,
+) -> Result<File> {
     let file = directory
         .open_or_create_child_file(name)
         .map_err(|source| {
@@ -117,16 +192,15 @@ pub(in crate::fetcher::cache) fn lock_child_file(
         source,
     })?;
     validate_lock_file(&metadata, path, operation)?;
-    let result = match mode {
-        LockMode::Shared => file.lock_shared(),
-        LockMode::Exclusive => file.lock(),
-    };
-    result.map_err(|source| Error::Io {
+    Ok(file)
+}
+
+fn lock_error(source: std::io::Error, path: &Path, operation: &str) -> Error {
+    Error::Io {
         operation: format!("lock {operation}"),
         path: path.to_owned(),
         source,
-    })?;
-    Ok(CacheLock { file })
+    }
 }
 
 pub(in crate::fetcher::cache) fn validate_cache_directory(

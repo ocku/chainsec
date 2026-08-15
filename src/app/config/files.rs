@@ -19,17 +19,21 @@ pub(in crate::app) struct SuppressionConfig {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(in crate::app) struct FileConfig {
+    #[serde(alias = "max_depth")]
     pub(super) max_package_depth: Option<usize>,
     pub(super) max_packages: Option<usize>,
     pub(super) max_network_requests: Option<usize>,
     pub(super) max_redirect_hops: Option<usize>,
     pub(super) request_timeout_seconds: Option<u64>,
     pub(super) max_acquisition_seconds: Option<u64>,
+    #[serde(alias = "max_archive_bytes")]
     pub(super) max_archive_size: Option<u64>,
+    #[serde(alias = "max_extracted_bytes")]
     pub(super) max_extracted_size: Option<u64>,
     pub(super) max_extracted_files: Option<u64>,
     pub(super) max_file_depth: Option<usize>,
     pub(super) max_manifest_file_size: Option<u64>,
+    #[serde(alias = "max_source_file_bytes")]
     pub(super) max_source_file_size: Option<u64>,
     pub(super) max_source_files: Option<u64>,
     pub(super) max_findings: Option<u64>,
@@ -130,13 +134,15 @@ pub(super) fn extend_hosts(
     }
 }
 
-const INITIAL_CONFIG: &str = r#"# chainsec project configuration
+fn initial_config() -> String {
+    format!(
+        r#"# chainsec project configuration
 # See https://github.com/ocku/chainsec#project-configuration for all options.
 # Command-line options override values in this file.
 
 # Keep dependency traversal bounded. Set to 0 to scan only this project.
-max_package_depth = 3
-max_packages = 16384
+max_package_depth = {}
+max_packages = {}
 
 # Network access remains disabled unless both options below are configured.
 # online = true
@@ -169,7 +175,11 @@ ignored_paths = ["tests/**"]
 # rule = "network:chainsec.detection.network-request.*"
 # package = "npm:telemetry-client@2.1.0"
 # reason = "Approved telemetry dependency; tracked in SEC-1234"
-"#;
+"#,
+        chainsec::model::DEFAULT_MAX_PACKAGE_DEPTH,
+        chainsec::model::DEFAULT_MAX_PACKAGES,
+    )
+}
 
 fn config_path(root: &Path) -> Option<PathBuf> {
     let path = root.join("chainsec.toml");
@@ -235,7 +245,8 @@ pub(in crate::app) fn initialize(root: &Path) -> chainsec::Result<PathBuf> {
             source,
         })?;
 
-    let write_result = std::io::Write::write_all(&mut file, INITIAL_CONFIG.as_bytes())
+    let initial_config = initial_config();
+    let write_result = std::io::Write::write_all(&mut file, initial_config.as_bytes())
         .and_then(|()| file.sync_all())
         .map_err(|source| chainsec::Error::Io {
             operation: "write configuration".to_owned(),

@@ -105,7 +105,7 @@ impl TryFrom<OutputFormat> for Format {
 
 #[derive(Clone, Copy)]
 enum DetectionFilter {
-    Unsuppressed,
+    All,
     Human { threshold: Risk, verbose: bool },
 }
 
@@ -145,7 +145,7 @@ pub(super) fn render(
 ) -> chainsec::Result<String> {
     let filter = match format {
         Format::Human => DetectionFilter::Human { threshold, verbose },
-        Format::Json => DetectionFilter::Unsuppressed,
+        Format::Json => DetectionFilter::All,
     };
     let report = build_diff_report(package, reports, filter)?;
     match format {
@@ -331,7 +331,7 @@ fn normalized_package_identity(report: &Report, package_id: &str) -> String {
 
 fn include_detection(finding: &AnalysisPoint, filter: DetectionFilter) -> bool {
     match filter {
-        DetectionFilter::Unsuppressed => !finding.suppressed,
+        DetectionFilter::All => true,
         DetectionFilter::Human { threshold, verbose } => {
             !finding.suppressed && (verbose || finding.risk >= threshold)
         }

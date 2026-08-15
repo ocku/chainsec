@@ -1,7 +1,7 @@
-use super::{human_report, sarif_notification, sarif_report, sarif_rule_id, sarif_uri};
+use super::{human_report, sarif_notification, sarif_report, sarif_uri};
 use chainsec::model::{
-    CapabilityEvidence, CapabilityReport, Confidence, EngineLimits, FindingType, Location,
-    OperationalIssue, PolicySummary, Report, Risk,
+    AnalysisPoint, CapabilityEvidence, CapabilityReport, Confidence, EngineLimits, FindingType,
+    Language, Location, OperationalIssue, PolicySummary, Report, Risk, Rule,
 };
 use std::path::{Path, PathBuf};
 
@@ -41,6 +41,47 @@ fn capability_evidence(suppressed: bool) -> CapabilityEvidence {
     }
 }
 
+fn finding(rule_id: &str, suppressed: bool) -> AnalysisPoint {
+    AnalysisPoint {
+        id: "finding-id".to_owned(),
+        rule_id: rule_id.to_owned(),
+        rule_version: 1,
+        finding_type: FindingType::NetworkAccess,
+        risk: Risk::High,
+        confidence: Confidence::High,
+        rationale: "finding rationale".to_owned(),
+        remediation: "finding remediation".to_owned(),
+        capability: None,
+        package: "npm:example".to_owned(),
+        file: PathBuf::from("finding.js"),
+        location: Location {
+            start_line: 2,
+            start_column: 3,
+            end_line: 2,
+            end_column: 7,
+        },
+        matched_code: "request()".to_owned(),
+        suppressed,
+        suppression: None,
+    }
+}
+
+fn rule(id: &str) -> Rule {
+    Rule {
+        id: id.to_owned(),
+        version: 1,
+        language: Language::JavaScript,
+        finding_type: FindingType::NetworkAccess,
+        risk: Risk::High,
+        confidence: Confidence::High,
+        rationale: "rule rationale".to_owned(),
+        remediation: "rule remediation".to_owned(),
+        capability: None,
+        query: "(identifier) @match".to_owned(),
+        entropy: None,
+    }
+}
+
 #[test]
 fn human_report_excludes_capabilities_with_only_suppressed_evidence() {
     let report = report_with_capabilities(vec![
@@ -62,26 +103,32 @@ fn human_report_excludes_capabilities_with_only_suppressed_evidence() {
 }
 
 #[test]
-fn sarif_includes_unsuppressed_capability_evidence_as_results() {
-    let report = report_with_capabilities(vec![CapabilityReport {
+fn sarif_contains_only_unsuppressed_findings_with_raw_rule_ids() {
+    let mut report = report_with_capabilities(vec![CapabilityReport {
         name: "network:connect".to_owned(),
         evidence: vec![capability_evidence(false), capability_evidence(true)],
     }]);
+    report.findings = vec![
+        finding("stable.rule-id", false),
+        finding("suppressed", true),
+    ];
+    let configured_rules = vec![rule("stable.rule-id")];
 
-    let sarif = sarif_report(&report, &[]);
+    let sarif = sarif_report(&report, &configured_rules);
+    let rules = sarif["runs"][0]["tool"]["driver"]["rules"]
+        .as_array()
+        .unwrap();
     let results = sarif["runs"][0]["results"].as_array().unwrap();
 
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0]["id"], "stable.rule-id");
+    assert_eq!(rules[0]["name"], "stable.rule-id");
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0]["ruleId"], "network:rule");
+    assert_eq!(results[0]["ruleId"], "stable.rule-id");
     assert_eq!(
-        results[0]["message"]["text"],
-        "Detected network:connect capability evidence"
+        results[0]["partialFingerprints"]["chainsecFindingId"],
+        "finding-id"
     );
-    assert_eq!(
-        results[0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
-        "index.js"
-    );
-    assert_eq!(results[0]["partialFingerprints"]["chainsecFindingId"], "id");
 }
 
 #[test]
@@ -91,14 +138,6 @@ fn sarif_uri_encodes_path_delimiters_and_unicode() {
         "src/a%20file%23%3F.rs"
     );
     assert_eq!(sarif_uri(Path::new("café.rs")), "caf%C3%A9.rs");
-}
-
-#[test]
-fn sarif_rule_ids_include_the_rule_group() {
-    assert_eq!(
-        sarif_rule_id(FindingType::NetworkAccess, "download-code"),
-        "network:download-code"
-    );
 }
 
 #[test]

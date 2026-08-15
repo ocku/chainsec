@@ -1,18 +1,17 @@
 use std::{
     collections::{BTreeSet, HashMap, HashSet, VecDeque},
     fs,
+    hash::{Hash, Hasher},
     path::{Path, PathBuf},
 };
 
 use crate::{
     error::{Error, Result},
     manifests,
-    model::{Dependency, FetchMetadata, Report},
+    model::{DenoLockfileSnapshot, Dependency, FetchMetadata, Report},
 };
 
 use super::super::reporting::push_issue;
-
-pub(super) const MAX_CONCURRENT_FETCHES: usize = crate::engine::MAX_ANALYSIS_THREADS;
 
 #[derive(Clone, Default)]
 pub(super) struct DiscoveryContexts {
@@ -57,10 +56,36 @@ pub(super) struct FetchRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct FetchKey {
     pub(super) package_id: String,
+    identity: FetchIdentity,
+}
+
+pub(super) enum AcquisitionDecision {
+    Revisited,
+    Reserved,
+    LimitExceeded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum FetchIdentity {
+    Acquisition {
+        identity: String,
+        deno_lockfile_snapshot: Option<String>,
+    },
+    Declaration {
+        requirement: String,
+        source_url: Option<String>,
+        deno_lockfile_snapshot: Option<String>,
+        declared_from: Option<PathBuf>,
+    },
+}
+
+#[derive(PartialEq, Eq)]
+struct FetchRequestKey {
+    package_id: String,
     requirement: String,
     source_url: Option<String>,
+    deno_lockfile_snapshot: Option<DenoLockfileSnapshot>,
     declared_from: Option<PathBuf>,
-    acquisition_identity: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -84,24 +109,71 @@ pub(super) struct BatchTraversal {
 
 pub(super) struct Traversal {
     queue: VecDeque<PendingPackage>,
-    visited_package_ids: HashSet<String>,
+    root_fetch: Option<FetchMetadata>,
+    visited_authenticated_packages: HashMap<String, FetchMetadata>,
     visited_sources: HashSet<PathBuf>,
     visited_contexts: HashMap<PathBuf, DiscoveryContexts>,
     visited_count: usize,
-    fetch_attempt_count: usize,
+    acquisition_keys: HashSet<FetchKey>,
+    successful_acquisitions: HashMap<FetchKey, FetchMetadata>,
 }
 
-impl FetchKey {
-    pub(super) fn new(request: &FetchRequest, prepared: &crate::fetcher::PreparedFetch) -> Self {
+impl Hash for FetchRequestKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.package_id.hash(state);
+        self.requirement.hash(state);
+        self.source_url.hash(state);
+        self.deno_lockfile_snapshot
+            .as_ref()
+            .map(DenoLockfileSnapshot::identity)
+            .hash(state);
+        self.declared_from.hash(state);
+    }
+}
+
+impl FetchRequestKey {
+    fn new(request: &FetchRequest) -> Self {
         Self {
             package_id: request.dependency.id(),
             requirement: request.dependency.requirement.clone(),
             source_url: request.dependency.source_url.clone(),
+            deno_lockfile_snapshot: request.dependency.deno_lockfile_snapshot.clone(),
             declared_from: request
                 .dependency
                 .is_local()
                 .then(|| request.declared_from.clone()),
-            acquisition_identity: prepared.acquisition_identity.clone(),
+        }
+    }
+}
+
+impl FetchKey {
+    pub(super) fn new(request: &FetchRequest, prepared: &crate::fetcher::PreparedFetch) -> Self {
+        let deno_lockfile_snapshot = request
+            .dependency
+            .deno_lockfile_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.identity().to_owned());
+        let identity = match (
+            request.dependency.is_local(),
+            prepared.acquisition_identity.as_ref(),
+        ) {
+            (false, Some(identity)) => FetchIdentity::Acquisition {
+                identity: identity.clone(),
+                deno_lockfile_snapshot,
+            },
+            _ => FetchIdentity::Declaration {
+                requirement: request.dependency.requirement.clone(),
+                source_url: request.dependency.source_url.clone(),
+                deno_lockfile_snapshot,
+                declared_from: request
+                    .dependency
+                    .is_local()
+                    .then(|| request.declared_from.clone()),
+            },
+        };
+        Self {
+            package_id: request.dependency.id(),
+            identity,
         }
     }
 }
@@ -141,6 +213,19 @@ impl PendingPackage {
             .as_ref()
             .map_or(&self.package_id, |metadata| &metadata.package_id)
     }
+
+    fn authenticated_package_id(&self) -> Option<&str> {
+        let package_id = self.resolved_package_id();
+        let (_, integrity) = package_id.split_once('#')?;
+        let local_unverified = self
+            .fetched
+            .as_ref()
+            .is_some_and(|metadata| metadata.digest == "local-unverified");
+        // Unverified IDs identify a declaration, not its bytes, so their fetched
+        // source remains part of traversal identity.
+        (!local_unverified && integrity != "unverified" && !integrity.starts_with("unverified@"))
+            .then_some(package_id)
+    }
 }
 
 impl BatchTraversal {
@@ -160,12 +245,14 @@ impl BatchTraversal {
 impl Traversal {
     pub(super) fn new(root: PathBuf, fetched: Option<FetchMetadata>) -> Self {
         Self {
-            queue: VecDeque::from([PendingPackage::root(root, fetched)]),
-            visited_package_ids: HashSet::new(),
+            queue: VecDeque::from([PendingPackage::root(root, fetched.clone())]),
+            root_fetch: fetched,
+            visited_authenticated_packages: HashMap::new(),
             visited_sources: HashSet::new(),
             visited_contexts: HashMap::new(),
             visited_count: 0,
-            fetch_attempt_count: 0,
+            acquisition_keys: HashSet::new(),
+            successful_acquisitions: HashMap::new(),
         }
     }
 
@@ -176,6 +263,8 @@ impl Traversal {
     ) -> Option<Vec<PendingPackage>> {
         let depth = self.queue.front()?.depth;
         let mut merged = Vec::<PendingPackage>::new();
+        let mut authenticated_package_indices = HashMap::<String, usize>::new();
+        let mut source_indices = HashMap::<PathBuf, usize>::new();
 
         while self
             .queue
@@ -183,21 +272,35 @@ impl Traversal {
             .is_some_and(|pending| pending.depth == depth)
         {
             let pending = self.queue.pop_front().expect("frontier entry must exist");
-            if let Some(existing) = merged.iter_mut().find(|existing| {
-                existing.resolved_package_id() == pending.resolved_package_id()
-                    || existing.source == pending.source
-            }) {
-                existing.contexts.extend(pending.contexts);
+            let package_index = pending
+                .authenticated_package_id()
+                .and_then(|package_id| authenticated_package_indices.get(package_id).copied());
+            let source_index = source_indices.get(pending.source.as_path()).copied();
+            let existing_index = match (package_index, source_index) {
+                (Some(package_index), Some(source_index)) => Some(package_index.min(source_index)),
+                (index, None) | (None, index) => index,
+            };
+
+            if let Some(index) = existing_index {
+                merged[index].contexts.extend(pending.contexts);
                 continue;
             }
+
+            let index = merged.len();
+            if let Some(package_id) = pending.authenticated_package_id() {
+                authenticated_package_indices.insert(package_id.to_owned(), index);
+            }
+            source_indices.insert(pending.source.clone(), index);
             merged.push(pending);
         }
 
         let mut frontier = Vec::new();
         for mut pending in merged {
-            let visited = self
-                .visited_package_ids
-                .contains(pending.resolved_package_id())
+            let visited = pending
+                .authenticated_package_id()
+                .is_some_and(|package_id| {
+                    self.visited_authenticated_packages.contains_key(package_id)
+                })
                 || self.visited_sources.contains(&pending.source);
             if visited {
                 let visited_contexts = self
@@ -214,8 +317,13 @@ impl Traversal {
                 continue;
             }
 
-            self.visited_package_ids
-                .insert(pending.resolved_package_id().to_owned());
+            if let (Some(package_id), Some(metadata)) = (
+                pending.authenticated_package_id().map(str::to_owned),
+                pending.fetched.clone(),
+            ) {
+                self.visited_authenticated_packages
+                    .insert(package_id, metadata);
+            }
             self.visited_sources.insert(pending.source.clone());
             self.visited_contexts
                 .entry(pending.source.clone())
@@ -238,18 +346,42 @@ impl Traversal {
         self.queue.extend(packages);
     }
 
-    pub(super) fn visited_count(&self) -> usize {
-        self.visited_count
+    pub(super) fn reserve_acquisition(
+        &mut self,
+        key: FetchKey,
+        package_limit: usize,
+    ) -> AcquisitionDecision {
+        if self.acquisition_keys.contains(&key) {
+            return AcquisitionDecision::Revisited;
+        }
+        if self.acquisition_keys.len() >= package_limit.saturating_sub(1) {
+            return AcquisitionDecision::LimitExceeded;
+        }
+
+        self.acquisition_keys.insert(key);
+        AcquisitionDecision::Reserved
     }
 
-    pub(super) fn remaining_fetch_attempts(&self, package_limit: usize) -> usize {
-        package_limit
-            .saturating_sub(1)
-            .saturating_sub(self.fetch_attempt_count)
+    pub(super) fn record_successful_acquisition(&mut self, key: FetchKey, metadata: FetchMetadata) {
+        self.successful_acquisitions.insert(key, metadata);
     }
 
-    pub(super) fn record_fetch_attempts(&mut self, count: usize) {
-        self.fetch_attempt_count = self.fetch_attempt_count.saturating_add(count);
+    pub(super) fn pending_for_revisited_acquisition(
+        &self,
+        key: &FetchKey,
+        request: &FetchRequest,
+    ) -> Option<PendingPackage> {
+        self.successful_acquisitions
+            .get(key)
+            .or_else(|| {
+                self.root_fetch.as_ref().filter(|metadata| {
+                    metadata.package_id == key.package_id
+                        && request.dependency.source_url.as_deref()
+                            == Some(metadata.source_url.as_str())
+                })
+            })
+            .cloned()
+            .map(|metadata| pending_from_fetch(request, metadata))
     }
 }
 
@@ -267,41 +399,21 @@ pub(super) fn pending_from_fetch(
     }
 }
 
-pub(super) fn limit_fetch_requests(
-    requests: Vec<FetchRequest>,
-    report: &mut Report,
-    visited_packages: usize,
-    package_limit: usize,
-) -> Vec<FetchRequest> {
-    let mut merged = Vec::<FetchRequest>::new();
+pub(super) fn merge_fetch_requests(requests: Vec<FetchRequest>) -> Vec<FetchRequest> {
+    let mut merged = Vec::<FetchRequest>::with_capacity(requests.len());
+    let mut request_indices = HashMap::<FetchRequestKey, usize>::with_capacity(requests.len());
     for request in requests {
-        if let Some(existing) = merged.iter_mut().find(|existing| {
-            existing.dependency.id() == request.dependency.id()
-                && existing.dependency.requirement == request.dependency.requirement
-                && existing.dependency.source_url == request.dependency.source_url
-                && existing.dependency.deno_lockfile_snapshot
-                    == request.dependency.deno_lockfile_snapshot
-                && (!request.dependency.is_local()
-                    || existing.declared_from == request.declared_from)
-        }) {
-            existing.contexts.extend(request.contexts);
+        let key = FetchRequestKey::new(&request);
+        if let Some(index) = request_indices.get(&key).copied() {
+            merged[index].contexts.extend(request.contexts);
             continue;
         }
+
+        request_indices.insert(key, merged.len());
         merged.push(request);
     }
 
-    let remaining_packages = package_limit.saturating_sub(visited_packages);
-    let mut requests = merged;
-    if requests.len() > remaining_packages {
-        push_package_limit_issue(
-            report,
-            requests[remaining_packages].declared_package_id.clone(),
-            package_limit as u64,
-        );
-        requests.truncate(remaining_packages);
-    }
-
-    requests
+    merged
 }
 
 pub(super) fn canonicalize_root(root: &Path) -> Result<PathBuf> {

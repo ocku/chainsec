@@ -13,6 +13,75 @@ fn parse_manifest(contents: &str) -> Result<Vec<Dependency>> {
     parse(&path)
 }
 
+fn parse_pipfile_manifest(contents: &str) -> Result<Vec<Dependency>> {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("Pipfile");
+    std::fs::write(&path, contents).unwrap();
+    parse_pipfile_with_limit(&path, usize::MAX)
+}
+
+#[test]
+fn parses_supported_pipfile_version_file_and_path_declarations() {
+    let dependencies = parse_pipfile_manifest(
+        r#"
+[packages]
+plain = "==1"
+featured = {version = ">=2", extras = ["security"], markers = "python_version >= '3.11'"}
+archive = {file = "https://example.test/archive.whl"}
+local = {path = "../local"}
+"#,
+    )
+    .unwrap();
+
+    let find = |name: &str| {
+        dependencies
+            .iter()
+            .find(|dependency| dependency.name == name)
+            .unwrap()
+    };
+    assert_eq!(find("plain").requirement, "plain==1");
+    assert_eq!(
+        find("featured").requirement,
+        "featured[security]>=2; python_version >= '3.11'"
+    );
+    assert_eq!(
+        find("archive").source_url.as_deref(),
+        Some("https://example.test/archive.whl")
+    );
+    assert_eq!(find("local").source_url.as_deref(), Some("../local"));
+}
+
+#[test]
+fn rejects_unsupported_pipfile_direct_source_tables() {
+    let cases: &[(&str, &[&str])] = &[
+        (
+            r#"git = "https://github.com/acme/demo.git", ref = "0123456789abcdef0123456789abcdef01234567""#,
+            &["git", "ref"],
+        ),
+        (
+            r#"hg = "https://example.test/demo", rev = "abc""#,
+            &["hg", "rev"],
+        ),
+        (
+            r#"svn = "https://example.test/demo", branch = "main""#,
+            &["svn", "branch"],
+        ),
+        (r#"url = "https://example.test/demo.tar.gz""#, &["url"]),
+    ];
+
+    for (table, unsupported_keys) in cases {
+        let error =
+            parse_pipfile_manifest(&format!("[packages]\ndemo = {{{table}}}\n")).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("Pipfile dependency demo"), "{message}");
+        assert!(message.contains("unsupported table keys"), "{message}");
+        assert!(message.contains("supported keys are"), "{message}");
+        for key in *unsupported_keys {
+            assert!(message.contains(key), "missing {key} in {message}");
+        }
+    }
+}
+
 #[test]
 fn canonicalizes_pep503_names_and_declared_requirements() {
     let dependency = dependency("My...Package___Name>=1");
@@ -191,6 +260,23 @@ fn poetry_direct_url_sets_source_url() {
         dependency.source_url.as_deref(),
         Some("https://example.test/demo.tar.gz")
     );
+}
+
+#[test]
+fn rejects_non_string_poetry_direct_source_fields() {
+    for field in ["path", "url", "git"] {
+        let error = parse_manifest(&format!(
+            "[tool.poetry.dependencies]\ndemo = {{ version = \"^1\", {field} = 123 }}\n"
+        ))
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("Poetry dependency demo {field} must be a string")),
+            "{error}"
+        );
+    }
 }
 
 #[test]

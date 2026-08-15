@@ -47,6 +47,24 @@ fn workspace_depth_only_exceeds_at_matching_directory_boundaries() {
     ));
 }
 
+#[test]
+fn workspace_patterns_detect_only_relevant_depth_boundary_descendants() {
+    let patterns = vec!["packages/*".to_owned()];
+
+    assert!(workspace_pattern_may_match_descendant(
+        &patterns,
+        Path::new("packages")
+    ));
+    assert!(!workspace_pattern_may_match_descendant(
+        &patterns,
+        Path::new("examples")
+    ));
+    assert!(!workspace_pattern_may_match_descendant(
+        &patterns,
+        Path::new("packages/app")
+    ));
+}
+
 #[cfg(unix)]
 #[test]
 fn rejects_symlinks() {

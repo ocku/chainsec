@@ -1,6 +1,5 @@
 use std::{
-    collections::HashSet,
-    io::Cursor,
+    io::{Cursor, Read},
     path::{Path, PathBuf},
 };
 
@@ -8,12 +7,13 @@ use zip::ZipArchive;
 
 use crate::{
     error::{Error, Result},
+    fetcher::budget::AcquisitionDeadline,
     model::EngineLimits,
 };
 
 use super::support::{
-    ExtractionStats, account_extracted_entry, create_extracted_directory, open_extraction_root,
-    reject_duplicate_path, safe_relative, write_extracted_file,
+    ExtractionStats, MaterializedPathKind, MaterializedPaths, account_extracted_bytes,
+    create_extracted_directory, normalize_relative, open_extraction_root, write_extracted_file,
 };
 
 const ARCHIVE_NAME: &str = "zip";
@@ -57,15 +57,18 @@ fn zip_error(message: impl Into<String>) -> Error {
     }
 }
 
-pub fn entry_count(bytes: &[u8]) -> Result<u64> {
+pub fn entry_count(bytes: &[u8], deadline: &AcquisitionDeadline) -> Result<u64> {
+    deadline.check()?;
     let eocd = find_eocd(bytes)?;
     let total_entries = eocd_entry_count(bytes, eocd);
 
-    if total_entries == u16::MAX {
-        zip64_entry_count(bytes, eocd)
+    let entries = if total_entries == u16::MAX {
+        zip64_entry_count(bytes, eocd)?
     } else {
-        Ok(u64::from(total_entries))
-    }
+        u64::from(total_entries)
+    };
+    deadline.check()?;
+    Ok(entries)
 }
 
 fn find_eocd(bytes: &[u8]) -> Result<usize> {
@@ -150,8 +153,12 @@ fn zip64_entry_count(bytes: &[u8], eocd: usize) -> Result<u64> {
     ))
 }
 
-pub fn preflight(bytes: &[u8], limits: &EngineLimits) -> Result<ExtractionStats> {
-    let entries = entry_count(bytes)?;
+pub fn preflight(
+    bytes: &[u8],
+    limits: &EngineLimits,
+    deadline: &AcquisitionDeadline,
+) -> Result<ExtractionStats> {
+    let entries = entry_count(bytes, deadline)?;
     if entries > limits.max_extracted_files {
         return Err(Error::LimitExceeded {
             resource: "extracted files".to_owned(),
@@ -162,33 +169,50 @@ pub fn preflight(bytes: &[u8], limits: &EngineLimits) -> Result<ExtractionStats>
     let mut archive = ZipArchive::new(Cursor::new(bytes))
         .map_err(|archive_error| zip_error(archive_error.to_string()))?;
     let mut stats = ExtractionStats::default();
-    let mut seen = HashSet::new();
+    let mut paths = MaterializedPaths::default();
     for index in 0..archive.len() {
+        deadline.check()?;
         let mut entry = archive
             .by_index(index)
             .map_err(|archive_error| zip_error(archive_error.to_string()))?;
-        validate_entry(&entry, &mut seen, limits.max_file_depth)?;
+        let path = validate_entry(&entry, limits.max_file_depth)?;
+        let path_kind = if entry.is_dir() {
+            MaterializedPathKind::Directory
+        } else {
+            MaterializedPathKind::File
+        };
+        paths.account(
+            &mut stats,
+            &path,
+            path_kind,
+            limits,
+            Path::new(ARCHIVE_NAME),
+        )?;
         let entry_size = entry.size();
-        account_extracted_entry(&mut stats, entry_size, limits)?;
-        verify_entry_size(&mut entry, entry_size)?;
+        account_extracted_bytes(&mut stats, entry_size, limits)?;
+        verify_entry_size(&mut entry, entry_size, deadline)?;
     }
+    deadline.check()?;
     Ok(stats)
 }
 
-pub fn extract(bytes: &[u8], destination: &Path, limits: &EngineLimits) -> Result<ExtractionStats> {
-    let stats = preflight(bytes, limits)?;
+pub fn extract(
+    bytes: &[u8],
+    destination: &Path,
+    limits: &EngineLimits,
+    deadline: &AcquisitionDeadline,
+) -> Result<ExtractionStats> {
+    let stats = preflight(bytes, limits, deadline)?;
     let root = open_extraction_root(destination)?;
     let mut archive = ZipArchive::new(Cursor::new(bytes))
         .map_err(|archive_error| zip_error(archive_error.to_string()))?;
 
     for index in 0..archive.len() {
+        deadline.check()?;
         let mut entry = archive
             .by_index(index)
             .map_err(|archive_error| zip_error(archive_error.to_string()))?;
-        let path = entry
-            .enclosed_name()
-            .ok_or_else(|| zip_error(format!("unsafe path {}", entry.name())))?
-            .to_owned();
+        let path = entry_path(&entry, limits.max_file_depth)?;
         let output = destination.join(&path);
         if entry.is_dir() {
             create_extracted_directory(&root, destination, &output)?;
@@ -201,28 +225,19 @@ pub fn extract(bytes: &[u8], destination: &Path, limits: &EngineLimits) -> Resul
                 destination,
                 &output,
                 Path::new(ARCHIVE_NAME),
+                deadline,
             )?;
         }
     }
+    deadline.check()?;
     Ok(stats)
 }
 
 fn validate_entry(
     entry: &zip::read::ZipFile<'_, Cursor<&[u8]>>,
-    seen: &mut HashSet<PathBuf>,
     max_file_depth: usize,
 ) -> Result<PathBuf> {
-    let path = entry
-        .enclosed_name()
-        .ok_or_else(|| zip_error(format!("unsafe path {}", entry.name())))?
-        .to_owned();
-    if !safe_relative(&path, max_file_depth) {
-        return Err(zip_error(format!(
-            "unsafe or excessively deep path {}",
-            path.display()
-        )));
-    }
-    reject_duplicate_path(seen, &path, Path::new(ARCHIVE_NAME))?;
+    let path = entry_path(entry, max_file_depth)?;
     if let Some(mode) = entry.unix_mode() {
         let file_type = mode & UNIX_FILE_TYPE_MASK;
         if file_type == UNIX_SYMLINK_TYPE {
@@ -241,18 +256,68 @@ fn validate_entry(
     Ok(path)
 }
 
+fn entry_path(
+    entry: &zip::read::ZipFile<'_, Cursor<&[u8]>>,
+    max_file_depth: usize,
+) -> Result<PathBuf> {
+    let path = entry
+        .enclosed_name()
+        .ok_or_else(|| zip_error(format!("unsafe path {}", entry.name())))?;
+    normalize_relative(&path, max_file_depth).ok_or_else(|| {
+        zip_error(format!(
+            "unsafe or excessively deep path {}",
+            path.display()
+        ))
+    })
+}
+
 fn verify_entry_size(
     entry: &mut zip::read::ZipFile<'_, Cursor<&[u8]>>,
     expected_size: u64,
+    deadline: &AcquisitionDeadline,
 ) -> Result<()> {
-    let copied =
-        std::io::copy(entry, &mut std::io::sink()).map_err(|error| zip_error(error.to_string()))?;
-    if copied == expected_size {
-        Ok(())
-    } else {
-        Err(zip_error(format!(
+    let mut copied = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    while copied < expected_size {
+        deadline.check()?;
+        let remaining = expected_size - copied;
+        let maximum = usize::try_from(remaining)
+            .unwrap_or(usize::MAX)
+            .min(buffer.len());
+        let read = entry
+            .read(&mut buffer[..maximum])
+            .map_err(|error| zip_error(error.to_string()))?;
+        if read == 0 {
+            break;
+        }
+        copied += read as u64;
+    }
+    if copied != expected_size {
+        return Err(zip_error(format!(
             "archive entry {} has {copied} bytes, expected {expected_size}",
             entry.name()
-        )))
+        )));
     }
+
+    deadline.check()?;
+    let mut extra = [0];
+    if entry
+        .read(&mut extra)
+        .map_err(|error| zip_error(error.to_string()))?
+        == 0
+    {
+        return Ok(());
+    }
+
+    let message = match expected_size.checked_add(1) {
+        Some(minimum_size) => format!(
+            "archive entry {} has at least {minimum_size} bytes, expected {expected_size}",
+            entry.name()
+        ),
+        None => format!(
+            "archive entry {} has more than {expected_size} bytes",
+            entry.name()
+        ),
+    };
+    Err(zip_error(message))
 }

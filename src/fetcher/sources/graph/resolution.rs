@@ -9,7 +9,12 @@ pub(super) fn module_extension(url: &Url) -> &str {
     Path::new(url.path())
         .extension()
         .and_then(|value| value.to_str())
-        .filter(|value| matches!(*value, "js" | "mjs" | "cjs" | "ts" | "mts" | "cts"))
+        .filter(|value| {
+            matches!(
+                *value,
+                "js" | "mjs" | "cjs" | "jsx" | "ts" | "mts" | "cts" | "tsx"
+            )
+        })
         .unwrap_or("ts")
 }
 
@@ -44,6 +49,7 @@ where
     F: FnMut(Url) -> Result<()>,
 {
     let language = match extension {
+        "jsx" | "tsx" => tree_sitter_typescript::LANGUAGE_TSX.into(),
         "ts" | "mts" | "cts" => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
         _ => tree_sitter_javascript::LANGUAGE.into(),
     };

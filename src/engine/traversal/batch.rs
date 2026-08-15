@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use futures::{StreamExt, stream};
 
@@ -17,9 +20,9 @@ use super::{
         },
     },
     state::{
-        BatchTraversal, DiscoveredPackage, FetchKey, FetchRequest, MAX_CONCURRENT_FETCHES, ScanKey,
-        canonicalize_root, limit_fetch_requests, pending_from_fetch,
-        push_batch_package_limit_issue,
+        AcquisitionDecision, BatchTraversal, DiscoveredPackage, FetchKey, FetchRequest, ScanKey,
+        canonicalize_root, merge_fetch_requests, pending_from_fetch,
+        push_batch_package_limit_issue, push_package_limit_issue,
     },
 };
 
@@ -126,12 +129,7 @@ impl Engine<'_> {
             }
         }
 
-        Some(limit_fetch_requests(
-            requests,
-            &mut batch.report,
-            batch.traversal.visited_count(),
-            self.limits.max_packages,
-        ))
+        Some(merge_fetch_requests(requests))
     }
 
     fn finish_batch_reports(
@@ -203,8 +201,14 @@ impl Engine<'_> {
             std::result::Result<FetchMetadata, crate::model::OperationalIssue>,
         >,
     ) -> Vec<BatchFetchGroup> {
-        let mut grouped = Vec::new();
-        let mut group_indices = HashMap::new();
+        let mut grouped = Vec::<BatchFetchGroup>::new();
+        let mut group_indices = HashMap::<FetchKey, usize>::new();
+        let mut root_keys = vec![HashSet::<FetchKey>::new(); traversals.len()];
+        let mut root_limit_reported = vec![false; traversals.len()];
+        let mut revisited_requests = Vec::<(usize, FetchKey, FetchRequest)>::new();
+        let mut revisited_request_indices = HashMap::<(usize, FetchKey), usize>::new();
+        let mut fetched_requests = Vec::<(usize, FetchKey, FetchRequest)>::new();
+        let mut fetched_request_indices = HashMap::<(usize, FetchKey), usize>::new();
 
         for (root_index, requests) in requests_by_root.into_iter().enumerate() {
             for request in requests {
@@ -225,9 +229,55 @@ impl Engine<'_> {
                     }
                 };
                 let key = FetchKey::new(&request, &prepared);
+                let owner_key = (root_index, key.clone());
 
-                if let Some(result) = fetched.get(&key) {
-                    self.apply_batch_fetch_result(root_index, &request, result, traversals);
+                if let Some(index) = revisited_request_indices.get(&owner_key).copied() {
+                    revisited_requests[index]
+                        .2
+                        .contexts
+                        .extend(request.contexts);
+                    continue;
+                }
+
+                if root_keys[root_index].insert(key.clone()) {
+                    if traversals[root_index]
+                        .traversal
+                        .pending_for_revisited_acquisition(&key, &request)
+                        .is_some()
+                    {
+                        revisited_request_indices.insert(owner_key, revisited_requests.len());
+                        revisited_requests.push((root_index, key, request));
+                        continue;
+                    }
+                    match traversals[root_index]
+                        .traversal
+                        .reserve_acquisition(key.clone(), self.limits.max_packages)
+                    {
+                        AcquisitionDecision::Revisited => continue,
+                        AcquisitionDecision::Reserved => {}
+                        AcquisitionDecision::LimitExceeded => {
+                            root_keys[root_index].remove(&key);
+                            if !root_limit_reported[root_index] {
+                                push_package_limit_issue(
+                                    &mut traversals[root_index].report,
+                                    request.declared_package_id.clone(),
+                                    self.limits.max_packages as u64,
+                                );
+                                root_limit_reported[root_index] = true;
+                            }
+                            continue;
+                        }
+                    }
+                }
+
+                if fetched.contains_key(&key) {
+                    let owner_key = (root_index, key.clone());
+                    if let Some(index) = fetched_request_indices.get(&owner_key).copied() {
+                        fetched_requests[index].2.contexts.extend(request.contexts);
+                    } else {
+                        fetched_request_indices.insert(owner_key, fetched_requests.len());
+                        fetched_requests.push((root_index, key, request));
+                    }
                     continue;
                 }
 
@@ -235,8 +285,32 @@ impl Engine<'_> {
                     grouped.push((key, Vec::new()));
                     grouped.len() - 1
                 });
-                grouped[group_index].1.push((root_index, request, prepared));
+                if let Some((_, existing, _)) = grouped[group_index]
+                    .1
+                    .iter_mut()
+                    .find(|(owner_root, _, _)| *owner_root == root_index)
+                {
+                    existing.contexts.extend(request.contexts);
+                } else {
+                    grouped[group_index].1.push((root_index, request, prepared));
+                }
             }
+        }
+
+        for (root_index, key, request) in revisited_requests {
+            if let Some(pending) = traversals[root_index]
+                .traversal
+                .pending_for_revisited_acquisition(&key, &request)
+            {
+                traversals[root_index].traversal.enqueue([pending]);
+            }
+        }
+
+        for (root_index, key, request) in fetched_requests {
+            let result = fetched
+                .get(&key)
+                .expect("cached batch fetch result must exist");
+            self.apply_batch_fetch_result(root_index, &key, &request, result, traversals);
         }
 
         grouped
@@ -270,7 +344,7 @@ impl Engine<'_> {
                     .map_err(|error| operational_issue(error, Some(dependency_id), "fetch", false));
                 (key, owners, result)
             })
-            .buffered(MAX_CONCURRENT_FETCHES)
+            .buffered(self.max_analysis_threads)
             .collect()
             .await
     }
@@ -286,7 +360,7 @@ impl Engine<'_> {
     ) {
         for (key, owners, result) in results {
             for (root_index, request, _) in &owners {
-                self.apply_batch_fetch_result(*root_index, request, &result, traversals);
+                self.apply_batch_fetch_result(*root_index, &key, request, &result, traversals);
             }
             fetched.insert(key, result);
         }
@@ -295,14 +369,20 @@ impl Engine<'_> {
     fn apply_batch_fetch_result(
         &self,
         root_index: usize,
+        key: &FetchKey,
         request: &FetchRequest,
         result: &std::result::Result<FetchMetadata, crate::model::OperationalIssue>,
         traversals: &mut [BatchTraversal],
     ) {
         match result {
-            Ok(metadata) => traversals[root_index]
-                .traversal
-                .enqueue([pending_from_fetch(request, metadata.clone())]),
+            Ok(metadata) => {
+                traversals[root_index]
+                    .traversal
+                    .record_successful_acquisition(key.clone(), metadata.clone());
+                traversals[root_index]
+                    .traversal
+                    .enqueue([pending_from_fetch(request, metadata.clone())]);
+            }
             Err(issue) => traversals[root_index].report.issues.push(issue.clone()),
         }
     }

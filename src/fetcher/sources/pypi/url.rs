@@ -57,24 +57,17 @@ impl SourceFetcher {
 
     pub(super) fn require_pypi_artifact_url(
         &self,
-        dependency: &Dependency,
+        _dependency: &Dependency,
         url: Url,
     ) -> Result<Url> {
-        if self
+        if !self
             .policy
             .repositories
             .pypi_artifact_url_is_permitted(&url)
         {
-            Ok(url)
-        } else {
-            Err(resolution_error(
-                dependency,
-                format!(
-                    "PyPI artifact URL {url} is outside the configured artifact base {}",
-                    self.policy.repositories.pypi_artifact_base_url()
-                ),
-            ))
+            self.check_url_policy(&url, false)?;
         }
+        Ok(url)
     }
 
     pub(super) async fn pypi_metadata_with_budget(

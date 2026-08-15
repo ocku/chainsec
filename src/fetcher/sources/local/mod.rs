@@ -63,12 +63,13 @@ impl SourceFetcher {
         }
 
         budget.check()?;
+        let package_id = dependency.local_source_id(&source);
         let source = self.snapshot_local_dependency(&source, &declaring_root, budget)?;
         budget.check()?;
 
         Ok(FetchMetadata {
             source,
-            package_id: dependency.id(),
+            package_id,
             resolved_version: dependency
                 .resolved_version
                 .clone()
@@ -217,6 +218,7 @@ fn copy_local_directory(
                         &child_path,
                         &mut stats,
                         limits,
+                        budget,
                     )?;
                 }
                 Err(error) => {
@@ -238,6 +240,7 @@ fn copy_local_file(
     source_path: &Path,
     stats: &mut ExtractionStats,
     limits: &crate::model::EngineLimits,
+    budget: &NetworkBudget,
 ) -> Result<()> {
     let mut input = source
         .open_file_no_follow(name)
@@ -278,6 +281,7 @@ fn copy_local_file(
     let mut buffer = vec![0; 64 * 1024];
     let mut remaining_bytes = remaining_bytes;
     loop {
+        budget.check()?;
         if remaining_bytes == 0 {
             let mut extra = [0];
             if input.read(&mut extra).map_err(|source_error| Error::Io {
@@ -315,6 +319,7 @@ fn copy_local_file(
                 path: source_path.to_owned(),
                 source: source_error,
             })?;
+        budget.check()?;
     }
     Ok(())
 }
@@ -338,10 +343,16 @@ fn local_dependency_path(dependency: &Dependency) -> Result<PathBuf> {
         });
     }
 
-    Ok(PathBuf::from(
-        dependency
-            .requirement
-            .strip_prefix("file:")
-            .unwrap_or(&dependency.requirement),
-    ))
+    let requirement = dependency.requirement.as_str();
+    if requirement.starts_with("workspace:") {
+        return Err(Error::Resolution {
+            package: dependency.id(),
+            message: "workspace dependency does not identify a local filesystem path".to_owned(),
+        });
+    }
+    let path = ["file:", "link:", "portal:"]
+        .into_iter()
+        .find_map(|prefix| requirement.strip_prefix(prefix))
+        .unwrap_or(requirement);
+    Ok(PathBuf::from(path))
 }

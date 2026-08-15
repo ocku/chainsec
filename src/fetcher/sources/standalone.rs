@@ -7,9 +7,9 @@ use crate::{
 
 use crate::fetcher::{
     Acquisition, FetchRequest, SourceFetcher,
-    archive::{extract, single_root_or_self},
-    cache::write_cached_artifact,
-    integrity::verify_integrity_digest,
+    archive::{extract_before, single_root_or_self_before},
+    cache::{CachePublication, write_cached_artifact_before},
+    integrity::verify_integrity_digest_before,
 };
 
 impl SourceFetcher {
@@ -31,26 +31,30 @@ impl SourceFetcher {
                     .await?
             }
         };
-        let digest = verify_integrity_digest(
+        let deadline = budget.deadline_guard();
+        let digest = verify_integrity_digest_before(
             &bytes,
             dependency.integrity.as_deref(),
             request.url.as_str(),
+            &deadline,
         )?;
-        write_cached_artifact(temporary, &bytes)?;
+        write_cached_artifact_before(temporary, &bytes, &deadline)?;
         let source = self.create_workspace_subdirectory(
             temporary,
             Path::new("source"),
             "create extraction directory",
         )?;
-        extract(&bytes, request.url.path(), &source, &self.limits)?;
-        let package_root = single_root_or_self(&source)?;
-        self.publish(
+        extract_before(&bytes, request.url.path(), &source, &self.limits, &deadline)?;
+        let package_root = single_root_or_self_before(&source, &deadline)?;
+        self.publish_with_effective_source_url(CachePublication {
             dependency,
             acquisition,
-            request.url,
+            source_url: request.url,
+            effective_source_url: None,
             digest,
             temporary,
-            &package_root,
-        )
+            source_directory: &package_root,
+            deadline: &deadline,
+        })
     }
 }

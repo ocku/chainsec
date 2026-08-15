@@ -82,6 +82,14 @@ fn workspace_traversal_respects_configured_limits() {
         max_package_depth: 1,
         ..EngineLimits::default()
     };
+    fs::write(&package, r#"{"workspaces":["packages/*"]}"#).unwrap();
+    let depth_error = workspace_members(&root, &package, &depth_limits).unwrap_err();
+    assert!(matches!(
+        depth_error,
+        crate::error::Error::LimitExceeded { ref resource, .. } if resource == "workspace depth"
+    ));
+
+    fs::write(&package, r#"{"workspaces":["examples/*"]}"#).unwrap();
     let members = workspace_members(&root, &package, &depth_limits).unwrap();
     assert!(members.is_empty());
 

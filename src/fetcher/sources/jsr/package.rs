@@ -1,17 +1,18 @@
 use std::{
+    collections::{BTreeMap, btree_map::Entry},
     io::{Read, Write},
     path::{Component, Path, PathBuf},
 };
 
-use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::fetcher::{
     SourceFetcher,
     archive::{ExtractionStats, account_extracted_entry, safe_relative},
-    cache::{is_unsafe_cache_open_error, write_cached_artifact},
+    budget::AcquisitionDeadline,
+    cache::{is_unsafe_cache_open_error, write_cached_artifact_before},
     filesystem::TrustedDir,
-    integrity::{verify_integrity, verify_jsr_checksum},
+    integrity::{verify_integrity_digest_before, verify_jsr_checksum_before},
 };
 use crate::{
     error::{Error, Result},
@@ -41,6 +42,8 @@ impl SourceFetcher {
         expected: Option<&str>,
         network_budget: &mut crate::fetcher::network::NetworkBudget,
     ) -> Result<(PathBuf, String, ExtractionStats, Url)> {
+        let deadline = network_budget.deadline_guard();
+        deadline.check()?;
         let repository_base = self
             .policy
             .repositories
@@ -53,15 +56,21 @@ impl SourceFetcher {
                 network_budget,
             )
             .await?;
-        verify_integrity(&metadata_bytes, expected, effective_metadata_url.as_str())?;
-        write_cached_artifact(temporary, &metadata_bytes)?;
+        let digest = verify_integrity_digest_before(
+            &metadata_bytes,
+            expected,
+            effective_metadata_url.as_str(),
+            &deadline,
+        )?;
         let metadata: JsrVersionMetadata =
             serde_json::from_slice(&metadata_bytes).map_err(|error| Error::Fetch {
                 package: "jsr package".to_owned(),
                 source_url: crate::fetcher::network::diagnostic_url(&effective_metadata_url),
                 message: format!("invalid JSR version metadata: {error}"),
             })?;
-        check_manifest_limits(&metadata, &self.limits)?;
+        deadline.check()?;
+        let stats = preflight_manifest(&metadata, &self.limits, &deadline)?;
+        write_cached_artifact_before(temporary, &metadata_bytes, &deadline)?;
 
         let source = temporary.join("source");
         let temporary_root = TrustedDir::open(temporary).map_err(|source_error| Error::Io {
@@ -84,22 +93,28 @@ impl SourceFetcher {
                 source: source_error,
             })?;
         let file_base_url = jsr_file_base_url(&effective_metadata_url)?;
-        let mut stats = ExtractionStats::default();
         for (manifest_path, entry) in metadata.manifest {
+            deadline.check()?;
             let relative = jsr_manifest_path(&manifest_path, self.limits.max_file_depth)?;
             let file_url = jsr_file_url(&file_base_url, relative)?;
             let bytes = self
                 .download_with_budget_from_repository(&file_url, &repository_base, network_budget)
                 .await?;
 
-            verify_jsr_file(&bytes, &entry, &file_url)?;
-            account_extracted_entry(&mut stats, bytes.len() as u64, &self.limits)?;
-            write_jsr_file(&source_root, relative, &source.join(relative), &bytes)?;
+            verify_jsr_file_before(&bytes, &entry, &file_url, &deadline)?;
+            write_jsr_file_before(
+                &source_root,
+                relative,
+                &source.join(relative),
+                &bytes,
+                &deadline,
+            )?;
         }
-        let digest = format!("sha256:{}", hex::encode(Sha256::digest(&metadata_bytes)));
+        deadline.check()?;
         Ok((source, digest, stats, effective_metadata_url))
     }
 
+    #[cfg(test)]
     pub(in crate::fetcher) fn rebuild_cached_jsr_package(
         &self,
         metadata_url: &Url,
@@ -108,15 +123,41 @@ impl SourceFetcher {
         metadata_bytes: &[u8],
         cached_source: &Path,
     ) -> Result<(PathBuf, String, ExtractionStats)> {
-        verify_integrity(metadata_bytes, expected, metadata_url.as_str())?;
+        let deadline = self.network_budget().deadline_guard();
+        self.rebuild_cached_jsr_package_before(
+            metadata_url,
+            temporary,
+            expected,
+            metadata_bytes,
+            cached_source,
+            &deadline,
+        )
+    }
+
+    pub(in crate::fetcher) fn rebuild_cached_jsr_package_before(
+        &self,
+        metadata_url: &Url,
+        temporary: &Path,
+        expected: Option<&str>,
+        metadata_bytes: &[u8],
+        cached_source: &Path,
+        deadline: &AcquisitionDeadline,
+    ) -> Result<(PathBuf, String, ExtractionStats)> {
+        let digest = verify_integrity_digest_before(
+            metadata_bytes,
+            expected,
+            metadata_url.as_str(),
+            deadline,
+        )?;
         let metadata: JsrVersionMetadata =
             serde_json::from_slice(metadata_bytes).map_err(|error| Error::Fetch {
                 package: "jsr package".to_owned(),
                 source_url: metadata_url.to_string(),
                 message: format!("invalid cached JSR version metadata: {error}"),
             })?;
-        check_manifest_limits(&metadata, &self.limits)?;
-        write_cached_artifact(temporary, metadata_bytes)?;
+        deadline.check()?;
+        let stats = preflight_manifest(&metadata, &self.limits, deadline)?;
+        write_cached_artifact_before(temporary, metadata_bytes, deadline)?;
 
         let source = temporary.join("source");
         let temporary_root = TrustedDir::open(temporary).map_err(|source_error| Error::Io {
@@ -140,44 +181,103 @@ impl SourceFetcher {
             })?;
         let cached_root = open_cached_jsr_directory(cached_source)?;
         let file_base_url = jsr_file_base_url(metadata_url)?;
-        let mut stats = ExtractionStats::default();
         for (manifest_path, entry) in metadata.manifest {
+            deadline.check()?;
             let relative = jsr_manifest_path(&manifest_path, self.limits.max_file_depth)?;
             let file_url = jsr_file_url(&file_base_url, relative)?;
-            let bytes = read_cached_jsr_file(&cached_root, cached_source, relative, entry.size)?;
+            let bytes = read_cached_jsr_file_before(
+                &cached_root,
+                cached_source,
+                relative,
+                entry.size,
+                deadline,
+            )?;
 
-            verify_jsr_file(&bytes, &entry, &file_url)?;
-            account_extracted_entry(&mut stats, bytes.len() as u64, &self.limits)?;
-            write_jsr_file(&source_root, relative, &source.join(relative), &bytes)?;
+            verify_jsr_file_before(&bytes, &entry, &file_url, deadline)?;
+            write_jsr_file_before(
+                &source_root,
+                relative,
+                &source.join(relative),
+                &bytes,
+                deadline,
+            )?;
         }
-        let digest = format!("sha256:{}", hex::encode(Sha256::digest(metadata_bytes)));
+        deadline.check()?;
         Ok((source, digest, stats))
     }
 }
 
-fn check_manifest_limits(metadata: &JsrVersionMetadata, limits: &EngineLimits) -> Result<()> {
-    let declared_bytes = metadata
-        .manifest
-        .values()
-        .try_fold(0u64, |total, entry| total.checked_add(entry.size))
-        .ok_or_else(|| Error::LimitExceeded {
-            resource: "JSR package bytes".to_owned(),
-            limit: limits.max_extracted_size,
-        })?;
+fn preflight_manifest(
+    metadata: &JsrVersionMetadata,
+    limits: &EngineLimits,
+    deadline: &AcquisitionDeadline,
+) -> Result<ExtractionStats> {
+    let mut stats = ExtractionStats::default();
+    let mut paths = BTreeMap::new();
+    for (manifest_path, entry) in &metadata.manifest {
+        deadline.check()?;
+        let relative = jsr_manifest_path(manifest_path, limits.max_file_depth)?;
+        let components = relative.iter().collect::<Vec<_>>();
+        let mut ancestor = PathBuf::new();
+        for component in components.iter().take(components.len().saturating_sub(1)) {
+            ancestor.push(component);
+            account_manifest_path(
+                &mut paths,
+                &mut stats,
+                &ancestor,
+                JsrPathKind::Directory,
+                limits,
+            )?;
+        }
+        account_manifest_path(
+            &mut paths,
+            &mut stats,
+            relative,
+            JsrPathKind::File(entry.size),
+            limits,
+        )?;
+    }
+    deadline.check()?;
+    Ok(stats)
+}
 
-    if metadata.manifest.len() as u64 > limits.max_extracted_files {
-        return Err(Error::LimitExceeded {
-            resource: "JSR package files".to_owned(),
-            limit: limits.max_extracted_files,
-        });
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum JsrPathKind {
+    File(u64),
+    Directory,
+}
+
+fn account_manifest_path(
+    paths: &mut BTreeMap<PathBuf, JsrPathKind>,
+    stats: &mut ExtractionStats,
+    path: &Path,
+    kind: JsrPathKind,
+    limits: &EngineLimits,
+) -> Result<()> {
+    match paths.entry(path.to_owned()) {
+        Entry::Vacant(entry) => {
+            entry.insert(kind);
+            let size = match kind {
+                JsrPathKind::File(size) => size,
+                JsrPathKind::Directory => 0,
+            };
+            account_extracted_entry(stats, size, limits)
+        }
+        Entry::Occupied(entry) if entry.get() == &kind && kind == JsrPathKind::Directory => Ok(()),
+        Entry::Occupied(entry) => {
+            let message = if matches!(entry.get(), JsrPathKind::File(_))
+                && matches!(kind, JsrPathKind::File(_))
+            {
+                format!("duplicate path {}", path.display())
+            } else {
+                format!("path type conflict at {}", path.display())
+            };
+            Err(Error::Extraction {
+                archive: PathBuf::from("JSR package"),
+                message,
+            })
+        }
     }
-    if declared_bytes > limits.max_extracted_size {
-        return Err(Error::LimitExceeded {
-            resource: "JSR package bytes".to_owned(),
-            limit: limits.max_extracted_size,
-        });
-    }
-    Ok(())
 }
 
 fn jsr_file_base_url(metadata_url: &Url) -> Result<Url> {
@@ -246,7 +346,13 @@ fn jsr_file_url(base_url: &Url, relative: &Path) -> Result<Url> {
     Ok(file_url)
 }
 
-fn verify_jsr_file(bytes: &[u8], entry: &JsrManifestEntry, file_url: &Url) -> Result<()> {
+fn verify_jsr_file_before(
+    bytes: &[u8],
+    entry: &JsrManifestEntry,
+    file_url: &Url,
+    deadline: &AcquisitionDeadline,
+) -> Result<()> {
+    deadline.check()?;
     if bytes.len() as u64 != entry.size {
         return Err(Error::Fetch {
             package: "jsr package".to_owned(),
@@ -258,7 +364,7 @@ fn verify_jsr_file(bytes: &[u8], entry: &JsrManifestEntry, file_url: &Url) -> Re
             ),
         });
     }
-    verify_jsr_checksum(bytes, &entry.checksum, file_url.as_str())
+    verify_jsr_checksum_before(bytes, &entry.checksum, file_url.as_str(), deadline)
 }
 
 fn open_cached_jsr_directory(source: &Path) -> Result<TrustedDir> {
@@ -281,12 +387,29 @@ fn open_cached_jsr_directory(source: &Path) -> Result<TrustedDir> {
     })
 }
 
+#[cfg(test)]
 pub(super) fn read_cached_jsr_file(
     source: &TrustedDir,
     source_path: &Path,
     relative: &Path,
     expected_size: u64,
 ) -> Result<Vec<u8>> {
+    let deadline = crate::fetcher::budget::AcquisitionBudget::new(
+        std::time::Duration::from_secs(3_600),
+        u64::MAX,
+    )
+    .deadline_guard();
+    read_cached_jsr_file_before(source, source_path, relative, expected_size, &deadline)
+}
+
+fn read_cached_jsr_file_before(
+    source: &TrustedDir,
+    source_path: &Path,
+    relative: &Path,
+    expected_size: u64,
+    deadline: &AcquisitionDeadline,
+) -> Result<Vec<u8>> {
+    deadline.check()?;
     let path = source_path.join(relative);
     let file = source.open_file_no_follow(relative).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound || is_unsafe_cache_open_error(&error) {
@@ -317,13 +440,21 @@ pub(super) fn read_cached_jsr_file(
         });
     }
     let mut bytes = Vec::with_capacity(usize::try_from(expected_size).unwrap_or(0));
-    file.take(expected_size.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|source| Error::Io {
+    let mut reader = file.take(expected_size.saturating_add(1));
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        deadline.check()?;
+        let read = reader.read(&mut buffer).map_err(|source| Error::Io {
             operation: "read cached JSR file".to_owned(),
             path: path.clone(),
             source,
         })?;
+        if read == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buffer[..read]);
+    }
+    deadline.check()?;
     if bytes.len() as u64 != expected_size {
         return Err(Error::Policy {
             operation: "cache validation".to_owned(),
@@ -333,15 +464,26 @@ pub(super) fn read_cached_jsr_file(
     Ok(bytes)
 }
 
-fn write_jsr_file(root: &TrustedDir, relative: &Path, output: &Path, bytes: &[u8]) -> Result<()> {
+fn write_jsr_file_before(
+    root: &TrustedDir,
+    relative: &Path,
+    output: &Path,
+    bytes: &[u8],
+    deadline: &AcquisitionDeadline,
+) -> Result<()> {
+    deadline.check()?;
     let mut file = root.create_new_file(relative).map_err(|source| Error::Io {
         operation: "create JSR source file".to_owned(),
         path: output.to_owned(),
         source,
     })?;
-    file.write_all(bytes).map_err(|source| Error::Io {
-        operation: "write JSR source file".to_owned(),
-        path: output.to_owned(),
-        source,
-    })
+    for chunk in bytes.chunks(64 * 1024) {
+        deadline.check()?;
+        file.write_all(chunk).map_err(|source| Error::Io {
+            operation: "write JSR source file".to_owned(),
+            path: output.to_owned(),
+            source,
+        })?;
+    }
+    deadline.check()
 }

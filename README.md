@@ -1,6 +1,6 @@
 # chainsec
 
-`chainsec` is a recursive static source scanner for Python, JavaScript, and TypeScript projects. It discovers dependency declarations, enriches them from supported lockfiles, safely acquires verified source artifacts, scans source with versioned Tree-sitter rules, and emits JSON, SARIF, or terminal reports.
+`chainsec` is a dependency chain supply auditing tool for Python, JavaScript, and TypeScript projects. It discovers dependency declarations, enriches them from supported lockfiles, safely acquires verified source artifacts, scans source with versioned Tree-sitter rules, and emits JSON, SARIF, or terminal reports. It can also be used as a CI component with documented exit codes.
 
 Package source is parsed, never installed or executed. Acquisition and extraction are implemented in Rust; `chainsec` does not launch `python`, package managers, Git, shell commands, or archive executables.
 
@@ -25,7 +25,7 @@ Package source is parsed, never installed or executed. Acquisition and extractio
 - **Lockfile-aware resolution** — enriches declarations from Poetry, Pipfile, uv, PDM, npm/Yarn/pnpm, and Deno lockfiles so dependencies are identified by exact version and integrity, not by name alone.
 - **Tree-sitter precision** — parses source into concrete syntax trees and runs versioned queries, so `eval(...)` is matched as a call expression rather than the letters "eval" appearing anywhere in text.
 - **Safe by default** — network is off unless you opt in, nothing is installed or executed, and acquisition/extraction are confined and bounded.
-- **Multiple report formats** — a human-readable terminal report by default, plus JSON (schema-versioned) and SARIF for automation, with documented CI exit codes.
+- **Multiple report formats** — a human-readable terminal report by default, plus JSON (schema-versioned) and SARIF for automation and CI integration.
 - **Extensible rules** — a versioned built-in catalog plus custom JSON/YAML rule packs and per-rule ignore selectors.
 
 ## What it scans for, and how
@@ -51,16 +51,31 @@ How it works: Tree-sitter acts as a scalpel. Instead of blunt regex or substring
 
 ```mermaid
 graph TD
-    A[Project root] --> B[Scan source + discover manifests]
-    B --> C[Resolve dependencies from lockfiles]
-    C --> D{Network needed?}
-    D -->|No| E[Scan local source only]
-    D -->|Yes, with online mode + allowed host| F[Fetch verified source artifacts]
-    F --> G[Verify integrity + safe extraction]
-    E --> H[Parse with Tree-sitter + run versioned rules]
-    G --> H
-    H --> I[Emit JSON / SARIF / human report]
-    I --> J[Exit code by finding threshold]
+    CLI["app/ CLI + config"] -->|scan target| Engine
+
+    Engine["engine/ traversal"] -->|discover| Manifests
+    Engine -->|acquire| Fetcher
+    Engine -->|scan source| Scanner
+    Engine -->|build report| Reporting["engine/ reporting"]
+
+    Manifests["manifests/ discovery + lockfiles"] -->|resolved deps| Engine
+    Manifests -->|lockfile data| Fetcher
+
+    Fetcher["fetcher/ network + integrity + cache"] -->|extracted source| Engine
+
+    Scanner["scanner/ Tree-sitter + file checks"] -->|findings| Engine
+    Scanner -->|queries| Rules
+
+    Rules["rules/ built-in + capability catalog"] -->|compiled queries| Scanner
+
+    Model["model/ shared types"] -.-> Manifests
+    Model -.-> Fetcher
+    Model -.-> Scanner
+    Model -.-> Rules
+    Model -.-> Reporting
+
+    Reporting -->|report| Output["app/ output JSON / SARIF / human"]
+    Output --> Exit["exit code by threshold"]
 ```
 
 `chainsec` never installs or executes package code. Acquisition and extraction are implemented in Rust; it does not launch `python`, package managers, Git, shell commands, or archive executables. See [`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md) for the precise trust model.
@@ -122,14 +137,53 @@ Create a starter project configuration (and add the project cache to `.gitignore
 chainsec init
 ```
 
-Without a project `chainsec.toml`, ChainSec uses a centralized cache (`$XDG_CACHE_HOME/chainsec` or `$HOME/.cache/chainsec`) instead of creating `.chainsec-cache` in the current directory. Use `chainsec cache purge` to remove cached contents while retaining the cache directory and its internal lifecycle lock, or pass `--cache <dir>` to select one explicitly.
+Without a project `chainsec.toml`, ChainSec uses a centralized cache (`$XDG_CACHE_HOME/chainsec` or `$HOME/.cache/chainsec`) instead of creating `.chainsec-cache` in the current directory. Use `chainsec cache purge` to clear the regular directory it opens at the configured cache path while retaining the cache directory and sibling `<cache>.locks/lifecycle.lock`, or pass `--cache <dir>` to select one explicitly. An existing fetcher remains confined to its pinned open cache directory if that pathname is renamed or replaced; a later purge targets the directory it opens at the configured path. Locks coordinate only cooperating ChainSec processes.
+
+## GitHub Action
+
+`chainsec` ships a GitHub Action that diffs the latest releases of a remote package against your `chainsec.toml` policy:
+
+```yaml
+name: Dependency audit
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"  # every Monday at 06:00 UTC
+  workflow_dispatch:
+
+jobs:
+  chainsec:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ocku/chainsec@main
+        with:
+          package: npm:express
+          last: 2
+          max-package-depth: 2
+          allow-host: "registry.npmjs.org"
+```
+
+| Input | Required | Default | Description |
+| --- | --- | --- | --- |
+| `package` | yes | — | Package selector (`npm:express`, `pypi:urllib3`, `jsr:@std/fs`) |
+| `last` | no | `2` | Number of latest releases to compare (minimum 2) |
+| `max-package-depth` | no | `2` | Maximum dependency traversal depth |
+| `fail-on` | no | `high` | Finding threshold (`low`, `medium`, `high`, `critical`) |
+| `format` | no | `human` | Report format (`human`, `json`) |
+| `allow-host` | no | — | Space-separated additional hosts to allow |
+| `config-dir` | no | `.` | Directory containing `chainsec.toml` |
+| `cache` | no | `.chainsec-cache` | Cache directory for dependency source |
+| `threads` | no | `16` | Maximum concurrency for downloads and analysis |
+
+The action picks up `chainsec.toml` from `config-dir` and merges its `allowed_hosts`, `fail_on`, and other settings with the action inputs. Hosts configured in `chainsec.toml` are automatically allowed; use `allow-host` for hosts not already in configuration. See [`docs/GITHUB_ACTION.md`](docs/GITHUB_ACTION.md) for the full action reference.
 
 ## Example output
 
 A human report summarizes the findings that meet the failure threshold and lists unique capabilities and alerts. Use `--verbose` to include findings below `--fail-on`.
 
 ```text
-chainsec 0.4.0 — 3 package(s), 42 source file(s), 81920 source byte(s), 2 finding(s), 2 capability type(s), 0 issue(s)
+chainsec 0.5.0 — 3 package(s), 42 source file(s), 81920 source byte(s), 2 finding(s), 2 capability type(s), 0 issue(s)
 High python:chainsec.py.detection.dynamic-code-execution:ArbitraryCodeExecution [root] src/main.py:12:5 — eval(user_input)
 
 Summary
@@ -146,7 +200,8 @@ JSON reports use schema version `1.2.0` and include stable finding IDs, provenan
 ## Documentation
 
 - [Installation](docs/INSTALLATION.md)
-- [Configuration and CLI reference](docs/CONFIGURATION.md)
+- [Configuration and CLI/CI reference](docs/CONFIGURATION.md)
+- [GitHub Action](docs/GITHUB_ACTION.md)
 - [Dependency resolution and acquisition](docs/RESOLUTION.md)
 - [Rules, reports, and exit status](docs/RULES_AND_REPORTS.md)
 - [Heuristics and capability reference](docs/HEURISTICS.md)

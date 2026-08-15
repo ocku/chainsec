@@ -4,7 +4,7 @@ use node_semver::{Range as NpmRange, Version as NpmVersion};
 use serde_json::Value as JsonValue;
 
 use crate::manifests::{
-    npm::{github_archive_matches, local_source_url, matching_github_archive},
+    npm::{github_archive_matches, local_source_url_from_directory, matching_github_archive},
     shared::{
         github_archive, manifest_error, optional_json_string, parse_bounded_yaml_json, read,
         strip_url_fragment,
@@ -16,17 +16,29 @@ use crate::{
 };
 
 pub(super) fn enrich(path: &Path, dependencies: &mut [Dependency]) -> Result<()> {
+    let Some(directory) = path.parent() else {
+        return Ok(());
+    };
+    enrich_from_directory(path, directory, dependencies)
+}
+
+pub(super) fn enrich_from_directory(
+    path: &Path,
+    directory: &Path,
+    dependencies: &mut [Dependency],
+) -> Result<()> {
     let lockfile = lockfile_entries(path)?;
     for dependency in dependencies {
         let Some(entry) = find_entry(&lockfile, dependency) else {
             continue;
         };
-        enrich_dependency(dependency, entry, path);
+        enrich_dependency(dependency, entry, path, directory);
     }
     Ok(())
 }
 
 struct YarnLockfile {
+    berry: bool,
     entries: Vec<(String, JsonValue)>,
     selectors: HashMap<String, usize>,
 }
@@ -74,7 +86,11 @@ fn lockfile_entries(path: &Path) -> Result<YarnLockfile> {
             }
         }
     }
-    Ok(YarnLockfile { entries, selectors })
+    Ok(YarnLockfile {
+        berry,
+        entries,
+        selectors,
+    })
 }
 
 fn is_berry(text: &str) -> bool {
@@ -106,22 +122,30 @@ fn selectors_in_key(key: &str) -> impl Iterator<Item = &str> {
 fn find_entry<'a>(lockfile: &'a YarnLockfile, dependency: &Dependency) -> Option<&'a JsonValue> {
     let selector = dependency_selector(dependency);
     let berry_selector = format!("{}@npm:{}", dependency.name, dependency.requirement);
-    [selector, berry_selector].into_iter().find_map(|selector| {
-        let entry_index = *lockfile.selectors.get(&selector)?;
-        let (_, entry) = lockfile.entries.get(entry_index)?;
-        locked_alias_compatible(dependency, entry).then_some(entry)
-    })
+    [(selector, false), (berry_selector, true)]
+        .into_iter()
+        .find_map(|(selector, berry_registry_selector)| {
+            let entry_index = *lockfile.selectors.get(&selector)?;
+            let (_, entry) = lockfile.entries.get(entry_index)?;
+            locked_registry_compatible(dependency, entry, lockfile.berry, berry_registry_selector)
+                .then_some(entry)
+        })
 }
 
 fn dependency_selector(dependency: &Dependency) -> String {
     format!("{}@{}", dependency.name, dependency.requirement)
 }
 
-fn enrich_dependency(dependency: &mut Dependency, entry: &JsonValue, path: &Path) {
+fn enrich_dependency(
+    dependency: &mut Dependency,
+    entry: &JsonValue,
+    path: &Path,
+    directory: &Path,
+) {
     let resolved = entry.get("resolved").and_then(JsonValue::as_str);
     let resolution = entry.get("resolution").and_then(JsonValue::as_str);
     if let Some(reference) = local_resolution(resolved, resolution) {
-        let Some(source_url) = local_source_url(path, reference) else {
+        let Some(source_url) = local_source_url_from_directory(directory, reference) else {
             return;
         };
         dependency.resolved_version = entry
@@ -189,9 +213,19 @@ fn local_resolution<'a>(resolved: Option<&'a str>, resolution: Option<&'a str>) 
         })
 }
 
-fn locked_alias_compatible(dependency: &Dependency, entry: &JsonValue) -> bool {
+fn locked_registry_compatible(
+    dependency: &Dependency,
+    entry: &JsonValue,
+    berry: bool,
+    berry_registry_selector: bool,
+) -> bool {
     let Some(alias) = dependency.requirement.strip_prefix("npm:") else {
-        return true;
+        return locked_ordinary_registry_compatible(
+            dependency,
+            entry,
+            berry,
+            berry_registry_selector,
+        );
     };
     let Some((target, requirement)) = parse_alias(alias) else {
         return false;
@@ -222,7 +256,33 @@ fn locked_alias_compatible(dependency: &Dependency, entry: &JsonValue) -> bool {
                         })
                 })
         })
-        .unwrap_or(true)
+        .unwrap_or(!berry)
+}
+
+fn locked_ordinary_registry_compatible(
+    dependency: &Dependency,
+    entry: &JsonValue,
+    berry: bool,
+    berry_registry_selector: bool,
+) -> bool {
+    if !berry {
+        return true;
+    }
+    let Some((locked_name, locked_version)) = entry
+        .get("resolution")
+        .and_then(JsonValue::as_str)
+        .and_then(|resolution| resolution.rsplit_once("@npm:"))
+    else {
+        return !berry_registry_selector;
+    };
+    let Some(version) = entry.get("version").and_then(JsonValue::as_str) else {
+        return false;
+    };
+
+    locked_name == dependency.name
+        && NpmVersion::from_str(locked_version).is_ok_and(|locked_version| {
+            NpmVersion::from_str(version).is_ok_and(|version| locked_version == version)
+        })
 }
 
 fn parse_alias(alias: &str) -> Option<(&str, &str)> {

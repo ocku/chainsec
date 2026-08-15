@@ -36,11 +36,12 @@ impl CacheMetadata {
     }
 
     fn matches_source(&self, dependency: &Dependency) -> bool {
-        valid_source_url(&self.source_url)
-            && dependency
-                .source_url
-                .as_deref()
-                .is_none_or(|source_url| source_url == self.source_url)
+        let Some(source_url) = super::canonical_source_url(&self.source_url) else {
+            return false;
+        };
+        dependency.source_url.as_deref().is_none_or(|expected| {
+            super::canonical_source_url(expected).is_some_and(|expected| expected == source_url)
+        })
     }
 
     pub(super) fn new(dependency: &Dependency, source_url: &Url, digest: String) -> Self {
@@ -74,11 +75,4 @@ impl CacheMetadata {
             cache_hit,
         }
     }
-}
-
-fn valid_source_url(source_url: &str) -> bool {
-    !source_url.is_empty()
-        && Url::parse(source_url)
-            .ok()
-            .is_some_and(|url| matches!(url.scheme(), "http" | "https"))
 }

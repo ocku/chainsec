@@ -32,24 +32,26 @@
     },
     "limits": {
       "type": "object",
-      "required": ["max_package_depth", "max_packages", "max_network_requests", "max_redirect_hops", "max_acquisition_seconds", "max_archive_size", "max_extracted_size", "max_extracted_files", "max_file_depth", "max_source_file_size", "max_source_files", "max_findings", "max_scan_seconds", "fail_on_parse_error"],
+      "required": ["max_package_depth", "max_packages", "max_network_requests", "max_redirect_hops", "request_timeout_seconds", "max_acquisition_seconds", "max_archive_size", "max_extracted_size", "max_extracted_files", "max_file_depth", "max_manifest_file_size", "max_source_file_size", "max_source_files", "max_findings", "max_scan_seconds", "fail_on_parse_error"],
       "properties": {
         "max_package_depth": { "type": "integer", "minimum": 0 },
         "max_packages": { "type": "integer", "minimum": 0 },
         "max_network_requests": { "type": "integer", "minimum": 1 },
         "max_redirect_hops": { "type": "integer", "minimum": 0 },
+        "request_timeout_seconds": { "type": "integer", "minimum": 0 },
         "max_acquisition_seconds": { "type": "integer", "minimum": 0 },
         "max_archive_size": { "type": "integer", "minimum": 0 },
         "max_extracted_size": { "type": "integer", "minimum": 0 },
         "max_extracted_files": { "type": "integer", "minimum": 0 },
         "max_file_depth": { "type": "integer", "minimum": 0 },
+        "max_manifest_file_size": { "type": "integer", "minimum": 0 },
         "max_source_file_size": { "type": "integer", "minimum": 0 },
         "max_source_files": { "type": "integer", "minimum": 0 },
         "max_findings": { "type": "integer", "minimum": 0 },
         "max_scan_seconds": { "type": "integer", "minimum": 0 },
         "fail_on_parse_error": {
           "type": "boolean",
-          "description": "Whether recovered source syntax errors are marked fatal; analysis continues against the recovered syntax tree in either mode."
+          "description": "Whether recovered source syntax errors are recorded as fatal issues instead of only debug logs; analysis continues against the recovered syntax tree in either mode."
         }
       },
       "additionalProperties": false

@@ -71,6 +71,30 @@ fn enriches_development_dependency() {
 }
 
 #[test]
+fn modern_lock_accepts_exact_dist_tag_mappings() {
+    for tag in ["latest", "next"] {
+        let lockfile = format!(
+            r#"{{
+                "lockfileVersion":3,
+                "packages":{{
+                    "":{{"dependencies":{{"child":"{tag}"}}}},
+                    "node_modules/child":{{
+                        "version":"2.1.0",
+                        "resolved":"https://registry.example.test/child-2.1.0.tgz",
+                        "integrity":"sha512-child"
+                    }}
+                }}
+            }}"#
+        );
+        let (dependency, _) = enrich_fixture(&lockfile, "", "child", tag);
+
+        assert_eq!(dependency.resolved_version.as_deref(), Some("2.1.0"));
+        assert_eq!(dependency.integrity.as_deref(), Some("sha512-child"));
+        assert!(dependency.lockfile.is_some());
+    }
+}
+
+#[test]
 fn inherited_context_uses_its_importer_and_preserves_hoisted_lookup() {
     let lockfile = r#"{
         "lockfileVersion":3,

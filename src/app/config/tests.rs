@@ -3,6 +3,75 @@ use clap::{CommandFactory, FromArgMatches};
 use super::{apply, files::FileConfig};
 use crate::app::cli::{Cli, Command, RemoteSubcommand};
 
+const VERSION_0_4_GENERATED_CONFIG: &str = r#"# chainsec project configuration
+# See https://github.com/ocku/chainsec#project-configuration for all options.
+# Command-line options override values in this file.
+
+# Keep dependency traversal bounded. Set to 0 to scan only this project.
+max_depth = 3
+max_packages = 500
+
+# Network access remains disabled unless both options below are configured.
+# online = true
+# allowed_hosts = ["registry.npmjs.org", "pypi.org", "files.pythonhosted.org"]
+
+# Optional repository-manager endpoints. These replace only metadata lookup;
+# locked artifact URLs are still honored and integrity-checked. Credentials are
+# read only from explicitly named environment variables.
+# [artifactories.npm]
+# metadata_base_url = "https://packages.example/npm"
+#
+# [artifactories.npm.credential]
+# scope = "https://packages.example/"
+# bearer_token_env = "PACKAGE_REGISTRY_TOKEN"
+#
+# [artifactories.pypi]
+# metadata_base_url = "https://packages.example/pypi"
+
+# Ignore generated or test-only root-project paths. Dependencies are unaffected.
+ignored_paths = ["tests/**"]
+
+# Examples:
+# ignored_rules = ["network:*"]
+# ignored_packages = ["npm:legacy-package@1.2.3"]
+# fail_on = "high"
+#
+# [[suppressions]]
+# rule = "network:chainsec.detection.network-request.*"
+# package = "npm:telemetry-client@2.1.0"
+# reason = "Approved telemetry dependency; tracked in SEC-1234"
+"#;
+
+#[test]
+fn version_0_4_generated_configuration_loads() {
+    let config: FileConfig = toml::from_str(VERSION_0_4_GENERATED_CONFIG).unwrap();
+
+    assert_eq!(config.max_package_depth, Some(3));
+    assert_eq!(config.max_packages, Some(500));
+    assert_eq!(config.ignored_paths, Some(vec!["tests/**".to_owned()]));
+}
+
+#[test]
+fn version_0_4_limit_keys_map_to_current_fields_and_unknown_keys_remain_rejected() {
+    let config: FileConfig = toml::from_str(
+        r#"
+        max_depth = 7
+        max_archive_bytes = 11
+        max_extracted_bytes = 13
+        max_source_file_bytes = 17
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(config.max_package_depth, Some(7));
+    assert_eq!(config.max_archive_size, Some(11));
+    assert_eq!(config.max_extracted_size, Some(13));
+    assert_eq!(config.max_source_file_size, Some(17));
+
+    let error = toml::from_str::<FileConfig>("unknown_limit = 19").unwrap_err();
+    assert!(error.to_string().contains("unknown field `unknown_limit`"));
+}
+
 #[test]
 fn network_acquisition_limits_load_from_toml_unless_cli_overrides_them() {
     let matches = Cli::command()

@@ -98,3 +98,72 @@ fn npm_integrity_accepts_any_matching_digest_from_the_strongest_algorithm() {
         correct
     );
 }
+
+#[test]
+fn digest_verification_distinguishes_sha256_sha512_and_mismatches() {
+    let deadline = crate::fetcher::budget::AcquisitionBudget::new(
+        std::time::Duration::from_secs(3_600),
+        u64::MAX,
+    )
+    .deadline_guard();
+    let raw = sha256_digest_raw_before(b"safe", &deadline).unwrap();
+    let hex_sha256 = hex::encode(raw);
+    let colon_sha256 = format!("sha256:{hex_sha256}");
+    let sri_sha256 = format!("sha256-{}", STANDARD.encode(raw));
+    let sri_sha512 = format!("sha512-{}", STANDARD.encode(Sha512::digest(b"safe")));
+
+    // Verified sha256 forms:
+    assert_eq!(
+        verify_integrity_from_sha256_digest(&raw, Some(&colon_sha256), "fixture", &deadline)
+            .unwrap(),
+        Some(())
+    );
+    assert_eq!(
+        verify_integrity_from_sha256_digest(&raw, Some(&hex_sha256), "fixture", &deadline).unwrap(),
+        Some(())
+    );
+    assert_eq!(
+        verify_integrity_from_sha256_digest(&raw, Some(&sri_sha256), "fixture", &deadline).unwrap(),
+        Some(())
+    );
+
+    // sha512 needs bytes:
+    assert_eq!(
+        verify_integrity_from_sha256_digest(&raw, Some(&sri_sha512), "fixture", &deadline).unwrap(),
+        None
+    );
+
+    // Mismatches fail:
+    assert!(
+        verify_integrity_from_sha256_digest(
+            &raw,
+            Some("sha256:0000000000000000000000000000000000000000000000000000000000000000"),
+            "fixture",
+            &deadline
+        )
+        .is_err()
+    );
+    assert!(
+        verify_integrity_from_sha256_digest(
+            &raw,
+            Some("0000000000000000000000000000000000000000000000000000000000000000"),
+            "fixture",
+            &deadline
+        )
+        .is_err()
+    );
+    assert!(
+        verify_integrity_from_sha256_digest(
+            &raw,
+            Some(&format!("sha256-{}", STANDARD.encode([0_u8; 32]))),
+            "fixture",
+            &deadline
+        )
+        .is_err()
+    );
+
+    // Missing expected fails with Policy error:
+    let missing_error =
+        verify_integrity_from_sha256_digest(&raw, None, "fixture", &deadline).unwrap_err();
+    assert!(matches!(missing_error, Error::Policy { .. }));
+}

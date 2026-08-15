@@ -39,6 +39,7 @@ async fn fetched_roots_compile_rules_before_fetching_dependencies() {
         true,
         vec![],
         false,
+        false,
     )
     .analyze_fetched_roots(vec![FetchMetadata {
         source: packages.path().join("root"),
@@ -124,6 +125,7 @@ async fn fetched_roots_share_dependency_acquisition_and_scanning() {
         true,
         true,
         vec![],
+        false,
         false,
     )
     .analyze_fetched_roots(vec![

@@ -55,6 +55,7 @@ async fn root_npm_lock_dependency_cycle_terminates_and_analyzes_each_package_onc
         true,
         vec![],
         false,
+        false,
     )
     .analyze(root.path())
     .await
@@ -113,10 +114,14 @@ async fn fetched_root_reached_through_cycle_is_not_analyzed_twice() {
     let report = Engine::new(
         &[],
         &fetcher,
-        EngineLimits::default(),
+        EngineLimits {
+            max_packages: 2,
+            ..EngineLimits::default()
+        },
         false,
         true,
         vec![],
+        false,
         false,
     )
     .analyze_fetched_root(FetchMetadata {

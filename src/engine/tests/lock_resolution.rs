@@ -68,6 +68,7 @@ dependencies = [
         true,
         vec![],
         false,
+        false,
     )
     .analyze(root.path())
     .await
@@ -135,6 +136,7 @@ async fn root_npm_lock_resolves_hoisted_transitive_dependencies() {
         true,
         true,
         vec![],
+        false,
         false,
     )
     .analyze(root.path())
@@ -225,6 +227,7 @@ async fn shared_npm_artifact_preserves_distinct_lock_path_contexts() {
         true,
         true,
         vec![],
+        false,
         false,
     )
     .analyze(root.path())
@@ -353,6 +356,7 @@ dependencies = ["child-a", "child-b"]
         true,
         true,
         vec![],
+        false,
         false,
     )
     .analyze(root.path())

@@ -2,9 +2,21 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+pub const DEFAULT_MAX_PACKAGE_DEPTH: usize = 3;
+pub const DEFAULT_MAX_PACKAGES: usize = 500;
+pub const DEFAULT_MAX_NETWORK_REQUESTS: usize = 1_000;
+pub const DEFAULT_MAX_REDIRECT_HOPS: usize = 5;
+pub const DEFAULT_REQUEST_TIMEOUT_SECONDS: u64 = 30;
+pub const DEFAULT_MAX_ACQUISITION_SECONDS: u64 = 300;
+pub const DEFAULT_MAX_ARCHIVE_SIZE: u64 = 100 * 1024 * 1024;
+pub const DEFAULT_MAX_EXTRACTED_SIZE: u64 = 500 * 1024 * 1024;
+pub const DEFAULT_MAX_EXTRACTED_FILES: u64 = 50_000;
 pub const DEFAULT_MAX_FILE_DEPTH: usize = 128;
 pub const DEFAULT_MAX_MANIFEST_FILE_SIZE: u64 = 2 * 1024 * 1024;
-pub const DEFAULT_REQUEST_TIMEOUT_SECONDS: u64 = 30;
+pub const DEFAULT_MAX_SOURCE_FILE_SIZE: u64 = 2 * 1024 * 1024;
+pub const DEFAULT_MAX_SOURCE_FILES: u64 = 100_000;
+pub const DEFAULT_MAX_FINDINGS: u64 = 100_000;
+pub const DEFAULT_MAX_SCAN_SECONDS: u64 = 300;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -53,7 +65,7 @@ pub struct EngineLimits {
 }
 
 const fn default_max_redirect_hops() -> usize {
-    5
+    DEFAULT_MAX_REDIRECT_HOPS
 }
 
 const fn default_request_timeout_seconds() -> u64 {
@@ -71,21 +83,21 @@ const fn default_max_manifest_file_size() -> u64 {
 impl Default for EngineLimits {
     fn default() -> Self {
         Self {
-            max_package_depth: 3,
-            max_packages: 16_384,
-            max_network_requests: 1_000,
-            max_redirect_hops: default_max_redirect_hops(),
+            max_package_depth: DEFAULT_MAX_PACKAGE_DEPTH,
+            max_packages: DEFAULT_MAX_PACKAGES,
+            max_network_requests: DEFAULT_MAX_NETWORK_REQUESTS,
+            max_redirect_hops: DEFAULT_MAX_REDIRECT_HOPS,
             request_timeout: Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECONDS),
-            max_acquisition_duration: Duration::from_secs(300),
-            max_archive_size: 100 * 1024 * 1024,
-            max_extracted_size: 500 * 1024 * 1024,
-            max_extracted_files: 50_000,
+            max_acquisition_duration: Duration::from_secs(DEFAULT_MAX_ACQUISITION_SECONDS),
+            max_archive_size: DEFAULT_MAX_ARCHIVE_SIZE,
+            max_extracted_size: DEFAULT_MAX_EXTRACTED_SIZE,
+            max_extracted_files: DEFAULT_MAX_EXTRACTED_FILES,
             max_file_depth: DEFAULT_MAX_FILE_DEPTH,
             max_manifest_file_size: DEFAULT_MAX_MANIFEST_FILE_SIZE,
-            max_source_file_size: 512 * 1024 * 1024,
-            max_source_files: 100_000,
-            max_findings: 100_000,
-            max_scan_duration: Duration::from_secs(300),
+            max_source_file_size: DEFAULT_MAX_SOURCE_FILE_SIZE,
+            max_source_files: DEFAULT_MAX_SOURCE_FILES,
+            max_findings: DEFAULT_MAX_FINDINGS,
+            max_scan_duration: Duration::from_secs(DEFAULT_MAX_SCAN_SECONDS),
             fail_on_parse_error: false,
         }
     }

@@ -298,6 +298,99 @@ packages: {}
 }
 
 #[test]
+fn local_references_are_relative_to_the_selected_importer_directory() {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("pnpm-lock.yaml");
+    fs::write(
+        &path,
+        r#"
+lockfileVersion: '9.0'
+importers:
+  packages/a:
+    dependencies:
+      workspace-child:
+        specifier: workspace:*
+        version: link:../b
+packages: {}
+"#,
+    )
+    .unwrap();
+    let mut dependencies = [Dependency::declared(
+        Ecosystem::Npm,
+        "workspace-child",
+        "workspace:*",
+    )];
+
+    enrich_importer(&path, "packages/a", &mut dependencies).unwrap();
+
+    let source = dependencies[0].source_url.as_deref().unwrap();
+    let resolved = url::Url::parse(source).unwrap().to_file_path().unwrap();
+    assert_eq!(resolved, temporary.path().join("packages/b"));
+    assert!(dependencies[0].lockfile.is_some());
+}
+
+#[test]
+fn root_importer_local_references_remain_relative_to_the_lockfile() {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("pnpm-lock.yaml");
+    fs::write(
+        &path,
+        r#"
+lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      workspace-child:
+        specifier: workspace:*
+        version: link:packages/child
+packages: {}
+"#,
+    )
+    .unwrap();
+    let mut dependencies = [Dependency::declared(
+        Ecosystem::Npm,
+        "workspace-child",
+        "workspace:*",
+    )];
+
+    enrich_importer(&path, ".", &mut dependencies).unwrap();
+
+    let source = dependencies[0].source_url.as_deref().unwrap();
+    let resolved = url::Url::parse(source).unwrap().to_file_path().unwrap();
+    assert_eq!(resolved, temporary.path().join("packages/child"));
+}
+
+#[test]
+fn importer_paths_cannot_escape_the_lockfile_root() {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("pnpm-lock.yaml");
+    fs::write(
+        &path,
+        r#"
+lockfileVersion: '9.0'
+importers:
+  ../outside:
+    dependencies:
+      workspace-child:
+        specifier: workspace:*
+        version: link:child
+packages: {}
+"#,
+    )
+    .unwrap();
+    let mut dependencies = [Dependency::declared(
+        Ecosystem::Npm,
+        "workspace-child",
+        "workspace:*",
+    )];
+
+    enrich_importer(&path, "../outside", &mut dependencies).unwrap();
+
+    assert!(dependencies[0].source_url.is_none());
+    assert!(dependencies[0].lockfile.is_none());
+}
+
+#[test]
 fn wildcard_workspace_reference_without_a_path_stays_unresolved() {
     let dependency = enrich_fixture(
         r#"

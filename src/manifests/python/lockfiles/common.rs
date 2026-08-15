@@ -19,14 +19,19 @@ pub(super) enum LockSchema {
 impl LockSchema {
     fn validate(self, path: &Path, value: &TomlValue) -> Result<()> {
         let (actual, expected, format) = match self {
-            Self::Poetry => (
-                value
+            Self::Poetry => {
+                let version = value
                     .get("metadata")
                     .and_then(|metadata| metadata.get("lock-version"))
-                    .and_then(TomlValue::as_str),
-                "2.0",
-                "Poetry",
-            ),
+                    .and_then(TomlValue::as_str);
+                if version.is_some_and(supported_poetry_lock_version) {
+                    return Ok(());
+                }
+                return Err(manifest_error(
+                    path,
+                    "Poetry lockfile must have a supported schema version 2.x",
+                ));
+            }
             Self::Pdm => (
                 value
                     .get("metadata")
@@ -55,6 +60,13 @@ impl LockSchema {
             ))
         }
     }
+}
+
+fn supported_poetry_lock_version(version: &str) -> bool {
+    let Some((major, minor)) = version.split_once('.') else {
+        return false;
+    };
+    major == "2" && !minor.is_empty() && minor.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 pub(super) fn enrich_toml_packages(

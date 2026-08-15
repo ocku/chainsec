@@ -273,6 +273,26 @@ fn rejects_a_dist_tag_that_targets_an_unpullable_npm_release() {
 }
 
 #[test]
+fn deno_npm_scoped_specifiers_keep_the_scope_when_the_version_is_absent() {
+    let with_version = Dependency::declared(
+        Ecosystem::Deno,
+        "@scope/package",
+        "npm:@scope/package@1.2.3",
+    );
+    assert_eq!(
+        npm_package_and_requirement(&with_version),
+        ("@scope/package".to_owned(), "1.2.3".to_owned())
+    );
+
+    let without_version =
+        Dependency::declared(Ecosystem::Deno, "@scope/package", "npm:@scope/package");
+    assert_eq!(
+        npm_package_and_requirement(&without_version),
+        ("@scope/package".to_owned(), "*".to_owned())
+    );
+}
+
+#[test]
 fn unlocked_npm_and_deno_npm_resolution_use_valid_releases_with_nonstandard_yanked_metadata() {
     let metadata = serde_json::json!({
         "versions": {

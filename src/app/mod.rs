@@ -41,7 +41,11 @@ pub(in crate::app) async fn execute_scan(
 ) -> ExitCode {
     let root = match canonicalize_root(config_root) {
         Ok(root) => root,
-        Err(error) => return configuration_error(error),
+        Err(error) => {
+            return configuration_error(chainsec::Error::InvalidConfiguration {
+                message: error.to_string(),
+            });
+        }
     };
     let (config, config_path) = match config::load(&root) {
         Ok(value) => value,
@@ -132,7 +136,20 @@ fn report_write_error(path: Option<&Path>, error: &io::Error) {
 fn analysis_error(error: chainsec::Error) -> ExitCode {
     tracing::error!(error = %error, "analysis failed");
     eprintln!("chainsec: {error}");
-    ExitCode::from(if error.is_policy() { 4 } else { 2 })
+    ExitCode::from(pre_report_exit_status(&error))
+}
+
+fn pre_report_exit_status(error: &chainsec::Error) -> u8 {
+    match error {
+        chainsec::Error::InvalidConfiguration { .. } => 2,
+        chainsec::Error::Io { .. }
+        | chainsec::Error::Manifest { .. }
+        | chainsec::Error::Resolution { .. }
+        | chainsec::Error::Fetch { .. }
+        | chainsec::Error::Extraction { .. }
+        | chainsec::Error::Scan { .. } => 3,
+        chainsec::Error::Policy { .. } | chainsec::Error::LimitExceeded { .. } => 4,
+    }
 }
 
 pub(super) fn canonicalize_root(path: &Path) -> chainsec::Result<PathBuf> {
@@ -171,7 +188,7 @@ pub(super) fn purge_cache(path: &Path) -> chainsec::Result<()> {
 
 pub(super) fn configuration_error(error: chainsec::Error) -> ExitCode {
     eprintln!("chainsec: {error}");
-    ExitCode::from(2)
+    ExitCode::from(pre_report_exit_status(&error))
 }
 
 fn write_report(output_path: Option<&Path>, rendered: &str) -> io::Result<()> {
@@ -205,4 +222,66 @@ fn configure_tracing(to_stderr: bool) {
         .without_time()
         .with_target(false)
         .init();
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{io, path::PathBuf};
+
+    use super::pre_report_exit_status;
+
+    #[test]
+    fn pre_report_errors_use_documented_exit_statuses() {
+        let path = PathBuf::from("fixture");
+        let operational_errors = [
+            chainsec::Error::Io {
+                operation: "read".to_owned(),
+                path: path.clone(),
+                source: io::Error::other("failed"),
+            },
+            chainsec::Error::Manifest {
+                path: path.clone(),
+                message: "failed".to_owned(),
+            },
+            chainsec::Error::Resolution {
+                package: "example".to_owned(),
+                message: "failed".to_owned(),
+            },
+            chainsec::Error::Fetch {
+                package: "example".to_owned(),
+                source_url: "https://example.test/package".to_owned(),
+                message: "failed".to_owned(),
+            },
+            chainsec::Error::Extraction {
+                archive: path.clone(),
+                message: "failed".to_owned(),
+            },
+            chainsec::Error::Scan {
+                path,
+                message: "failed".to_owned(),
+            },
+        ];
+        for error in &operational_errors {
+            assert_eq!(pre_report_exit_status(error), 3, "{}", error.code());
+        }
+
+        let invalid = chainsec::Error::InvalidConfiguration {
+            message: "invalid".to_owned(),
+        };
+        assert_eq!(pre_report_exit_status(&invalid), 2);
+
+        let policy_errors = [
+            chainsec::Error::Policy {
+                operation: "fetch".to_owned(),
+                message: "denied".to_owned(),
+            },
+            chainsec::Error::LimitExceeded {
+                resource: "packages".to_owned(),
+                limit: 1,
+            },
+        ];
+        for error in &policy_errors {
+            assert_eq!(pre_report_exit_status(error), 4, "{}", error.code());
+        }
+    }
 }

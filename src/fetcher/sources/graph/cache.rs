@@ -1,11 +1,9 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    fs,
-    io::{Read, Write},
+    io::Write,
     path::{Path, PathBuf},
 };
 
-use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::{
@@ -13,19 +11,28 @@ use crate::{
     fetcher::{
         SourceFetcher,
         archive::{ExtractionStats, account_extracted_entry},
-        cache::is_unsafe_cache_open_error,
+        budget::AcquisitionDeadline,
         filesystem::TrustedDir,
+        integrity::sha256_digest_raw_before,
     },
 };
 
 use crate::model::DenoLockfileSnapshot;
 
 use super::{
+    GraphIntegrity,
+    cache_io::{
+        cached_graph_module_filename, lockfile_redirect_effective_url, open_cached_directory,
+        read_bounded_file, read_cached_graph_module_before,
+    },
     canonical_graph_url, enqueue_graph_module, graph_redirect_filename, module_extension,
-    resolve_graph_modules_with_sink, verify_graph_module_integrity, write_graph_redirect,
+    resolve_graph_modules_with_sink, verify_graph_module_integrity_before,
+    verify_graph_module_integrity_from_digest_before, verify_materialized_module_bytes,
+    write_graph_redirect,
 };
 
 impl SourceFetcher {
+    #[cfg(test)]
     pub(in crate::fetcher) fn rebuild_cached_deno_graph(
         &self,
         root_url: &Url,
@@ -34,6 +41,27 @@ impl SourceFetcher {
         lockfile: Option<&DenoLockfileSnapshot>,
         cached_source: &Path,
     ) -> Result<(PathBuf, String, ExtractionStats)> {
+        let deadline = self.network_budget().deadline_guard();
+        self.rebuild_cached_deno_graph_before(
+            root_url,
+            temporary,
+            expected,
+            lockfile,
+            cached_source,
+            &deadline,
+        )
+    }
+
+    pub(in crate::fetcher) fn rebuild_cached_deno_graph_before(
+        &self,
+        root_url: &Url,
+        temporary: &Path,
+        expected: Option<&str>,
+        lockfile: Option<&DenoLockfileSnapshot>,
+        cached_source: &Path,
+        deadline: &AcquisitionDeadline,
+    ) -> Result<(PathBuf, String, ExtractionStats)> {
+        deadline.check()?;
         let source = self.create_workspace_subdirectory(
             temporary,
             Path::new("source"),
@@ -47,10 +75,11 @@ impl SourceFetcher {
         let cached_root = open_cached_directory(cached_source, "cached Deno graph")?;
         let mut queue = VecDeque::from([root_url.clone()]);
         let mut queued = HashSet::from([canonical_graph_url(root_url)]);
-        let mut materialized = HashMap::<String, Vec<u8>>::new();
+        let mut materialized = HashMap::<String, [u8; 32]>::new();
         let mut stats = ExtractionStats::default();
         let mut root_digest = String::new();
         while let Some(requested_url) = queue.pop_front() {
+            deadline.check()?;
             let is_root = requested_url == *root_url;
             // The root was selected before cache lookup, and reconstruction never
             // performs network I/O. Its origin is therefore already authorized by
@@ -65,22 +94,41 @@ impl SourceFetcher {
                 &cached_root,
                 cached_source,
                 &requested_url,
+                lockfile,
                 enforce_host_policy,
+                deadline,
             )?;
             let canonical = canonical_graph_url(&url);
+            let binding = GraphIntegrity {
+                requested_url: &requested_url,
+                effective_url: &url,
+                is_root,
+                root_url,
+                expected,
+                remote_integrities: lockfile.map(DenoLockfileSnapshot::remote_integrities),
+            };
 
-            if let Some(bytes) = materialized.get(&canonical) {
-                let digest = self.verify_reconstructed_graph_module(
-                    bytes,
-                    &requested_url,
-                    &url,
-                    is_root,
-                    root_url,
-                    expected,
-                    lockfile,
-                )?;
+            if let Some(stored_digest) = materialized.get(&canonical) {
+                match verify_graph_module_integrity_from_digest_before(
+                    stored_digest,
+                    binding,
+                    deadline,
+                )? {
+                    Some(()) => {}
+                    None => {
+                        verify_materialized_module_bytes(
+                            &source_root,
+                            &source,
+                            &canonical,
+                            self.limits.max_archive_size,
+                            stored_digest,
+                            binding,
+                            deadline,
+                        )?;
+                    }
+                }
                 if is_root {
-                    root_digest = digest;
+                    root_digest = format!("sha256:{}", hex::encode(stored_digest));
                 }
                 self.write_reconstructed_graph_redirect_if_needed(
                     &source_root,
@@ -88,6 +136,7 @@ impl SourceFetcher {
                     &requested_url,
                     &url,
                     &mut stats,
+                    deadline,
                 )?;
                 continue;
             }
@@ -95,23 +144,16 @@ impl SourceFetcher {
 
             let extension = module_extension(&url);
             let filename = cached_graph_module_filename(&canonical, extension);
-            let bytes = read_cached_graph_module(
+            let bytes = read_cached_graph_module_before(
                 &cached_root,
                 cached_source,
                 &filename,
                 self.limits.max_archive_size,
+                deadline,
             )?;
-            let digest = self.verify_reconstructed_graph_module(
-                &bytes,
-                &requested_url,
-                &url,
-                is_root,
-                root_url,
-                expected,
-                lockfile,
-            )?;
+            let digest = self.verify_reconstructed_graph_module(&bytes, binding, deadline)?;
             if is_root {
-                root_digest = digest;
+                root_digest = format!("sha256:{}", hex::encode(digest));
             }
             self.write_reconstructed_graph_redirect_if_needed(
                 &source_root,
@@ -119,6 +161,7 @@ impl SourceFetcher {
                 &requested_url,
                 &url,
                 &mut stats,
+                deadline,
             )?;
             self.write_reconstructed_graph_module(
                 &source_root,
@@ -126,6 +169,7 @@ impl SourceFetcher {
                 &filename,
                 &bytes,
                 &mut stats,
+                deadline,
             )?;
             self.enqueue_reconstructed_graph_imports(
                 &url,
@@ -133,9 +177,11 @@ impl SourceFetcher {
                 extension,
                 &mut queue,
                 &mut queued,
+                deadline,
             )?;
-            materialized.insert(canonical, bytes);
+            materialized.insert(canonical, digest);
         }
+        deadline.check()?;
         Ok((source, root_digest, stats))
     }
 
@@ -149,27 +195,14 @@ impl SourceFetcher {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn verify_reconstructed_graph_module(
         &self,
         bytes: &[u8],
-        requested_url: &Url,
-        effective_url: &Url,
-        is_root: bool,
-        root_url: &Url,
-        expected: Option<&str>,
-        lockfile: Option<&DenoLockfileSnapshot>,
-    ) -> Result<String> {
-        verify_graph_module_integrity(
-            bytes,
-            requested_url,
-            effective_url,
-            is_root,
-            root_url,
-            expected,
-            lockfile.map(DenoLockfileSnapshot::remote_integrities),
-        )?;
-        Ok(format!("sha256:{}", hex::encode(Sha256::digest(bytes))))
+        binding: GraphIntegrity<'_>,
+        deadline: &AcquisitionDeadline,
+    ) -> Result<[u8; 32]> {
+        verify_graph_module_integrity_before(bytes, binding, deadline)?;
+        sha256_digest_raw_before(bytes, deadline)
     }
 
     fn write_reconstructed_graph_redirect_if_needed(
@@ -179,6 +212,7 @@ impl SourceFetcher {
         requested_url: &Url,
         effective_url: &Url,
         stats: &mut ExtractionStats,
+        deadline: &AcquisitionDeadline,
     ) -> Result<()> {
         if requested_url != effective_url {
             self.write_reconstructed_graph_redirect(
@@ -187,6 +221,7 @@ impl SourceFetcher {
                 requested_url,
                 effective_url,
                 stats,
+                deadline,
             )?;
         }
         Ok(())
@@ -199,7 +234,9 @@ impl SourceFetcher {
         filename: &str,
         bytes: &[u8],
         stats: &mut ExtractionStats,
+        deadline: &AcquisitionDeadline,
     ) -> Result<()> {
+        deadline.check()?;
         account_extracted_entry(stats, bytes.len() as u64, &self.limits)?;
 
         let output = source.join(filename);
@@ -211,11 +248,15 @@ impl SourceFetcher {
                     path: output.clone(),
                     source: source_error,
                 })?;
-        file.write_all(bytes).map_err(|source_error| Error::Io {
-            operation: "write reconstructed Deno module".to_owned(),
-            path: output,
-            source: source_error,
-        })
+        for chunk in bytes.chunks(64 * 1024) {
+            deadline.check()?;
+            file.write_all(chunk).map_err(|source_error| Error::Io {
+                operation: "write reconstructed Deno module".to_owned(),
+                path: output.clone(),
+                source: source_error,
+            })?;
+        }
+        deadline.check()
     }
 
     fn enqueue_reconstructed_graph_imports(
@@ -225,10 +266,13 @@ impl SourceFetcher {
         extension: &str,
         queue: &mut VecDeque<Url>,
         queued: &mut HashSet<String>,
+        deadline: &AcquisitionDeadline,
     ) -> Result<()> {
+        deadline.check()?;
         resolve_graph_modules_with_sink(url, bytes, extension, |module| {
             enqueue_graph_module(queue, queued, module, self.limits.max_packages)
-        })
+        })?;
+        deadline.check()
     }
 
     fn write_reconstructed_graph_redirect(
@@ -238,9 +282,11 @@ impl SourceFetcher {
         requested_url: &Url,
         effective_url: &Url,
         stats: &mut ExtractionStats,
+        deadline: &AcquisitionDeadline,
     ) -> Result<()> {
+        deadline.check()?;
         account_extracted_entry(stats, effective_url.as_str().len() as u64, &self.limits)?;
-        write_graph_redirect(source_root, source, requested_url, effective_url)
+        write_graph_redirect(source_root, source, requested_url, effective_url, deadline)
     }
 
     fn cached_graph_effective_url(
@@ -248,13 +294,36 @@ impl SourceFetcher {
         cached_root: &TrustedDir,
         cached_source: &Path,
         requested_url: &Url,
+        lockfile: Option<&DenoLockfileSnapshot>,
         enforce_host_policy: bool,
+        deadline: &AcquisitionDeadline,
     ) -> Result<Url> {
+        deadline.check()?;
+        let locked_effective = lockfile_redirect_effective_url(
+            lockfile,
+            requested_url,
+            self.limits.max_redirect_hops,
+            deadline,
+        )?;
         let redirect_name = graph_redirect_filename(requested_url);
         let redirect_path = cached_source.join(&redirect_name);
         let bytes = match cached_root.open_file_no_follow(Path::new(&redirect_name)) {
-            Ok(file) => read_bounded_file(file, &redirect_path, 8 * 1024)?,
+            Ok(file) => read_bounded_file(
+                file,
+                &redirect_path,
+                8 * 1024,
+                "cached Deno metadata bytes",
+                deadline,
+            )?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if let Some(locked_effective) = locked_effective {
+                    return Err(Error::Policy {
+                        operation: "cache validation".to_owned(),
+                        message: format!(
+                            "cached Deno redirect for {requested_url} is missing; the lockfile requires effective URL {locked_effective}"
+                        ),
+                    });
+                }
                 return Ok(requested_url.clone());
             }
             Err(error) => {
@@ -275,124 +344,26 @@ impl SourceFetcher {
             operation: "cache validation".to_owned(),
             message: format!("cached Deno redirect URL is invalid: {error}"),
         })?;
-        if enforce_host_policy {
+        let Some(locked_effective) = locked_effective else {
+            return Err(Error::Policy {
+                operation: "cache validation".to_owned(),
+                message: format!(
+                    "cached Deno redirect from {requested_url} to {effective} is not declared by the lockfile"
+                ),
+            });
+        };
+        if effective != locked_effective {
+            return Err(Error::Policy {
+                operation: "cache validation".to_owned(),
+                message: format!(
+                    "cached Deno redirect from {requested_url} to {effective} does not match lockfile effective URL {locked_effective}"
+                ),
+            });
+        }
+        if enforce_host_policy || effective.origin() != requested_url.origin() {
             self.check_url_policy(&effective, false)?;
         }
+        deadline.check()?;
         Ok(effective)
     }
-}
-
-fn cached_graph_module_filename(canonical_url: &str, extension: &str) -> String {
-    format!(
-        "{}.{}",
-        hex::encode(Sha256::digest(canonical_url.as_bytes())),
-        extension
-    )
-}
-
-fn open_cached_directory(source: &Path, label: &str) -> Result<TrustedDir> {
-    TrustedDir::open(source).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound || is_unsafe_cache_open_error(&error) {
-            Error::Policy {
-                operation: "cache validation".to_owned(),
-                message: format!("{label} is missing or unsafe: {}", source.display()),
-            }
-        } else {
-            Error::Io {
-                operation: format!("open {label}"),
-                path: source.to_owned(),
-                source: error,
-            }
-        }
-    })
-}
-
-pub(super) fn read_cached_graph_module(
-    source: &TrustedDir,
-    source_path: &Path,
-    filename: &str,
-    limit: u64,
-) -> Result<Vec<u8>> {
-    let path = source_path.join(filename);
-    let file = source
-        .open_file_no_follow(Path::new(filename))
-        .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound || is_unsafe_cache_open_error(&error) {
-                Error::Policy {
-                    operation: "cache validation".to_owned(),
-                    message: format!(
-                        "cached Deno module is missing or unsafe: {}",
-                        path.display()
-                    ),
-                }
-            } else {
-                Error::Io {
-                    operation: "open cached Deno module".to_owned(),
-                    path: path.clone(),
-                    source: error,
-                }
-            }
-        })?;
-    let metadata = file.metadata().map_err(|source| Error::Io {
-        operation: "inspect opened cached Deno module".to_owned(),
-        path: path.clone(),
-        source,
-    })?;
-    if !metadata.is_file() || metadata.len() > limit {
-        return Err(Error::Policy {
-            operation: "cache validation".to_owned(),
-            message: format!(
-                "cached Deno module is unsafe or exceeds the download limit: {}",
-                path.display()
-            ),
-        });
-    }
-
-    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
-    file.take(limit.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|source| Error::Io {
-            operation: "read cached Deno module".to_owned(),
-            path: path.clone(),
-            source,
-        })?;
-    if (bytes.len() as u64) > limit {
-        return Err(Error::LimitExceeded {
-            resource: "cached Deno module bytes".to_owned(),
-            limit,
-        });
-    }
-    Ok(bytes)
-}
-
-fn read_bounded_file(file: fs::File, path: &Path, limit: u64) -> Result<Vec<u8>> {
-    let metadata = file.metadata().map_err(|source| Error::Io {
-        operation: "inspect cached Deno metadata".to_owned(),
-        path: path.to_owned(),
-        source,
-    })?;
-    if !metadata.is_file() || metadata.len() > limit {
-        return Err(Error::Policy {
-            operation: "cache validation".to_owned(),
-            message: format!(
-                "cached Deno metadata is not a bounded regular file: {}",
-                path.display()
-            ),
-        });
-    }
-    let mut bytes = Vec::new();
-    file.take(limit.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|source| Error::Io {
-            operation: "read cached Deno metadata".to_owned(),
-            path: path.to_owned(),
-            source,
-        })?;
-    if bytes.len() as u64 > limit {
-        return Err(Error::LimitExceeded {
-            resource: "cached Deno metadata bytes".to_owned(),
-            limit,
-        });
-    }
-    Ok(bytes)
 }

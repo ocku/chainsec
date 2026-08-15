@@ -18,8 +18,8 @@ use super::{
         },
     },
     state::{
-        FetchKey, FetchRequest, MAX_CONCURRENT_FETCHES, PendingPackage, Traversal,
-        canonicalize_root, push_package_limit_issue,
+        AcquisitionDecision, FetchKey, FetchRequest, PendingPackage, Traversal, canonicalize_root,
+        pending_from_fetch, push_package_limit_issue,
     },
 };
 
@@ -51,11 +51,7 @@ impl Engine<'_> {
             );
             let started = Instant::now();
             let (packages, fetch_attempts) = self
-                .fetch_dependencies(
-                    fetch_requests,
-                    &mut report,
-                    traversal.remaining_fetch_attempts(self.limits.max_packages),
-                )
+                .fetch_dependencies(fetch_requests, &mut report, &mut traversal)
                 .await;
             debug!(
                 fetch_attempts,
@@ -63,7 +59,6 @@ impl Engine<'_> {
                 elapsed_ms = started.elapsed().as_millis(),
                 "fetched dependency frontier"
             );
-            traversal.record_fetch_attempts(fetch_attempts);
             traversal.enqueue(packages);
         }
 
@@ -123,7 +118,7 @@ impl Engine<'_> {
         &self,
         requests: Vec<FetchRequest>,
         report: &mut Report,
-        remaining_fetch_attempts: usize,
+        traversal: &mut Traversal,
     ) -> (Vec<PendingPackage>, usize) {
         let mut grouped = Vec::<(FetchKey, FetchRequest, crate::fetcher::PreparedFetch)>::new();
         let mut group_indices = HashMap::<FetchKey, usize>::new();
@@ -154,38 +149,43 @@ impl Engine<'_> {
             }
         }
 
-        if grouped.len() > remaining_fetch_attempts {
-            push_package_limit_issue(
-                report,
-                grouped[remaining_fetch_attempts]
-                    .1
-                    .declared_package_id
-                    .clone(),
-                self.limits.max_packages as u64,
-            );
-            grouped.truncate(remaining_fetch_attempts);
-        }
-        let fetch_attempts = grouped.len();
-
-        let fetches = stream::iter(grouped).map(|(_, request, prepared)| async move {
-            let dependency_id = request.dependency.id();
-            let result = self.fetcher.fetch_prepared(prepared).await;
-            (result, dependency_id, request.contexts, request.depth)
-        });
-        let mut fetches = fetches.buffered(MAX_CONCURRENT_FETCHES);
         let mut packages = Vec::new();
+        let mut new_fetches = Vec::new();
+        for (key, request, prepared) in grouped {
+            if let Some(pending) = traversal.pending_for_revisited_acquisition(&key, &request) {
+                packages.push(pending);
+                continue;
+            }
+            match traversal.reserve_acquisition(key.clone(), self.limits.max_packages) {
+                AcquisitionDecision::Revisited => {}
+                AcquisitionDecision::Reserved => new_fetches.push((key, request, prepared)),
+                AcquisitionDecision::LimitExceeded => {
+                    push_package_limit_issue(
+                        report,
+                        request.declared_package_id,
+                        self.limits.max_packages as u64,
+                    );
+                    break;
+                }
+            }
+        }
+        let fetch_attempts = new_fetches.len();
 
-        while let Some((result, dependency_id, contexts, depth)) = fetches.next().await {
+        let fetches = stream::iter(new_fetches).map(|(key, request, prepared)| async move {
+            let result = self.fetcher.fetch_prepared(prepared).await;
+            (key, request, result)
+        });
+        let mut fetches = fetches.buffered(self.max_analysis_threads);
+
+        while let Some((key, request, result)) = fetches.next().await {
             match result {
-                Ok(metadata) => packages.push(PendingPackage {
-                    package_id: metadata.package_id.clone(),
-                    source: metadata.source.clone(),
-                    depth,
-                    fetched: Some(metadata),
-                    contexts,
-                    report_source: true,
-                }),
-                Err(error) => push_issue(report, error, Some(dependency_id), "fetch", false),
+                Ok(metadata) => {
+                    traversal.record_successful_acquisition(key, metadata.clone());
+                    packages.push(pending_from_fetch(&request, metadata));
+                }
+                Err(error) => {
+                    push_issue(report, error, Some(request.dependency.id()), "fetch", false)
+                }
             }
         }
 
