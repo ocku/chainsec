@@ -70,7 +70,7 @@ Defaults:
 | Extracted files | Each acquired package/graph | 50,000 |
 | Acquired path components | Each archive, JSR package, or local snapshot path | 128 |
 | Manifest or lockfile | Each declaration, workspace manifest, import map, or lockfile | 2 MiB |
-| Source file | Each source file | 2 MiB |
+| Source file | Each source file | 20 MiB |
 | Source files | Each package scan | 100,000 |
 | Findings | Each package scan | 100,000 |
 | Scan duration | Each package scan | 300 seconds |

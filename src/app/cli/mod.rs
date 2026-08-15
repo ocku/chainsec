@@ -238,7 +238,7 @@ pub(crate) struct AnalysisOptions {
     /// Maximum individual manifest or lockfile size.
     #[arg(long = "max-manifest-file-size", default_value_t = DEFAULT_MAX_MANIFEST_FILE_SIZE, value_parser = parse_human_size)]
     pub(crate) max_manifest_file_size: u64,
-    /// Maximum individual source file size (for example, `2MiB`, `2M`, or `2m`).
+    /// Maximum individual source file size (for example, `20MiB`, `20M`, or `20m`).
     #[arg(long = "max-source-file-size", default_value_t = DEFAULT_MAX_SOURCE_FILE_SIZE, value_parser = parse_human_size)]
     pub(crate) max_source_file_size: u64,
     /// Maximum source files scanned during one package scan.

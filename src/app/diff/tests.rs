@@ -257,6 +257,8 @@ fn human_report_shows_total_diffs_and_versions_changed() {
                     added: Vec::new(),
                     removed: vec![capability_removed],
                 },
+                added_findings: Vec::new(),
+                removed_findings: Vec::new(),
             },
             VersionComparison {
                 from_version: "0.0.9".to_owned(),
@@ -271,6 +273,8 @@ fn human_report_shows_total_diffs_and_versions_changed() {
                     added: vec![capability_added],
                     removed: Vec::new(),
                 },
+                added_findings: Vec::new(),
+                removed_findings: Vec::new(),
             },
         ],
     };
