@@ -3,7 +3,7 @@
 # Package ranking: JSR dependentCount among selected popular @std packages (2026-08-10).
 set -u
 
-out_dir="docs/benchmarks/deno-popular-20-depth-3"
+out_dir="docs/benchmarks/deno-popular-20-depth-1"
 cache_dir=".chainsec-cache"
 packages='@std/path @std/fs @std/fmt @std/cli @std/encoding @std/assert @std/http @std/yaml @std/async @std/dotenv @std/streams @std/crypto @std/collections @std/media-types @std/testing @std/semver @std/log @std/bytes @std/ulid @std/front-matter'
 
@@ -14,7 +14,7 @@ for package in $packages; do
   slug=$(printf '%s' "$package" | tr '@/ ' '___')
   cargo run -- \
     remote scan "jsr:$package" \
-    --max-package-depth 3 \
+    --max-package-depth 1 \
     --allow-unlocked \
     --cache "$cache_dir" \
     --format json \

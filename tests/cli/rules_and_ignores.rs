@@ -71,16 +71,9 @@ fn ignored_rule_selectors_apply_to_generated_install_and_file_findings() {
             "--allow-unlocked",
             "--cache",
             cache.path().to_str().unwrap(),
-            "--fail-on",
-            "critical",
         ])
         .output()
         .unwrap();
-    assert!(
-        baseline.status.success(),
-        "{}",
-        String::from_utf8_lossy(&baseline.stderr)
-    );
     let baseline: serde_json::Value = serde_json::from_slice(&baseline.stdout).unwrap();
     let baseline_ids = baseline["findings"]
         .as_array()

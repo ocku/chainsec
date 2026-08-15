@@ -14,6 +14,11 @@ struct VersionEvent<'a> {
 
 type VersionEvents<'a> = Vec<VersionEvent<'a>>;
 
+struct AggregateChange<'a> {
+    initial_count: usize,
+    events: VersionEvents<'a>,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ChangeKind {
     Added,
@@ -177,8 +182,8 @@ fn finding_line(finding: &AnalysisPoint, kind: ChangeKind, color: bool) -> Strin
 fn aggregate_changes<'a>(
     report: &'a DiffReport<'a>,
 ) -> (
-    BTreeMap<DetectionKey, VersionEvents<'a>>,
-    BTreeMap<String, VersionEvents<'a>>,
+    BTreeMap<DetectionKey, AggregateChange<'a>>,
+    BTreeMap<String, AggregateChange<'a>>,
 ) {
     let mut detections = BTreeMap::new();
     let mut capabilities = BTreeMap::new();
@@ -191,9 +196,12 @@ fn aggregate_changes<'a>(
                 rule_id: change.rule_id.clone(),
                 risk: change.risk,
             };
+            let entry = detections.entry(key).or_insert_with(|| AggregateChange {
+                initial_count: change.before,
+                events: Vec::new(),
+            });
             push_event(
-                &mut detections,
-                key,
+                &mut entry.events,
                 &comparison.to_version,
                 count_delta(change.after - change.before),
             );
@@ -204,25 +212,40 @@ fn aggregate_changes<'a>(
                 rule_id: change.rule_id.clone(),
                 risk: change.risk,
             };
+            let entry = detections.entry(key).or_insert_with(|| AggregateChange {
+                initial_count: change.before,
+                events: Vec::new(),
+            });
             push_event(
-                &mut detections,
-                key,
+                &mut entry.events,
                 &comparison.to_version,
                 -count_delta(change.before - change.after),
             );
         }
         for change in &comparison.capabilities.added {
+            let entry =
+                capabilities
+                    .entry(change.name.clone())
+                    .or_insert_with(|| AggregateChange {
+                        initial_count: change.before,
+                        events: Vec::new(),
+                    });
             push_event(
-                &mut capabilities,
-                change.name.clone(),
+                &mut entry.events,
                 &comparison.to_version,
                 count_delta(change.after - change.before),
             );
         }
         for change in &comparison.capabilities.removed {
+            let entry =
+                capabilities
+                    .entry(change.name.clone())
+                    .or_insert_with(|| AggregateChange {
+                        initial_count: change.before,
+                        events: Vec::new(),
+                    });
             push_event(
-                &mut capabilities,
-                change.name.clone(),
+                &mut entry.events,
                 &comparison.to_version,
                 -count_delta(change.before - change.after),
             );
@@ -232,16 +255,8 @@ fn aggregate_changes<'a>(
     (detections, capabilities)
 }
 
-fn push_event<'a, K: Ord>(
-    events: &mut BTreeMap<K, VersionEvents<'a>>,
-    key: K,
-    version: &'a str,
-    delta: i128,
-) {
-    events
-        .entry(key)
-        .or_default()
-        .push(VersionEvent { version, delta });
+fn push_event<'a>(events: &mut VersionEvents<'a>, version: &'a str, delta: i128) {
+    events.push(VersionEvent { version, delta });
 }
 
 fn count_delta(count: usize) -> i128 {
@@ -250,44 +265,60 @@ fn count_delta(count: usize) -> i128 {
 
 fn render_detection_summary(
     output: &mut String,
-    detections: &BTreeMap<DetectionKey, VersionEvents<'_>>,
+    detections: &BTreeMap<DetectionKey, AggregateChange<'_>>,
     color: bool,
 ) {
-    for (index, (detection, events)) in detections.iter().enumerate() {
+    for (index, (detection, change)) in detections.iter().enumerate() {
         if index > 0 {
             output.push('\n');
         }
         let name = format!("{}:{}", detection.group, detection.rule_id);
+        let final_count = (change.initial_count as i128 + total_change(&change.events)) as usize;
+        let name_display = if final_count == 0 {
+            paint(&name, "36;9", color)
+        } else {
+            paint(&name, "36", color)
+        };
         output.push_str(&format!(
-            "  {}  {} {} {}\n",
-            render_total_change(total_change(events), color),
+            "  {}  {} {} {} ({} → {})\n",
+            render_total_change(total_change(&change.events), color),
             paint(
                 &format!("{:?}", detection.risk),
                 risk_color(detection.risk),
                 color,
             ),
             paint("·", "2", color),
-            paint(&name, "36", color),
+            name_display,
+            change.initial_count,
+            final_count,
         ));
-        render_versions_changed(output, events, color);
+        render_versions_changed(output, &change.events, color);
     }
 }
 
 fn render_capability_changes(
     output: &mut String,
-    capabilities: &BTreeMap<String, VersionEvents<'_>>,
+    capabilities: &BTreeMap<String, AggregateChange<'_>>,
     color: bool,
 ) {
-    for (index, (capability, events)) in capabilities.iter().enumerate() {
+    for (index, (capability, change)) in capabilities.iter().enumerate() {
         if index > 0 {
             output.push('\n');
         }
+        let final_count = (change.initial_count as i128 + total_change(&change.events)) as usize;
+        let name_display = if final_count == 0 {
+            paint(capability, "36;9", color)
+        } else {
+            paint(capability, "36", color)
+        };
         output.push_str(&format!(
-            "  {}  {}\n",
-            render_total_change(total_change(events), color),
-            paint(capability, "36", color),
+            "  {}  {} ({} → {})\n",
+            render_total_change(total_change(&change.events), color),
+            name_display,
+            change.initial_count,
+            final_count,
         ));
-        render_versions_changed(output, events, color);
+        render_versions_changed(output, &change.events, color);
     }
 }
 

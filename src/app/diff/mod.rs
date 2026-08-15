@@ -27,7 +27,6 @@ struct FindingIdentity {
     rule_id: String,
     rule_version: u32,
     file: std::path::PathBuf,
-    location: (usize, usize, usize, usize),
     matched_code: String,
 }
 
@@ -293,18 +292,11 @@ fn finding_identity_counts(
         if !include_detection(finding, filter) {
             continue;
         }
-        let location = &finding.location;
         let identity = FindingIdentity {
             package: normalized_package_identity(report, &finding.package),
             rule_id: finding.rule_id.clone(),
             rule_version: finding.rule_version,
             file: finding.file.clone(),
-            location: (
-                location.start_line,
-                location.start_column,
-                location.end_line,
-                location.end_column,
-            ),
             matched_code: finding.matched_code.clone(),
         };
         *counts.entry(identity).or_default() += 1;
@@ -350,18 +342,11 @@ fn finding_changes(
 }
 
 fn finding_identity(report: &Report, finding: &AnalysisPoint) -> FindingIdentity {
-    let location = &finding.location;
     FindingIdentity {
         package: normalized_package_identity(report, &finding.package),
         rule_id: finding.rule_id.clone(),
         rule_version: finding.rule_version,
         file: finding.file.clone(),
-        location: (
-            location.start_line,
-            location.start_column,
-            location.end_line,
-            location.end_column,
-        ),
         matched_code: finding.matched_code.clone(),
     }
 }

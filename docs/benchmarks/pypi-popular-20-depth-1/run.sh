@@ -3,7 +3,7 @@
 # Package ranking: https://hugovk.github.io/top-pypi-packages/ (30 days, 2026-08-01).
 set -u
 
-out_dir="docs/benchmarks/pypi-popular-20-depth-3"
+out_dir="docs/benchmarks/pypi-popular-20-depth-1"
 cache_dir=".chainsec-cache"
 packages='boto3 packaging typing-extensions certifi urllib3 idna requests charset-normalizer setuptools botocore cryptography cffi pluggy pygments pyyaml python-dateutil six aiobotocore numpy pycparser'
 
@@ -14,7 +14,7 @@ for package in $packages; do
   slug=$(printf '%s' "$package" | tr '@/ ' '___')
   cargo run -- \
     remote scan "pypi:$package" \
-    --max-package-depth 3 \
+    --max-package-depth 1 \
     --allow-unlocked \
     --allow-host files.pythonhosted.org \
     --cache "$cache_dir" \

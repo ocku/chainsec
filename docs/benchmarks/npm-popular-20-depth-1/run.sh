@@ -2,7 +2,7 @@
 # Reproduces the npm benchmark. Each report records the selected package release.
 set -u
 
-out_dir="docs/benchmarks/npm-popular-20-depth-3"
+out_dir="docs/benchmarks/npm-popular-20-depth-1"
 cache_dir=".chainsec-cache"
 packages='@types/node typescript lodash react chalk debug semver glob minimist ms yargs commander axios express eslint webpack jest next vue uuid'
 
@@ -13,7 +13,7 @@ for package in $packages; do
   slug=$(printf '%s' "$package" | tr '@/ ' '___')
   cargo run -- \
     remote scan "npm:$package" \
-    --max-package-depth 3 \
+    --max-package-depth 1 \
     --allow-unlocked \
     --cache "$cache_dir" \
     --format json \

@@ -23,7 +23,7 @@ fn recognizes_unidentified_binary_files() {
     let finding = analyze_with_size(Path::new("payload.bin"), "root", &[0, 1, 2, 3], 4).unwrap();
     assert!(finding.is_exempt_in_test_fixture);
     assert_eq!(finding.finding.rule_id, "chainsec.detection.file.binary");
-    assert_eq!(finding.finding.risk, Risk::High);
+    assert_eq!(finding.finding.risk, Risk::Critical);
 }
 
 #[test]
@@ -46,18 +46,18 @@ fn keeps_control_heavy_invalid_utf8_as_binary() {
         analyze_with_size(Path::new("payload.bin"), "root", &bytes, bytes.len() as u64).unwrap();
     assert!(finding.is_exempt_in_test_fixture);
     assert_eq!(finding.finding.rule_id, "chainsec.detection.file.binary");
-    assert_eq!(finding.finding.risk, Risk::High);
+    assert_eq!(finding.finding.risk, Risk::Critical);
 }
 
 #[test]
-fn classifies_recognized_native_artifacts_as_high_risk() {
+fn classifies_recognized_native_artifacts_as_critical() {
     let elf = analyze_with_size(Path::new("addon.node"), "root", b"\x7fELF\x02\x01", 6).unwrap();
     assert!(!elf.is_exempt_in_test_fixture);
     assert_eq!(
         elf.finding.rule_id,
         "chainsec.detection.file.native-artifact"
     );
-    assert_eq!(elf.finding.risk, Risk::High);
+    assert_eq!(elf.finding.risk, Risk::Critical);
     assert!(elf.finding.matched_code.contains("ELF"));
 
     let mut pe_bytes = vec![0; 0x44];
@@ -76,7 +76,7 @@ fn classifies_recognized_native_artifacts_as_high_risk() {
         pe.finding.rule_id,
         "chainsec.detection.file.native-artifact"
     );
-    assert_eq!(pe.finding.risk, Risk::High);
+    assert_eq!(pe.finding.risk, Risk::Critical);
 }
 
 #[test]

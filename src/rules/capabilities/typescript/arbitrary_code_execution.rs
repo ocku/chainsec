@@ -6,7 +6,7 @@ pub(super) fn rules() -> Vec<Rule> {
                     "chainsec.ts.capability.dynamic-code-execution",
                     Language::TypeScript,
                     FindingType::ArbitraryCodeExecution,
-                    Risk::High,
+                    Risk::Medium,
                     Confidence::High,
                     "The code invokes a JavaScript or TypeScript dynamic-code execution API.",
                     super::super::REMOVE_EXECUTION,

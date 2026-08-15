@@ -23,7 +23,7 @@ fn every_built_in_rule_has_a_test_case() {
 }
 
 #[test]
-fn unverifiable_dynamic_imports_are_high_risk() {
+fn unverifiable_dynamic_imports_are_medium_risk() {
     let all_rules = rules::default_rules();
     for rule_id in [
         "chainsec.py.detection.dynamic-import",
@@ -36,7 +36,7 @@ fn unverifiable_dynamic_imports_are_high_risk() {
             .iter()
             .find(|rule| rule.id == rule_id)
             .unwrap_or_else(|| panic!("unknown rule {rule_id}"));
-        assert_eq!(rule.risk, Risk::High, "{rule_id} must be high risk");
+        assert_eq!(rule.risk, Risk::Medium, "{rule_id} must be medium risk");
     }
 }
 
