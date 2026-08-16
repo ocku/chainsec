@@ -13,8 +13,26 @@ use async_trait::async_trait;
 use super::*;
 use crate::{
     fetcher::Fetcher,
-    model::{Dependency, FetchMetadata},
+    model::{Dependency, FetchMetadata, PolicySummary, SerializableLimits},
 };
+
+fn engine_policy(
+    limits: EngineLimits,
+    require_lockfile: bool,
+    offline: bool,
+    allowed_hosts: Vec<String>,
+    trust_local_input: bool,
+    allow_insecure_http: bool,
+) -> PolicySummary {
+    PolicySummary {
+        require_lockfile,
+        offline,
+        trust_local_input,
+        allow_insecure_http,
+        allowed_hosts,
+        limits: SerializableLimits::from(&limits),
+    }
+}
 
 struct NeverFetch;
 #[async_trait]
@@ -384,12 +402,14 @@ fn analysis_thread_count_is_clamped_to_safe_bounds() {
     let engine = Engine::new(
         &rules,
         &fetcher,
-        crate::model::EngineLimits::default(),
-        true,
-        true,
-        Vec::new(),
-        false,
-        false,
+        engine_policy(
+            crate::model::EngineLimits::default(),
+            true,
+            true,
+            Vec::new(),
+            false,
+            false,
+        ),
     )
     .with_max_analysis_threads(usize::MAX);
     assert_eq!(engine.max_analysis_threads, 64);

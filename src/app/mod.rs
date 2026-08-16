@@ -2,6 +2,7 @@ mod analysis;
 pub(crate) mod cli;
 mod commands;
 mod config;
+mod core;
 mod diff;
 mod output;
 mod remote;
@@ -22,6 +23,7 @@ use tracing_subscriber::EnvFilter;
 use self::{
     analysis::ScanTarget,
     cli::{AnalysisOptions, Cli, OutputFormat},
+    config::AppliedConfig,
     output::exit_status,
 };
 
@@ -39,70 +41,66 @@ pub(in crate::app) async fn execute_scan(
     matches: &clap::ArgMatches,
     diff_selection: Option<RemoteVersionSelection>,
 ) -> ExitCode {
-    let root = match canonicalize_root(config_root) {
-        Ok(root) => root,
-        Err(error) => {
-            return configuration_error(chainsec::Error::InvalidConfiguration {
-                message: error.to_string(),
-            });
-        }
-    };
-    let (config, config_path) = match config::load(&root) {
-        Ok(value) => value,
+    let applied = match prepare_scan(options, target, config_root, matches) {
+        Ok(applied) => applied,
         Err(error) => return configuration_error(error),
     };
+
+    let outcome = if let Some(selection) = diff_selection {
+        execute_diff_analysis(options, target, selection, &applied).await
+    } else {
+        execute_single_analysis(options, target, &applied).await
+    };
+
+    match outcome {
+        Ok(rendered) => emit_rendered(rendered, options.output.as_deref()),
+        Err(error) => analysis_error(error),
+    }
+}
+
+struct RenderedAnalysis {
+    output: String,
+    exit_status: u8,
+}
+
+/// Resolves configuration and prepares a scan without choosing the analysis
+/// mode. Keeps all the fallible setup in one place so the two analysis paths
+/// below only deal with their own concerns.
+fn prepare_scan(
+    options: &mut AnalysisOptions,
+    target: ScanTarget<'_>,
+    config_root: &Path,
+    matches: &clap::ArgMatches,
+) -> chainsec::Result<AppliedConfig> {
+    let root =
+        canonicalize_root(config_root).map_err(|error| chainsec::Error::InvalidConfiguration {
+            message: error.to_string(),
+        })?;
+    let (config, config_path) = config::load(&root)?;
     let remote = matches!(target, ScanTarget::Remote(_));
-    let applied = match config::apply(options, config, config_path.as_deref(), matches, remote) {
-        Ok(value) => value,
-        Err(error) => return configuration_error(error),
-    };
+    let applied = config::apply(options, config, config_path.as_deref(), matches, remote)?;
     options.cache = Some(options.cache.take().unwrap_or_else(default_cache_path));
     if let ScanTarget::Remote(package) = target
         && let Err(error) = remote::add_allowed_host(options, package)
     {
-        return configuration_error(error);
+        return Err(error);
     }
 
-    let stdout_is_terminal = io::stdout().is_terminal();
     configure_tracing(
-        stdout_is_terminal
+        io::stdout().is_terminal()
             && options.output.is_none()
             && !matches!(options.format, OutputFormat::Human),
     );
-    let threshold = Risk::from(options.fail_on);
-    let color = matches!(options.format, OutputFormat::Human)
-        && options.output.is_none()
-        && stdout_is_terminal;
+    Ok(applied)
+}
 
-    if let Some(selection) = diff_selection {
-        let ScanTarget::Remote(package) = target else {
-            return configuration_error(chainsec::Error::InvalidConfiguration {
-                message: "remote version diffs are available only for remote packages".to_owned(),
-            });
-        };
-        return match analysis::run_diff(
-            options,
-            package,
-            selection,
-            &applied.ignored_packages,
-            &options.ignored_paths,
-            &applied.suppressions,
-            color,
-        )
-        .await
-        {
-            Ok((reports, rendered)) => {
-                if let Err(error) = write_report(options.output.as_deref(), &rendered) {
-                    report_write_error(options.output.as_deref(), &error);
-                    return ExitCode::from(3);
-                }
-                ExitCode::from(diff::exit_status(&reports, threshold))
-            }
-            Err(error) => analysis_error(error),
-        };
-    }
-
-    match analysis::run(
+async fn execute_single_analysis(
+    options: &AnalysisOptions,
+    target: ScanTarget<'_>,
+    applied: &AppliedConfig,
+) -> chainsec::Result<RenderedAnalysis> {
+    let (threshold, color) = presentation(options);
+    let (report, output) = analysis::run(
         options,
         target,
         &applied.ignored_packages,
@@ -110,17 +108,59 @@ pub(in crate::app) async fn execute_scan(
         &applied.suppressions,
         color,
     )
-    .await
-    {
-        Ok((report, rendered)) => {
-            if let Err(error) = write_report(options.output.as_deref(), &rendered) {
-                report_write_error(options.output.as_deref(), &error);
-                return ExitCode::from(3);
-            }
+    .await?;
 
-            ExitCode::from(exit_status(&report, threshold))
+    Ok(RenderedAnalysis {
+        exit_status: exit_status(&report, threshold),
+        output,
+    })
+}
+
+async fn execute_diff_analysis(
+    options: &AnalysisOptions,
+    target: ScanTarget<'_>,
+    selection: RemoteVersionSelection,
+    applied: &AppliedConfig,
+) -> chainsec::Result<RenderedAnalysis> {
+    let ScanTarget::Remote(package) = target else {
+        return Err(chainsec::Error::InvalidConfiguration {
+            message: "remote version diffs are available only for remote packages".to_owned(),
+        });
+    };
+    let (threshold, color) = presentation(options);
+    let (reports, output) = analysis::run_diff(
+        options,
+        package,
+        selection,
+        &applied.ignored_packages,
+        &options.ignored_paths,
+        &applied.suppressions,
+        color,
+    )
+    .await?;
+
+    Ok(RenderedAnalysis {
+        exit_status: diff::exit_status(&reports, threshold),
+        output,
+    })
+}
+
+fn presentation(options: &AnalysisOptions) -> (Risk, bool) {
+    let stdout_is_terminal = io::stdout().is_terminal();
+    let threshold = Risk::from(options.fail_on);
+    let color = matches!(options.format, OutputFormat::Human)
+        && options.output.is_none()
+        && stdout_is_terminal;
+    (threshold, color)
+}
+
+fn emit_rendered(rendered: RenderedAnalysis, output_path: Option<&Path>) -> ExitCode {
+    match write_report(output_path, &rendered.output) {
+        Ok(()) => ExitCode::from(rendered.exit_status),
+        Err(error) => {
+            report_write_error(output_path, &error);
+            ExitCode::from(3)
         }
-        Err(error) => analysis_error(error),
     }
 }
 

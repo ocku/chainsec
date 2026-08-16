@@ -3,6 +3,19 @@
 All notable changes are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Before the `chainsec` tool reaches `1.0.0`, minor releases and minor report schema revisions may contain documented breaking changes. Each report schema version is an exact contract: consumers must check the full `schema_version` rather than assume versions with the same major number are compatible. Every schema revision requires explicit changelog and migration notes.
 
 
+## [0.5.3]
+
+### Added
+
+- `chainsec::parse_remote_package`, a public parser for `npm:`, `pypi:`, `jsr:`, and `github:` remote package specifiers. The parsing was previously private to the CLI's remote-host allowlisting and is now available at the crate root for library consumers.
+
+### Changed
+
+- `Engine::new` now takes a single `PolicySummary` instead of the individual `EngineLimits` and policy flags (`require_lockfile`, `offline`, `allowed_hosts`, `trust_local_input`, and `allow_insecure_http`). Engine runtime limits are derived from the summary so the policy recorded in a report and the limits enforced during traversal cannot drift apart. This is a breaking change for library consumers.
+- Reorganized the application layer around a new `src/app/core` module. Engine and fetcher orchestration (`Pipeline`/`PipelineExecution`) and suppression application now live there, while the `analysis`, `diff`, and command entry points adapt to it instead of constructing the engine and fetcher directly. CLI behavior is unchanged.
+- Replaced the README's summary architecture diagram with a descriptive functional map showing the end-to-end scan, fetch, traversal, finalization, and output flow, and documented `src/app/core` in the development architecture reference.
+
+
 ## [0.5.2]
 
 ### Changed

@@ -289,7 +289,7 @@ dependencies = [
 
 [[package]]
 name = "chainsec"
-version = "0.5.1"
+version = "0.5.3"
 dependencies = [
  "async-trait",
  "base64",

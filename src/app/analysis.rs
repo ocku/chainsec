@@ -1,20 +1,20 @@
 use std::time::Duration;
 
 use chainsec::{
-    Engine, EngineLimits, FetchPolicy, RemoteVersionSelection, SourceFetcher,
-    engine::effective_analysis_threads,
-    model::{Report, Risk, Suppression},
+    RemoteVersionSelection,
+    model::{Report, Risk},
     rules,
 };
-use futures::{StreamExt, TryStreamExt, stream};
-use tracing::info;
 
 use super::{
     cli::{AnalysisOptions, OutputFormat},
     config::SuppressionConfig,
-    diff::{self, VersionReport},
+    core::{
+        AnalysisInput, AnalysisRunOptions, ConfiguredSuppression, Pipeline, VersionReport,
+        apply_suppressions, configured_suppressions,
+    },
+    diff::{self},
     output::{human_report, sarif_report},
-    remote,
 };
 
 const GENERATED_FINDING_SELECTORS: [&str; 2] = [
@@ -22,8 +22,8 @@ const GENERATED_FINDING_SELECTORS: [&str; 2] = [
     "file:chainsec.detection.file.*",
 ];
 
-fn engine_limits(cli: &AnalysisOptions) -> EngineLimits {
-    EngineLimits {
+fn engine_limits(cli: &AnalysisOptions) -> chainsec::EngineLimits {
+    chainsec::EngineLimits {
         max_package_depth: cli.max_package_depth,
         max_packages: cli.max_packages,
         max_network_requests: cli.max_network_requests,
@@ -43,8 +43,8 @@ fn engine_limits(cli: &AnalysisOptions) -> EngineLimits {
     }
 }
 
-fn fetch_policy(cli: &AnalysisOptions) -> FetchPolicy {
-    FetchPolicy {
+fn fetch_policy(cli: &AnalysisOptions) -> chainsec::FetchPolicy {
+    chainsec::FetchPolicy {
         offline: !cli.online,
         allow_unlocked: cli.allow_unlocked,
         allowed_hosts: cli.allowed_hosts.clone(),
@@ -59,77 +59,6 @@ fn rule_selectors(cli: &AnalysisOptions) -> chainsec::Result<Vec<chainsec::rules
         .iter()
         .map(|selector| rules::parse_rule_selector(selector))
         .collect()
-}
-
-struct ConfiguredSuppression {
-    selector: chainsec::rules::RuleSelector,
-    package: Option<String>,
-    reason: String,
-}
-
-fn configured_suppressions(
-    suppressions: &[SuppressionConfig],
-) -> chainsec::Result<Vec<ConfiguredSuppression>> {
-    suppressions
-        .iter()
-        .map(|suppression| {
-            Ok(ConfiguredSuppression {
-                selector: rules::parse_rule_selector(&suppression.rule)?,
-                package: suppression.package.clone(),
-                reason: suppression.reason.clone(),
-            })
-        })
-        .collect()
-}
-
-fn package_without_integrity(package: &str) -> &str {
-    package
-        .split_once('#')
-        .map_or(package, |(identity, _)| identity)
-}
-
-fn suppression_package_matches(configured: &str, reported: &str) -> bool {
-    if configured == reported {
-        return true;
-    }
-    if configured == "root" || reported == "root" || configured.contains('#') {
-        return false;
-    }
-
-    configured == package_without_integrity(reported)
-}
-
-fn apply_suppressions(report: &mut Report, suppressions: &[ConfiguredSuppression]) {
-    for finding in &mut report.findings {
-        if let Some(suppression) = suppressions.iter().find(|suppression| {
-            suppression.selector.matches_finding(finding)
-                && suppression
-                    .package
-                    .as_deref()
-                    .is_none_or(|package| suppression_package_matches(package, &finding.package))
-        }) {
-            finding.suppressed = true;
-            finding.suppression = Some(Suppression {
-                reason: suppression.reason.clone(),
-            });
-        }
-    }
-
-    for capability in &mut report.capabilities {
-        for evidence in &mut capability.evidence {
-            if let Some(suppression) = suppressions.iter().find(|suppression| {
-                suppression.selector.matches_capability_evidence(evidence)
-                    && suppression.package.as_deref().is_none_or(|package| {
-                        suppression_package_matches(package, &evidence.package)
-                    })
-            }) {
-                evidence.suppressed = true;
-                evidence.suppression = Some(Suppression {
-                    reason: suppression.reason.clone(),
-                });
-            }
-        }
-    }
 }
 
 fn configured_rules(
@@ -166,77 +95,6 @@ fn configured_rules(
     }
 
     Ok(configured_rules)
-}
-
-struct AnalysisContext {
-    limits: EngineLimits,
-    fetcher: SourceFetcher,
-    rules: Vec<chainsec::model::Rule>,
-    ignored_rule_selectors: Vec<chainsec::rules::RuleSelector>,
-    suppressions: Vec<ConfiguredSuppression>,
-}
-
-impl AnalysisContext {
-    fn new(
-        options: &AnalysisOptions,
-        suppressions: &[SuppressionConfig],
-    ) -> chainsec::Result<Self> {
-        let mut ignored_rule_selectors = rule_selectors(options)?;
-        let rules = configured_rules(options, &ignored_rule_selectors)?;
-        let configured_suppressions = configured_suppressions(suppressions)?;
-        if options.no_default_rules {
-            ignored_rule_selectors.extend(
-                GENERATED_FINDING_SELECTORS
-                    .into_iter()
-                    .map(rules::parse_rule_selector)
-                    .collect::<chainsec::Result<Vec<_>>>()?,
-            );
-        }
-
-        let limits = engine_limits(options);
-        let fetcher = SourceFetcher::new(
-            options
-                .cache
-                .clone()
-                .expect("cache path is resolved before analysis"),
-            fetch_policy(options),
-            limits.clone(),
-        )?;
-
-        Ok(Self {
-            limits,
-            fetcher,
-            rules,
-            ignored_rule_selectors,
-            suppressions: configured_suppressions,
-        })
-    }
-
-    fn engine<'a>(
-        &'a self,
-        options: &AnalysisOptions,
-        ignored_packages: &[String],
-        ignored_paths: &[String],
-    ) -> Engine<'a> {
-        Engine::new(
-            &self.rules,
-            &self.fetcher,
-            self.limits.clone(),
-            !options.allow_unlocked,
-            !options.online,
-            options.allowed_hosts.clone(),
-            options.trust_local_input,
-            options.allow_insecure_http,
-        )
-        .with_max_analysis_threads(options.threads)
-        .with_ignored_rule_selectors(self.ignored_rule_selectors.iter().cloned())
-        .with_ignored_packages(ignored_packages.iter().cloned())
-        .with_ignored_root_paths(ignored_paths.iter().cloned())
-    }
-
-    fn suppress(&self, report: &mut Report) {
-        apply_suppressions(report, &self.suppressions);
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -279,54 +137,32 @@ pub(super) async fn run_diff(
     color: bool,
 ) -> chainsec::Result<(Vec<VersionReport>, String)> {
     let format = diff::Format::try_from(cli.format)?;
-    let analysis = AnalysisContext::new(cli, suppressions)?;
-    let dependencies = analysis
-        .fetcher
-        .resolve_remote_version_selection(remote::dependency(package)?, selection)
-        .await?;
-    let downloads = stream::iter(dependencies).map(|dependency| async {
-        let version = dependency
-            .resolved_version
-            .clone()
-            .expect("historical remote roots are resolved");
-        info!(package, version, "downloading version for batch analysis");
-        let fetched = analysis.fetcher.fetch_remote_root(dependency).await?;
-        Ok::<_, chainsec::Error>((version, fetched))
-    });
-    let downloaded = downloads
-        .buffered(effective_analysis_threads(cli.threads))
-        .try_collect::<Vec<_>>()
-        .await?;
-    let (versions, fetched): (Vec<_>, Vec<_>) = downloaded.into_iter().unzip();
-    let engine = analysis.engine(cli, ignored_packages, ignored_paths);
-    let analyzed = engine.analyze_fetched_roots(fetched).await?;
-    let mut reports = Vec::with_capacity(analyzed.len());
+    let (pipeline, suppressions, ignored_rule_selectors) = build_pipeline(cli, suppressions)?;
+    let options = run_options(
+        cli,
+        &ignored_rule_selectors,
+        ignored_packages,
+        ignored_paths,
+    );
 
-    for (version, mut report) in versions.into_iter().zip(analyzed) {
-        analysis.suppress(&mut report);
-        info!(
-            package,
-            version,
-            packages = report.statistics.packages,
-            files = report.statistics.source_files,
-            bytes = report.statistics.source_bytes,
-            findings = report.statistics.findings,
-            capabilities = report.capabilities.len(),
-            issues = report.issues.len(),
-            "version analysis complete"
-        );
-        reports.push(VersionReport { version, report });
+    let mut result = pipeline
+        .execute()
+        .analyze_diff(package, selection, &options)
+        .await?;
+
+    for version_report in &mut result.versions {
+        apply_suppressions(&mut version_report.report, &suppressions);
     }
 
     let rendered = diff::render(
         package,
-        &reports,
+        &result.versions,
         format,
         cli.fail_on.into(),
         cli.verbose,
         color,
     )?;
-    Ok((reports, rendered))
+    Ok((result.versions, rendered))
 }
 
 pub(super) async fn run(
@@ -337,36 +173,28 @@ pub(super) async fn run(
     suppressions: &[SuppressionConfig],
     color: bool,
 ) -> chainsec::Result<(Report, String)> {
-    let analysis = AnalysisContext::new(cli, suppressions)?;
-
-    match target {
-        ScanTarget::Local(path) => info!(path = %path.display(), "starting analysis"),
-        ScanTarget::Remote(package) => info!(package, "starting analysis"),
-    }
-    let engine = analysis.engine(cli, ignored_packages, ignored_paths);
-    let mut report = match target {
-        ScanTarget::Remote(package) => {
-            let fetched = analysis
-                .fetcher
-                .fetch_remote_root(remote::dependency(package)?)
-                .await?;
-            engine.analyze_fetched_root(fetched).await?
-        }
-        ScanTarget::Local(path) => engine.analyze(path).await?,
-    };
-    analysis.suppress(&mut report);
-    info!(
-        packages = report.statistics.packages,
-        files = report.statistics.source_files,
-        bytes = report.statistics.source_bytes,
-        findings = report.statistics.findings,
-        issues = report.issues.len(),
-        "analysis complete"
+    let (pipeline, config_suppressions, ignored_rule_selectors) =
+        build_pipeline(cli, suppressions)?;
+    let options = run_options(
+        cli,
+        &ignored_rule_selectors,
+        ignored_packages,
+        ignored_paths,
     );
+
+    let input = match target {
+        ScanTarget::Local(path) => AnalysisInput::Local(path),
+        ScanTarget::Remote(package) => AnalysisInput::Remote(package),
+    };
+
+    let result = pipeline.execute().analyze(input, &options).await?;
+    let mut report = result.report;
+    apply_suppressions(&mut report, &config_suppressions);
+
     let rendered = render_report(
         cli.format,
         &report,
-        &analysis.rules,
+        &result.rules,
         cli.fail_on.into(),
         cli.verbose,
         color,
@@ -375,32 +203,50 @@ pub(super) async fn run(
     Ok((report, rendered))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::suppression_package_matches;
+fn build_pipeline(
+    cli: &AnalysisOptions,
+    suppressions: &[SuppressionConfig],
+) -> chainsec::Result<(
+    Pipeline,
+    Vec<ConfiguredSuppression>,
+    Vec<chainsec::rules::RuleSelector>,
+)> {
+    let mut ignored_rule_selectors = rule_selectors(cli)?;
+    let rules = configured_rules(cli, &ignored_rule_selectors)?;
+    let configured_suppressions = configured_suppressions(suppressions)?;
+    if cli.no_default_rules {
+        ignored_rule_selectors.extend(
+            GENERATED_FINDING_SELECTORS
+                .into_iter()
+                .map(rules::parse_rule_selector)
+                .collect::<chainsec::Result<Vec<_>>>()?,
+        );
+    }
 
-    #[test]
-    fn suppression_package_matching_uses_digest_free_canonical_ids() {
-        assert!(suppression_package_matches(
-            "npm:example@1.2.3",
-            "npm:example@1.2.3#sha512-abcdef"
-        ));
-        assert!(suppression_package_matches(
-            "npm:example@1.2.3#sha512-configured",
-            "npm:example@1.2.3#sha512-configured"
-        ));
-        assert!(!suppression_package_matches(
-            "npm:example@1.2.3#sha512-configured",
-            "npm:example@1.2.3#sha512-reported"
-        ));
-        assert!(suppression_package_matches("root", "root"));
-        assert!(!suppression_package_matches(
-            "root",
-            "npm:root@1.0.0#sha512-abcdef"
-        ));
-        assert!(!suppression_package_matches(
-            "npm:example@1.2.3",
-            "npm:example@1.2.30#sha512-abcdef"
-        ));
+    let pipeline = Pipeline::builder()
+        .limits(engine_limits(cli))
+        .fetch_policy(fetch_policy(cli))
+        .cache(
+            cli.cache
+                .clone()
+                .expect("cache path is resolved before analysis"),
+        )
+        .rules(rules)
+        .build()?;
+
+    Ok((pipeline, configured_suppressions, ignored_rule_selectors))
+}
+
+fn run_options<'a>(
+    cli: &'a AnalysisOptions,
+    ignored_rule_selectors: &'a [chainsec::rules::RuleSelector],
+    ignored_packages: &'a [String],
+    ignored_paths: &'a [String],
+) -> AnalysisRunOptions<'a> {
+    AnalysisRunOptions {
+        threads: cli.threads,
+        ignored_rule_selectors: ignored_rule_selectors.to_vec(),
+        ignored_packages,
+        ignored_root_paths: ignored_paths,
     }
 }

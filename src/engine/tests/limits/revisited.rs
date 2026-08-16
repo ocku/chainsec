@@ -12,12 +12,7 @@ async fn single_cycle_at_package_limit_still_acquires_new_package() {
     let report = Engine::new(
         &[],
         &fetcher,
-        exact_cycle_limit(),
-        true,
-        true,
-        vec![],
-        false,
-        false,
+        engine_policy(exact_cycle_limit(), true, true, vec![], false, false),
     )
     .analyze(root.path())
     .await
@@ -38,12 +33,7 @@ async fn batch_cycle_at_package_limit_still_acquires_new_package() {
     let reports = Engine::new(
         &[],
         &fetcher,
-        exact_cycle_limit(),
-        true,
-        true,
-        vec![],
-        false,
-        false,
+        engine_policy(exact_cycle_limit(), true, true, vec![], false, false),
     )
     .analyze_fetched_roots(vec![fetched_fixture_root(
         root.path().to_owned(),

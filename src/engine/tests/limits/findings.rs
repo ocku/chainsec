@@ -14,15 +14,17 @@ async fn install_hooks_do_not_lose_slots_to_finalized_capabilities() {
     let report = Engine::new(
         &rules,
         &NeverFetch,
-        EngineLimits {
-            max_findings: 2,
-            ..EngineLimits::default()
-        },
-        false,
-        false,
-        vec![],
-        false,
-        false,
+        engine_policy(
+            EngineLimits {
+                max_findings: 2,
+                ..EngineLimits::default()
+            },
+            false,
+            false,
+            vec![],
+            false,
+            false,
+        ),
     )
     .analyze(root.path())
     .await
@@ -45,15 +47,17 @@ async fn batch_install_hooks_do_not_lose_slots_to_finalized_capabilities() {
     let reports = Engine::new(
         &rules,
         &NeverFetch,
-        EngineLimits {
-            max_findings: 2,
-            ..EngineLimits::default()
-        },
-        false,
-        false,
-        vec![],
-        false,
-        false,
+        engine_policy(
+            EngineLimits {
+                max_findings: 2,
+                ..EngineLimits::default()
+            },
+            false,
+            false,
+            vec![],
+            false,
+            false,
+        ),
     )
     .analyze_fetched_roots(vec![fetched_fixture_root(
         root.path().to_owned(),
@@ -84,15 +88,17 @@ async fn critical_source_finding_takes_priority_over_install_hook_at_limit() {
     let report = Engine::new(
         &rules,
         &NeverFetch,
-        EngineLimits {
-            max_findings: 1,
-            ..EngineLimits::default()
-        },
-        false,
-        false,
-        vec![],
-        false,
-        false,
+        engine_policy(
+            EngineLimits {
+                max_findings: 1,
+                ..EngineLimits::default()
+            },
+            false,
+            false,
+            vec![],
+            false,
+            false,
+        ),
     )
     .analyze(root.path())
     .await
@@ -126,15 +132,17 @@ async fn finding_limit_preserves_the_bounded_partial_scan() {
     let report = Engine::new(
         &rules,
         &NeverFetch,
-        EngineLimits {
-            max_findings: 1,
-            ..EngineLimits::default()
-        },
-        false,
-        false,
-        vec![],
-        false,
-        false,
+        engine_policy(
+            EngineLimits {
+                max_findings: 1,
+                ..EngineLimits::default()
+            },
+            false,
+            false,
+            vec![],
+            false,
+            false,
+        ),
     )
     .analyze(root.path())
     .await

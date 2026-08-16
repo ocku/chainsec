@@ -63,12 +63,7 @@ dependencies = [
     let report = Engine::new(
         &[],
         &fetcher,
-        EngineLimits::default(),
-        true,
-        true,
-        vec![],
-        false,
-        false,
+        engine_policy(EngineLimits::default(), true, true, vec![], false, false),
     )
     .analyze(root.path())
     .await
@@ -132,12 +127,7 @@ async fn root_npm_lock_resolves_hoisted_transitive_dependencies() {
     let report = Engine::new(
         &[],
         &fetcher,
-        EngineLimits::default(),
-        true,
-        true,
-        vec![],
-        false,
-        false,
+        engine_policy(EngineLimits::default(), true, true, vec![], false, false),
     )
     .analyze(root.path())
     .await
@@ -223,12 +213,7 @@ async fn shared_npm_artifact_preserves_distinct_lock_path_contexts() {
     let report = Engine::new(
         &[],
         &fetcher,
-        EngineLimits::default(),
-        true,
-        true,
-        vec![],
-        false,
-        false,
+        engine_policy(EngineLimits::default(), true, true, vec![], false, false),
     )
     .analyze(root.path())
     .await
@@ -352,12 +337,7 @@ dependencies = ["child-a", "child-b"]
     let report = Engine::new(
         &[],
         &fetcher,
-        EngineLimits::default(),
-        true,
-        true,
-        vec![],
-        false,
-        false,
+        engine_policy(EngineLimits::default(), true, true, vec![], false, false),
     )
     .analyze(root.path())
     .await

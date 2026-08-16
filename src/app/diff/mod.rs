@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+pub(super) use super::core::VersionReport;
 use chainsec::model::{AnalysisPoint, OperationalIssue, Report, Risk};
 use serde::Serialize;
 
@@ -8,11 +9,6 @@ use super::{cli::OutputFormat, output::issue_exit_status};
 mod human;
 
 const DIFF_SCHEMA_VERSION: &str = "1.0.0";
-
-pub(super) struct VersionReport {
-    pub(super) version: String,
-    pub(super) report: Report,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct DetectionKey {
