@@ -178,7 +178,7 @@ Without a project `chainsec.toml`, ChainSec uses a centralized cache (`$XDG_CACH
 
 ## GitHub Action
 
-`chainsec` ships a GitHub Action that diffs the latest releases of a remote package against your `chainsec.toml` policy:
+`chainsec` ships a GitHub Action that scans your current project against your `chainsec.toml` policy:
 
 ```yaml
 name: Dependency audit
@@ -195,16 +195,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ocku/chainsec@main
         with:
-          package: npm:express
-          last: 2
           max-package-depth: 2
           allow-host: "registry.npmjs.org"
 ```
 
 | Input | Required | Default | Description |
 | --- | --- | --- | --- |
-| `package` | yes | — | Package selector (`npm:express`, `pypi:urllib3`, `jsr:@std/fs`) |
-| `last` | no | `2` | Number of latest releases to compare (minimum 2) |
 | `max-package-depth` | no | `2` | Maximum dependency traversal depth |
 | `fail-on` | no | `high` | Finding threshold (`low`, `medium`, `high`, `critical`) |
 | `format` | no | `human` | Report format (`human`, `json`) |
@@ -220,7 +216,7 @@ The action picks up `chainsec.toml` from `config-dir` and merges its `allowed_ho
 A human report summarizes the findings that meet the failure threshold and lists unique capabilities and alerts. Use `--verbose` to include findings below `--fail-on`.
 
 ```text
-chainsec 0.5.3 — 3 package(s), 42 source file(s), 81920 source byte(s), 2 finding(s), 2 capability type(s), 0 issue(s)
+chainsec 0.6.0 — 3 package(s), 42 source file(s), 81920 source byte(s), 2 finding(s), 2 capability type(s), 0 issue(s)
 High python:chainsec.py.detection.dynamic-code-execution:ArbitraryCodeExecution [root] src/main.py:12:5 — eval(user_input)
 
 Summary
