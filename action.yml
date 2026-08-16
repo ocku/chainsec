@@ -1,20 +1,11 @@
 name: chainsec — dependency chain supply audit
-description: Audit dependency chain supply with chainsec remote version diffs
+description: Audit the current project dependency chain with chainsec
 author: ocku
 branding:
   icon: shield
   color: orange
 
 inputs:
-  package:
-    description: >
-      Package selector in source:name format (npm:express, pypi:urllib3, jsr:@std/fs).
-      Required.
-    required: true
-  last:
-    description: "Number of latest releases to compare (minimum 2)"
-    required: false
-    default: "2"
   max-package-depth:
     description: "Maximum dependency traversal depth"
     required: false
@@ -71,8 +62,8 @@ runs:
         done
       fi
 
-      chainsec remote diff "${{ inputs.package }}" \
-        --last "${{ inputs.last }}" \
+      chainsec scan . \
+        --online \
         --max-package-depth "${{ inputs.max-package-depth }}" \
         --fail-on "${{ inputs.fail-on }}" \
         --format "${{ inputs.format }}" \
