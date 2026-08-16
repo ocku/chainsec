@@ -5,11 +5,15 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [0.5.3]
 
+### Added
+
+- `chainsec::parse_remote_package`, a public parser for `npm:`, `pypi:`, `jsr:`, and `github:` remote package specifiers. The parsing was previously private to the CLI's remote-host allowlisting and is now available at the crate root for library consumers.
+
 ### Changed
 
-- Reorganized the application layer around an explicit `src/app/core` module. `src/app/pipeline.rs` became `src/app/core/orchestration.rs`, and suppression parsing/matching moved into `src/app/core/suppressions.rs`, so presentation modules no longer coordinate the engine and fetcher directly.
-- Replaced the README's summary architecture diagram with a descriptive functional map showing the end-to-end scan, fetch, traversal, finalization, and output flow.
-- Documented `src/app/core` in the development architecture reference.
+- `Engine::new` now takes a single `PolicySummary` instead of the individual `EngineLimits` and policy flags (`require_lockfile`, `offline`, `allowed_hosts`, `trust_local_input`, and `allow_insecure_http`). Engine runtime limits are derived from the summary so the policy recorded in a report and the limits enforced during traversal cannot drift apart. This is a breaking change for library consumers.
+- Reorganized the application layer around a new `src/app/core` module. Engine and fetcher orchestration (`Pipeline`/`PipelineExecution`) and suppression application now live there, while the `analysis`, `diff`, and command entry points adapt to it instead of constructing the engine and fetcher directly. CLI behavior is unchanged.
+- Replaced the README's summary architecture diagram with a descriptive functional map showing the end-to-end scan, fetch, traversal, finalization, and output flow, and documented `src/app/core` in the development architecture reference.
 
 
 ## [0.5.2]
