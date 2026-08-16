@@ -1,6 +1,6 @@
 [package]
 name = "chainsec"
-version = "0.5.3"
+version = "0.6.0"
 description = "Dependency chain supply auditing tool for Python, JavaScript, and TypeScript"
 license-file = "LICENSE"
 edition = "2024"

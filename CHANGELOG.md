@@ -3,6 +3,13 @@
 All notable changes are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Before the `chainsec` tool reaches `1.0.0`, minor releases and minor report schema revisions may contain documented breaking changes. Each report schema version is an exact contract: consumers must check the full `schema_version` rather than assume versions with the same major number are compatible. Every schema revision requires explicit changelog and migration notes.
 
 
+## [0.6.0]
+
+### Changed
+
+- Repositioned the GitHub Action to scan the current project (`chainsec scan .`) instead of running remote version diffs (`chainsec remote diff`). The `package` and `last` inputs were removed in favor of project configuration; the action now reads `chainsec.toml` from `config-dir` and scans the checkout.
+
+
 ## [0.5.3]
 
 ### Added

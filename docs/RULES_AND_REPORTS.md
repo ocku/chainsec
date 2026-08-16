@@ -19,7 +19,7 @@ When `--output` is supplied, `chainsec` writes the analysis directly to the spec
 Human output is the default report format. It lists unsuppressed findings that meet `--fail-on`, any operational issues, and a final summary of unique capabilities and unique alerts. Capability matching locations and source snippets are intentionally omitted from human output.
 
 ```text
-chainsec 0.5.2 — 3 package(s), 42 source file(s), 81920 source byte(s), 1 finding(s), 2 capability type(s), 0 issue(s)
+chainsec 0.6.0 — 3 package(s), 42 source file(s), 81920 source byte(s), 1 finding(s), 2 capability type(s), 0 issue(s)
 High python:chainsec.py.detection.dynamic-code-execution:ArbitraryCodeExecution [root] src/main.py:12:5 — eval(user_input)
 
 Summary
@@ -38,7 +38,7 @@ A JSON report is a single object with `schema_version`, `tool_version`, `root`, 
 ```json
 {
   "schema_version": "1.2.0",
-  "tool_version": "0.5.2",
+  "tool_version": "0.6.0",
   "root": "/path/to/project",
   "policy": { "require_lockfile": true, "offline": true, "trust_local_input": false, "allowed_hosts": [], "limits": { } },
   "packages": [
